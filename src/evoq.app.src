@@ -1,0 +1,32 @@
+{application, evoq, [
+    {description, "Erlang CQRS/Event Sourcing framework built on reckon-db"},
+    {vsn, "0.3.0"},
+    {registered, []},
+    {mod, {evoq_app, []}},
+    {applications, [
+        kernel,
+        stdlib,
+        crypto,
+        reckon_gater,
+        telemetry
+    ]},
+    {env, [
+        {store_id, default_store},
+        {aggregate_defaults, #{
+            idle_timeout => 1800000,
+            hibernate_after => 60000,
+            snapshot_every => 100
+        }},
+        {aggregate_partitions, 4},
+        {handler_defaults, #{
+            consistency => eventual,
+            start_from => origin
+        }},
+        {idempotency_ttl, 3600000}
+    ]},
+    {modules, []},
+    {licenses, ["Apache-2.0"]},
+    {links, [
+        {"GitHub", "https://github.com/reckon-db-org/evoq"}
+    ]}
+]}.

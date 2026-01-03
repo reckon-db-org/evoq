@@ -1,0 +1,145 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 600">
+  <defs>
+    <marker id="arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#4b5563"/>
+    </marker>
+    <linearGradient id="commandGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" style="stop-color:#3b82f6;stop-opacity:1"/>
+      <stop offset="100%" style="stop-color:#1d4ed8;stop-opacity:1"/>
+    </linearGradient>
+    <linearGradient id="eventGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" style="stop-color:#10b981;stop-opacity:1"/>
+      <stop offset="100%" style="stop-color:#059669;stop-opacity:1"/>
+    </linearGradient>
+    <linearGradient id="storeGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" style="stop-color:#8b5cf6;stop-opacity:1"/>
+      <stop offset="100%" style="stop-color:#7c3aed;stop-opacity:1"/>
+    </linearGradient>
+    <linearGradient id="readGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" style="stop-color:#f59e0b;stop-opacity:1"/>
+      <stop offset="100%" style="stop-color:#d97706;stop-opacity:1"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Title -->
+  <text x="450" y="30" font-family="system-ui, sans-serif" font-size="20" font-weight="bold" text-anchor="middle" fill="#1f2937">evoq Architecture Overview</text>
+  <text x="450" y="50" font-family="system-ui, sans-serif" font-size="12" text-anchor="middle" fill="#6b7280">CQRS/Event Sourcing Framework for Erlang</text>
+
+  <!-- Command Side (Left) -->
+  <rect x="30" y="70" width="400" height="500" rx="10" fill="#eff6ff" stroke="#3b82f6" stroke-width="2"/>
+  <text x="230" y="95" font-family="system-ui, sans-serif" font-size="14" font-weight="bold" text-anchor="middle" fill="#1e40af">Command Side (Write)</text>
+
+  <!-- Client -->
+  <rect x="50" y="115" width="120" height="40" rx="5" fill="#e5e7eb" stroke="#6b7280" stroke-width="1.5"/>
+  <text x="110" y="140" font-family="system-ui, sans-serif" font-size="11" text-anchor="middle" fill="#374151">Client / API</text>
+
+  <!-- Command arrow -->
+  <line x1="110" y1="155" x2="110" y2="185" stroke="#4b5563" stroke-width="2" marker-end="url(#arrowhead)"/>
+  <text x="120" y="175" font-family="system-ui, sans-serif" font-size="9" fill="#6b7280">command</text>
+
+  <!-- Dispatcher -->
+  <rect x="50" y="190" width="360" height="50" rx="5" fill="url(#commandGrad)"/>
+  <text x="230" y="215" font-family="system-ui, sans-serif" font-size="12" font-weight="bold" text-anchor="middle" fill="white">evoq_dispatcher</text>
+  <text x="230" y="230" font-family="system-ui, sans-serif" font-size="9" text-anchor="middle" fill="#bfdbfe">Middleware Pipeline + Routing</text>
+
+  <!-- Middleware boxes -->
+  <rect x="60" y="250" width="80" height="30" rx="3" fill="#dbeafe" stroke="#3b82f6"/>
+  <text x="100" y="270" font-family="system-ui, sans-serif" font-size="9" text-anchor="middle" fill="#1e40af">Validation</text>
+
+  <rect x="150" y="250" width="80" height="30" rx="3" fill="#dbeafe" stroke="#3b82f6"/>
+  <text x="190" y="270" font-family="system-ui, sans-serif" font-size="9" text-anchor="middle" fill="#1e40af">Idempotency</text>
+
+  <rect x="240" y="250" width="80" height="30" rx="3" fill="#dbeafe" stroke="#3b82f6"/>
+  <text x="280" y="270" font-family="system-ui, sans-serif" font-size="9" text-anchor="middle" fill="#1e40af">Consistency</text>
+
+  <rect x="330" y="250" width="70" height="30" rx="3" fill="#dbeafe" stroke="#3b82f6"/>
+  <text x="365" y="270" font-family="system-ui, sans-serif" font-size="9" text-anchor="middle" fill="#1e40af">Custom...</text>
+
+  <!-- Arrow to aggregate -->
+  <line x1="230" y1="290" x2="230" y2="320" stroke="#4b5563" stroke-width="2" marker-end="url(#arrowhead)"/>
+
+  <!-- Aggregate -->
+  <rect x="130" y="325" width="200" height="70" rx="5" fill="url(#commandGrad)"/>
+  <text x="230" y="352" font-family="system-ui, sans-serif" font-size="12" font-weight="bold" text-anchor="middle" fill="white">evoq_aggregate</text>
+  <text x="230" y="368" font-family="system-ui, sans-serif" font-size="9" text-anchor="middle" fill="#bfdbfe">execute(State, Cmd) -> Events</text>
+  <text x="230" y="382" font-family="system-ui, sans-serif" font-size="9" text-anchor="middle" fill="#bfdbfe">apply(State, Event) -> NewState</text>
+
+  <!-- Arrow to event store -->
+  <line x1="230" y1="395" x2="230" y2="425" stroke="#4b5563" stroke-width="2" marker-end="url(#arrowhead)"/>
+  <text x="260" y="415" font-family="system-ui, sans-serif" font-size="9" fill="#6b7280">persist</text>
+
+  <!-- Event Store -->
+  <rect x="130" y="430" width="200" height="50" rx="5" fill="url(#storeGrad)"/>
+  <text x="230" y="455" font-family="system-ui, sans-serif" font-size="12" font-weight="bold" text-anchor="middle" fill="white">erl-esdb</text>
+  <text x="230" y="470" font-family="system-ui, sans-serif" font-size="9" text-anchor="middle" fill="#ddd6fe">Event Store (Khepri/Ra)</text>
+
+  <!-- Snapshot indicator -->
+  <rect x="340" y="350" width="60" height="30" rx="3" fill="#fef3c7" stroke="#f59e0b"/>
+  <text x="370" y="370" font-family="system-ui, sans-serif" font-size="8" text-anchor="middle" fill="#92400e">Snapshot</text>
+  <line x1="330" y1="360" x2="340" y2="365" stroke="#f59e0b" stroke-width="1.5"/>
+
+  <!-- Event Side (Right) -->
+  <rect x="470" y="70" width="400" height="500" rx="10" fill="#f0fdf4" stroke="#10b981" stroke-width="2"/>
+  <text x="670" y="95" font-family="system-ui, sans-serif" font-size="14" font-weight="bold" text-anchor="middle" fill="#166534">Event Side (React)</text>
+
+  <!-- Event Router -->
+  <rect x="490" y="115" width="360" height="50" rx="5" fill="url(#eventGrad)"/>
+  <text x="670" y="140" font-family="system-ui, sans-serif" font-size="12" font-weight="bold" text-anchor="middle" fill="white">evoq_event_router</text>
+  <text x="670" y="155" font-family="system-ui, sans-serif" font-size="9" text-anchor="middle" fill="#a7f3d0">Routes events by type to subscribers</text>
+
+  <!-- Arrow from store to router -->
+  <path d="M 330 455 L 420 455 L 420 140 L 490 140" fill="none" stroke="#4b5563" stroke-width="2" marker-end="url(#arrowhead)"/>
+  <text x="430" y="300" font-family="system-ui, sans-serif" font-size="9" fill="#6b7280" transform="rotate(-90, 430, 300)">published events</text>
+
+  <!-- Event Handlers -->
+  <rect x="500" y="185" width="150" height="80" rx="5" fill="url(#eventGrad)"/>
+  <text x="575" y="210" font-family="system-ui, sans-serif" font-size="11" font-weight="bold" text-anchor="middle" fill="white">Event Handlers</text>
+  <text x="575" y="228" font-family="system-ui, sans-serif" font-size="8" text-anchor="middle" fill="#a7f3d0">interested_in/0</text>
+  <text x="575" y="242" font-family="system-ui, sans-serif" font-size="8" text-anchor="middle" fill="#a7f3d0">handle_event/4</text>
+  <text x="575" y="256" font-family="system-ui, sans-serif" font-size="8" text-anchor="middle" fill="#a7f3d0">Retry + Dead Letter</text>
+
+  <!-- Process Managers -->
+  <rect x="690" y="185" width="150" height="80" rx="5" fill="url(#eventGrad)"/>
+  <text x="765" y="210" font-family="system-ui, sans-serif" font-size="11" font-weight="bold" text-anchor="middle" fill="white">Process Managers</text>
+  <text x="765" y="228" font-family="system-ui, sans-serif" font-size="8" text-anchor="middle" fill="#a7f3d0">correlate/2</text>
+  <text x="765" y="242" font-family="system-ui, sans-serif" font-size="8" text-anchor="middle" fill="#a7f3d0">handle/3 -> Commands</text>
+  <text x="765" y="256" font-family="system-ui, sans-serif" font-size="8" text-anchor="middle" fill="#a7f3d0">Compensation</text>
+
+  <!-- Arrow from PM to dispatcher -->
+  <path d="M 765 265 L 765 530 L 230 530 L 230 240" fill="none" stroke="#3b82f6" stroke-width="1.5" stroke-dasharray="5,3" marker-end="url(#arrowhead)"/>
+  <text x="500" y="545" font-family="system-ui, sans-serif" font-size="9" fill="#3b82f6">dispatch commands</text>
+
+  <!-- Projections -->
+  <rect x="500" y="295" width="150" height="80" rx="5" fill="url(#eventGrad)"/>
+  <text x="575" y="320" font-family="system-ui, sans-serif" font-size="11" font-weight="bold" text-anchor="middle" fill="white">Projections</text>
+  <text x="575" y="338" font-family="system-ui, sans-serif" font-size="8" text-anchor="middle" fill="#a7f3d0">project/4</text>
+  <text x="575" y="352" font-family="system-ui, sans-serif" font-size="8" text-anchor="middle" fill="#a7f3d0">Checkpointing</text>
+  <text x="575" y="366" font-family="system-ui, sans-serif" font-size="8" text-anchor="middle" fill="#a7f3d0">Build Read Models</text>
+
+  <!-- Read Models -->
+  <rect x="500" y="405" width="340" height="55" rx="5" fill="url(#readGrad)"/>
+  <text x="670" y="430" font-family="system-ui, sans-serif" font-size="12" font-weight="bold" text-anchor="middle" fill="white">Read Models</text>
+  <text x="670" y="448" font-family="system-ui, sans-serif" font-size="9" text-anchor="middle" fill="#fef3c7">ETS / PostgreSQL / Any Storage</text>
+
+  <!-- Arrow from projections to read models -->
+  <line x1="575" y1="375" x2="575" y2="405" stroke="#4b5563" stroke-width="2" marker-end="url(#arrowhead)"/>
+
+  <!-- Query arrow -->
+  <rect x="730" y="480" width="100" height="35" rx="5" fill="#e5e7eb" stroke="#6b7280" stroke-width="1.5"/>
+  <text x="780" y="502" font-family="system-ui, sans-serif" font-size="10" text-anchor="middle" fill="#374151">Query API</text>
+  <line x1="780" y1="460" x2="780" y2="480" stroke="#4b5563" stroke-width="2" marker-end="url(#arrowhead)"/>
+  <text x="790" y="473" font-family="system-ui, sans-serif" font-size="8" fill="#6b7280">fast reads</text>
+
+  <!-- Arrows from router -->
+  <line x1="575" y1="165" x2="575" y2="185" stroke="#4b5563" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+  <line x1="765" y1="165" x2="765" y2="185" stroke="#4b5563" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+  <line x1="575" y1="275" x2="575" y2="295" stroke="#4b5563" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+
+  <!-- Legend -->
+  <rect x="690" y="300" width="140" height="70" rx="3" fill="white" stroke="#d1d5db"/>
+  <text x="760" y="318" font-family="system-ui, sans-serif" font-size="9" font-weight="bold" text-anchor="middle" fill="#374151">Legend</text>
+  <line x1="710" y1="328" x2="740" y2="328" stroke="#4b5563" stroke-width="2" marker-end="url(#arrowhead)"/>
+  <text x="748" y="332" font-family="system-ui, sans-serif" font-size="8" fill="#6b7280">Data flow</text>
+  <line x1="710" y1="348" x2="740" y2="348" stroke="#3b82f6" stroke-width="1.5" stroke-dasharray="5,3"/>
+  <text x="748" y="352" font-family="system-ui, sans-serif" font-size="8" fill="#6b7280">Command</text>
+</svg>

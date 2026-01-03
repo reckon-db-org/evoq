@@ -1,0 +1,98 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 500">
+  <defs>
+    <marker id="arrowGreen" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#10b981"/>
+    </marker>
+    <marker id="arrowGray" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#6b7280"/>
+    </marker>
+    <linearGradient id="routerGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" style="stop-color:#10b981;stop-opacity:1"/>
+      <stop offset="100%" style="stop-color:#059669;stop-opacity:1"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Title -->
+  <text x="400" y="30" font-family="system-ui, sans-serif" font-size="20" font-weight="bold" text-anchor="middle" fill="#1f2937">Event Routing by Type</text>
+  <text x="400" y="50" font-family="system-ui, sans-serif" font-size="12" text-anchor="middle" fill="#6b7280">Subscribe to event types, not streams - scales to millions of aggregates</text>
+
+  <!-- Event Store -->
+  <rect x="50" y="100" width="150" height="80" rx="5" fill="#8b5cf6" stroke="#7c3aed" stroke-width="2"/>
+  <text x="125" y="135" font-family="system-ui, sans-serif" font-size="12" font-weight="bold" text-anchor="middle" fill="white">erl-esdb</text>
+  <text x="125" y="155" font-family="system-ui, sans-serif" font-size="9" text-anchor="middle" fill="#ddd6fe">Event Store</text>
+
+  <!-- Events coming out -->
+  <rect x="70" y="200" width="110" height="22" rx="3" fill="#dcfce7" stroke="#10b981"/>
+  <text x="125" y="215" font-family="system-ui, sans-serif" font-size="8" text-anchor="middle" fill="#166534">OrderPlaced</text>
+
+  <rect x="70" y="230" width="110" height="22" rx="3" fill="#dcfce7" stroke="#10b981"/>
+  <text x="125" y="245" font-family="system-ui, sans-serif" font-size="8" text-anchor="middle" fill="#166534">PaymentReceived</text>
+
+  <rect x="70" y="260" width="110" height="22" rx="3" fill="#dcfce7" stroke="#10b981"/>
+  <text x="125" y="275" font-family="system-ui, sans-serif" font-size="8" text-anchor="middle" fill="#166534">ItemShipped</text>
+
+  <rect x="70" y="290" width="110" height="22" rx="3" fill="#dcfce7" stroke="#10b981"/>
+  <text x="125" y="305" font-family="system-ui, sans-serif" font-size="8" text-anchor="middle" fill="#166534">OrderCancelled</text>
+
+  <line x1="125" y1="180" x2="125" y2="200" stroke="#10b981" stroke-width="2" marker-end="url(#arrowGreen)"/>
+
+  <!-- Event Type Registry -->
+  <rect x="250" y="150" width="180" height="200" rx="5" fill="url(#routerGrad)"/>
+  <text x="340" y="180" font-family="system-ui, sans-serif" font-size="12" font-weight="bold" text-anchor="middle" fill="white">evoq_event_router</text>
+  <text x="340" y="200" font-family="system-ui, sans-serif" font-size="9" text-anchor="middle" fill="#a7f3d0">Event Type Registry</text>
+
+  <!-- Registry entries -->
+  <rect x="265" y="215" width="150" height="20" rx="2" fill="white" fill-opacity="0.2"/>
+  <text x="340" y="229" font-family="system-ui, sans-serif" font-size="8" text-anchor="middle" fill="white">OrderPlaced -> [H1, PM1]</text>
+
+  <rect x="265" y="240" width="150" height="20" rx="2" fill="white" fill-opacity="0.2"/>
+  <text x="340" y="254" font-family="system-ui, sans-serif" font-size="8" text-anchor="middle" fill="white">PaymentReceived -> [H1, PM1]</text>
+
+  <rect x="265" y="265" width="150" height="20" rx="2" fill="white" fill-opacity="0.2"/>
+  <text x="340" y="279" font-family="system-ui, sans-serif" font-size="8" text-anchor="middle" fill="white">ItemShipped -> [H2, PM1]</text>
+
+  <rect x="265" y="290" width="150" height="20" rx="2" fill="white" fill-opacity="0.2"/>
+  <text x="340" y="304" font-family="system-ui, sans-serif" font-size="8" text-anchor="middle" fill="white">OrderCancelled -> [H3]</text>
+
+  <line x1="180" y1="250" x2="250" y2="250" stroke="#10b981" stroke-width="2" marker-end="url(#arrowGreen)"/>
+
+  <!-- Handlers on right -->
+  <rect x="500" y="100" width="250" height="320" rx="10" fill="#f0fdf4" stroke="#10b981" stroke-width="1.5"/>
+  <text x="625" y="125" font-family="system-ui, sans-serif" font-size="11" font-weight="bold" text-anchor="middle" fill="#166534">Subscribers</text>
+
+  <!-- Handler 1 -->
+  <rect x="520" y="145" width="210" height="60" rx="5" fill="white" stroke="#10b981"/>
+  <text x="625" y="168" font-family="system-ui, sans-serif" font-size="10" font-weight="bold" text-anchor="middle" fill="#166534">email_notification_handler (H1)</text>
+  <text x="625" y="185" font-family="system-ui, sans-serif" font-size="8" text-anchor="middle" fill="#6b7280">interested_in: OrderPlaced, PaymentReceived</text>
+  <text x="625" y="198" font-family="system-ui, sans-serif" font-size="8" text-anchor="middle" fill="#6b7280">Send confirmation emails</text>
+
+  <!-- Handler 2 -->
+  <rect x="520" y="215" width="210" height="60" rx="5" fill="white" stroke="#10b981"/>
+  <text x="625" y="238" font-family="system-ui, sans-serif" font-size="10" font-weight="bold" text-anchor="middle" fill="#166534">shipping_integration_handler (H2)</text>
+  <text x="625" y="255" font-family="system-ui, sans-serif" font-size="8" text-anchor="middle" fill="#6b7280">interested_in: ItemShipped</text>
+  <text x="625" y="268" font-family="system-ui, sans-serif" font-size="8" text-anchor="middle" fill="#6b7280">Update shipping provider</text>
+
+  <!-- Handler 3 -->
+  <rect x="520" y="285" width="210" height="60" rx="5" fill="white" stroke="#10b981"/>
+  <text x="625" y="308" font-family="system-ui, sans-serif" font-size="10" font-weight="bold" text-anchor="middle" fill="#166534">refund_handler (H3)</text>
+  <text x="625" y="325" font-family="system-ui, sans-serif" font-size="8" text-anchor="middle" fill="#6b7280">interested_in: OrderCancelled</text>
+  <text x="625" y="338" font-family="system-ui, sans-serif" font-size="8" text-anchor="middle" fill="#6b7280">Process refunds</text>
+
+  <!-- Process Manager -->
+  <rect x="520" y="355" width="210" height="55" rx="5" fill="#dbeafe" stroke="#3b82f6"/>
+  <text x="625" y="378" font-family="system-ui, sans-serif" font-size="10" font-weight="bold" text-anchor="middle" fill="#1e40af">order_fulfillment_pm (PM1)</text>
+  <text x="625" y="395" font-family="system-ui, sans-serif" font-size="8" text-anchor="middle" fill="#6b7280">Orchestrates order lifecycle</text>
+
+  <!-- Routing arrows -->
+  <path d="M 430 225 Q 470 175 520 175" fill="none" stroke="#10b981" stroke-width="1.5" marker-end="url(#arrowGreen)"/>
+  <path d="M 430 245 L 520 245" fill="none" stroke="#10b981" stroke-width="1.5" marker-end="url(#arrowGreen)"/>
+  <path d="M 430 275 Q 470 315 520 315" fill="none" stroke="#10b981" stroke-width="1.5" marker-end="url(#arrowGreen)"/>
+  <path d="M 430 300 Q 470 380 520 380" fill="none" stroke="#3b82f6" stroke-width="1.5" stroke-dasharray="4,2"/>
+
+  <!-- Key insight box -->
+  <rect x="50" y="400" width="700" height="80" rx="10" fill="#fef3c7" stroke="#f59e0b" stroke-width="1.5"/>
+  <text x="70" y="425" font-family="system-ui, sans-serif" font-size="11" font-weight="bold" fill="#92400e">Why Event Type Subscriptions?</text>
+  <text x="70" y="445" font-family="system-ui, sans-serif" font-size="9" fill="#78350f">Stream-based: 1M orders = 1M subscriptions = memory explosion</text>
+  <text x="70" y="462" font-family="system-ui, sans-serif" font-size="9" fill="#78350f">Type-based: 1M orders = ~10 event types = constant memory</text>
+  <text x="70" y="479" font-family="system-ui, sans-serif" font-size="9" fill="#78350f">Handlers declare interest via interested_in/0, router delivers matching events</text>
+</svg>
