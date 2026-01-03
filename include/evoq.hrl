@@ -1,4 +1,4 @@
-%% @doc Core records for erl-evoq CQRS/Event Sourcing framework.
+%% @doc Core records for evoq CQRS/Event Sourcing framework.
 %%
 %% @author Reckon-DB
 

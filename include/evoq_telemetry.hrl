@@ -1,4 +1,4 @@
-%% @doc Telemetry event definitions for erl-evoq.
+%% @doc Telemetry event definitions for evoq.
 %%
 %% All telemetry events follow the pattern:
 %% [evoq, component, action, stage]

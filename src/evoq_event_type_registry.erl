@@ -1,4 +1,4 @@
-%% @doc Event type registry for erl-evoq.
+%% @doc Event type registry for evoq.
 %%
 %% Maintains a mapping of event types to interested handlers.
 %% Uses pg (process groups) for efficient pub/sub routing.

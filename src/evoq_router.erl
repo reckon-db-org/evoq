@@ -1,4 +1,4 @@
-%% @doc Command router for erl-evoq.
+%% @doc Command router for evoq.
 %%
 %% Routes commands to the appropriate aggregate based on aggregate_type
 %% and aggregate_id. Uses the dispatcher for middleware and execution.

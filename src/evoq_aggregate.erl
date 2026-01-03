@@ -134,7 +134,7 @@ handle_call({execute, Command}, _From, State) ->
                 Module:apply(AccState, Event)
             end, AggState, Events),
 
-            %% Append events to erl-esdb
+            %% Append events to reckon-db
             case append_events(StreamId, Version, Events, Command) of
                 {ok, NewVersion} ->
                     %% Update state

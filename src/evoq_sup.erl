@@ -4,7 +4,7 @@
 %% - evoq_aggregates_sup: Partitioned aggregate supervision
 %% - evoq_event_handler_sup: Event handler workers
 %% - evoq_pm_sup: Process manager instances
-%% - evoq_subscription_manager: erl-esdb subscription management
+%% - evoq_subscription_manager: reckon-db subscription management
 %%
 %% @author Reckon-DB
 -module(evoq_sup).

@@ -1,4 +1,4 @@
-%% @doc Subscription adapter behavior for erl-evoq
+%% @doc Subscription adapter behavior for evoq
 %%
 %% Defines the interface for subscription operations. Subscriptions
 %% enable event handlers to receive events as they are appended.

@@ -1,4 +1,4 @@
-%% @doc Test assertion helpers for erl-evoq.
+%% @doc Test assertion helpers for evoq.
 %%
 %% Provides macros and functions for testing CQRS/ES applications.
 %%

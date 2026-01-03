@@ -1,4 +1,4 @@
-%% @doc Read model store behavior for erl-evoq.
+%% @doc Read model store behavior for evoq.
 %%
 %% Provides an abstract interface for read model storage.
 %% Projections use this behavior to persist query-optimized data.

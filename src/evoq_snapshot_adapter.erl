@@ -1,4 +1,4 @@
-%% @doc Snapshot store adapter behavior for erl-evoq
+%% @doc Snapshot store adapter behavior for evoq
 %%
 %% Defines the interface for snapshot operations. Snapshots are used
 %% to optimize aggregate reconstruction by storing periodic state.

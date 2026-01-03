@@ -1,4 +1,4 @@
-%% @doc Command behavior for erl-evoq.
+%% @doc Command behavior for evoq.
 %%
 %% Commands represent intentions to change state. They are:
 %% - Imperative (present tense): open_account, deposit_money

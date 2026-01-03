@@ -1,6 +1,6 @@
 %% @doc Routes events to handlers by event type.
 %%
-%% Receives events from erl-esdb subscriptions and routes them
+%% Receives events from reckon-db subscriptions and routes them
 %% to interested handlers based on event type.
 %%
 %% Key features:

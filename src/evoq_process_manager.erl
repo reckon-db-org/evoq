@@ -1,4 +1,4 @@
-%% @doc Process manager (saga) behavior for erl-evoq.
+%% @doc Process manager (saga) behavior for evoq.
 %%
 %% Process managers coordinate long-running business processes
 %% that span multiple aggregates. They:

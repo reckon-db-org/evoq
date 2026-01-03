@@ -1,4 +1,4 @@
-%% @doc Event handler behavior for erl-evoq.
+%% @doc Event handler behavior for evoq.
 %%
 %% Event handlers subscribe to event types (NOT streams) and process
 %% events as they are published. This is the key scalability improvement

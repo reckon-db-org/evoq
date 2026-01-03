@@ -1,4 +1,4 @@
-%% @doc Event store adapter behavior for erl-evoq
+%% @doc Event store adapter behavior for evoq
 %%
 %% Defines the interface for event store operations. Implementations
 %% provide the actual connection to an event store backend.

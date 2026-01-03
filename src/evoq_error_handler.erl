@@ -1,4 +1,4 @@
-%% @doc Error handler behavior for erl-evoq.
+%% @doc Error handler behavior for evoq.
 %%
 %% Defines how to handle errors during event processing.
 %% Supports multiple strategies: retry, skip, stop, dead_letter.

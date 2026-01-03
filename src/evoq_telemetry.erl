@@ -1,4 +1,4 @@
-%% @doc Telemetry utilities for erl-evoq.
+%% @doc Telemetry utilities for evoq.
 %%
 %% Provides helper functions for attaching telemetry handlers
 %% and formatting telemetry events.
@@ -111,7 +111,7 @@ attach_pm_handlers(HandlerIdPrefix, HandlerFun) ->
     ],
     attach_events(HandlerIdPrefix, Events, HandlerFun).
 
-%% @doc Attach handlers for ALL erl-evoq telemetry events.
+%% @doc Attach handlers for ALL evoq telemetry events.
 -spec attach_all_handlers(atom(), fun()) -> ok.
 attach_all_handlers(HandlerIdPrefix, HandlerFun) ->
     attach_aggregate_handlers(HandlerIdPrefix, HandlerFun),

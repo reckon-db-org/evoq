@@ -1,4 +1,4 @@
-%% @doc Projection behavior for erl-evoq.
+%% @doc Projection behavior for evoq.
 %%
 %% Projections transform events into read model updates.
 %% They subscribe to event types and maintain query-optimized views.
