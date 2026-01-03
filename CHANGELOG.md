@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-01-03
+
+### Changed
+
+- **Stable Release**: First stable release of evoq under reckon-db-org
+- All APIs considered stable and ready for production use
+- Fixed documentation links (guides/adapters.md)
+- Updated dependency references to reckon_gater
+
 ## [0.3.0] - 2025-12-20
 
 ### Added
