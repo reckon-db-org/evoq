@@ -322,7 +322,7 @@ Comprehensive guides are available:
 - [Event Handlers](guides/event_handlers.md) - Reacting to events with side effects
 - [Process Managers](guides/process_managers.md) - Coordinating long-running workflows
 - [Projections](guides/projections.md) - Building optimized read models
-- [Adapters](doc/adapters.md) - Integrating with different event stores
+- [Adapters](guides/adapters.md) - Integrating with different event stores
 
 ## License
 

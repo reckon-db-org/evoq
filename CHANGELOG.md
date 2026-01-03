@@ -22,7 +22,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- **Dependencies**: Updated erl_esdb_gater from 0.3.0 to 0.4.3
+- **Dependencies**: Updated reckon_gater from 0.3.0 to 0.4.3
 
 ### Fixed
 
