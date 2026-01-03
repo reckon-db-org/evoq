@@ -4,7 +4,7 @@
 %% that span multiple aggregates. Each PM instance is correlated by
 %% a process_id derived from event metadata.
 %%
-%% @author Reckon-DB
+%% @author rgfaber
 -module(evoq_pm_sup).
 -behaviour(supervisor).
 

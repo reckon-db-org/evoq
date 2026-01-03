@@ -6,7 +6,7 @@
 %% - Idempotency checking
 %% - Router to aggregate dispatch
 %%
-%% @author Reckon-DB
+%% @author rgfaber
 -module(evoq_dispatch_SUITE).
 
 -include_lib("common_test/include/ct.hrl").

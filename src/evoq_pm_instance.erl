@@ -7,7 +7,7 @@
 %% - Handles events and dispatches commands
 %% - Supports saga compensation on failures
 %%
-%% @author Reckon-DB
+%% @author rgfaber
 -module(evoq_pm_instance).
 -behaviour(gen_server).
 

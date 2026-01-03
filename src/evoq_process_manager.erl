@@ -43,7 +43,7 @@
 %%     {ok, State, [Cmd]}.
 %% '''
 %%
-%% @author Reckon-DB
+%% @author rgfaber
 -module(evoq_process_manager).
 
 -include("evoq.hrl").

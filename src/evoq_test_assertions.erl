@@ -13,7 +13,7 @@
 %%     ?assert_events_produced([<<"OrderCreated">>]).
 %% '''
 %%
-%% @author Reckon-DB
+%% @author rgfaber
 -module(evoq_test_assertions).
 
 -include("evoq.hrl").

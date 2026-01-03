@@ -3,7 +3,7 @@
 %% Defines the interface for snapshot operations. Snapshots are used
 %% to optimize aggregate reconstruction by storing periodic state.
 %%
-%% @author Reckon-DB
+%% @author rgfaber
 
 -module(evoq_snapshot_adapter).
 

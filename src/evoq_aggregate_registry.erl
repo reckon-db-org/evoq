@@ -3,7 +3,7 @@
 %% Uses OTP pg module for process registration and lookup.
 %% Aggregates register with a group key of {aggregate, AggregateId}.
 %%
-%% @author Reckon-DB
+%% @author rgfaber
 -module(evoq_aggregate_registry).
 -behaviour(gen_server).
 

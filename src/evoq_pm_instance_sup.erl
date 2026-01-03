@@ -2,7 +2,7 @@
 %%
 %% Uses simple_one_for_one strategy for dynamic PM instance creation.
 %%
-%% @author Reckon-DB
+%% @author rgfaber
 -module(evoq_pm_instance_sup).
 -behaviour(supervisor).
 

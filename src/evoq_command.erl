@@ -10,7 +10,7 @@
 %% Optional:
 %% - validate(Command) -> ok | {error, Reason}
 %%
-%% @author Reckon-DB
+%% @author rgfaber
 -module(evoq_command).
 
 -include("evoq.hrl").

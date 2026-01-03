@@ -8,7 +8,7 @@
 %% - When events are published, only interested handlers receive them
 %% - Scales to millions of events without per-stream overhead
 %%
-%% @author Reckon-DB
+%% @author rgfaber
 -module(evoq_event_type_registry).
 -behaviour(gen_server).
 

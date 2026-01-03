@@ -3,7 +3,7 @@
 %% Routes commands to the appropriate aggregate based on aggregate_type
 %% and aggregate_id. Uses the dispatcher for middleware and execution.
 %%
-%% @author Reckon-DB
+%% @author rgfaber
 -module(evoq_router).
 
 -include("evoq.hrl").

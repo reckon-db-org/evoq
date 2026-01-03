@@ -9,7 +9,7 @@
 %% - Schema evolution through upcasters
 %% - Type-safe event handling
 %%
-%% @author Reckon-DB
+%% @author rgfaber
 -module(evoq_type_provider).
 -behaviour(gen_server).
 

@@ -24,7 +24,7 @@
 %% ]}
 %% '''
 %%
-%% @author Reckon-DB
+%% @author rgfaber
 
 -module(evoq_adapter).
 

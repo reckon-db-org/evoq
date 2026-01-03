@@ -1,6 +1,6 @@
 %% @doc Core records for evoq CQRS/Event Sourcing framework.
 %%
-%% @author Reckon-DB
+%% @author rgfaber
 
 -ifndef(EVOQ_HRL).
 -define(EVOQ_HRL, true).

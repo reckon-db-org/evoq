@@ -8,7 +8,7 @@
 %% The default implementation (evoq_aggregate_lifespan_default) provides
 %% sensible defaults with 30-minute TTL and automatic snapshots.
 %%
-%% @author Reckon-DB
+%% @author rgfaber
 -module(evoq_aggregate_lifespan).
 
 -include("evoq.hrl").

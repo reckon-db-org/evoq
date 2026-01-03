@@ -6,7 +6,7 @@
 %% Note: Checkpoints are lost on application restart.
 %% Use only for development or projections that can easily rebuild.
 %%
-%% @author Reckon-DB
+%% @author rgfaber
 -module(evoq_checkpoint_store_ets).
 -behaviour(evoq_checkpoint_store).
 -behaviour(gen_server).

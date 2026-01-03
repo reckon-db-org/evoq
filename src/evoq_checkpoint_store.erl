@@ -9,7 +9,7 @@
 %% - load(ProjectionName) -> {ok, Checkpoint} | {error, not_found}
 %% - save(ProjectionName, Checkpoint) -> ok | {error, Reason}
 %%
-%% @author Reckon-DB
+%% @author rgfaber
 -module(evoq_checkpoint_store).
 
 %% Behavior callbacks

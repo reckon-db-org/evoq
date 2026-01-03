@@ -6,7 +6,7 @@
 %% - evoq_pm_sup: Process manager instances
 %% - evoq_subscription_manager: reckon-db subscription management
 %%
-%% @author Reckon-DB
+%% @author rgfaber
 -module(evoq_sup).
 -behaviour(supervisor).
 

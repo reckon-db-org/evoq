@@ -9,7 +9,7 @@
 %% - Parallel delivery to multiple handlers
 %% - Telemetry for observability
 %%
-%% @author Reckon-DB
+%% @author rgfaber
 -module(evoq_event_router).
 -behaviour(gen_server).
 

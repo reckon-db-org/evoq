@@ -10,7 +10,7 @@
 %% <li>critical - Memory above 85 percent, TTL factor 0.1x</li>
 %% </ul>
 %%
-%% @author Reckon-DB
+%% @author rgfaber
 -module(evoq_memory_monitor).
 -behaviour(gen_server).
 

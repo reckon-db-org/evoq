@@ -9,7 +9,7 @@
 %% - type: ETS table type (default: set)
 %% - access: public | protected | private (default: protected)
 %%
-%% @author Reckon-DB
+%% @author rgfaber
 -module(evoq_read_model_ets).
 -behaviour(evoq_read_model).
 

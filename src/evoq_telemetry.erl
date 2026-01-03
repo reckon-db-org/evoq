@@ -18,7 +18,7 @@
 %% evoq_telemetry:attach([evoq, aggregate, execute, start], my_handler, fun handle_event/4).
 %% '''
 %%
-%% @author Reckon-DB
+%% @author rgfaber
 -module(evoq_telemetry).
 
 -include("evoq_telemetry.hrl").

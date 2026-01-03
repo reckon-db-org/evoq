@@ -4,7 +4,7 @@
 %% Each partition handles approximately 1/4 of all aggregates based on
 %% hash distribution.
 %%
-%% @author Reckon-DB
+%% @author rgfaber
 -module(evoq_aggregate_partition_sup).
 -behaviour(supervisor).
 

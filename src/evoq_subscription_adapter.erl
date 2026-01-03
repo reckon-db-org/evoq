@@ -9,7 +9,7 @@
 %% - event_pattern: Subscribe using wildcard patterns
 %% - event_payload: Subscribe based on event payload content
 %%
-%% @author Reckon-DB
+%% @author rgfaber
 
 -module(evoq_subscription_adapter).
 

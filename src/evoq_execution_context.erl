@@ -3,7 +3,7 @@
 %% Tracks command execution state through the middleware pipeline,
 %% including retry attempts, consistency requirements, and metadata.
 %%
-%% @author Reckon-DB
+%% @author rgfaber
 -module(evoq_execution_context).
 
 -include("evoq.hrl").

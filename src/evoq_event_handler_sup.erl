@@ -4,7 +4,7 @@
 %% Each handler declares interest in specific event types via the
 %% interested_in/0 callback.
 %%
-%% @author Reckon-DB
+%% @author rgfaber
 -module(evoq_event_handler_sup).
 -behaviour(supervisor).
 

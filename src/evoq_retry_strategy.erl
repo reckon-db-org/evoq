@@ -14,7 +14,7 @@
 %% %% Returns approximately 400ms (100 * 2^2)
 %% '''
 %%
-%% @author Reckon-DB
+%% @author rgfaber
 -module(evoq_retry_strategy).
 
 %% Types

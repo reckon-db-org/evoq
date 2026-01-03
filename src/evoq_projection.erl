@@ -46,7 +46,7 @@
 %%     {ok, State, RM2}.
 %% '''
 %%
-%% @author Reckon-DB
+%% @author rgfaber
 -module(evoq_projection).
 
 -include("evoq.hrl").

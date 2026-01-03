@@ -10,7 +10,7 @@
 %% Uses ETS for fast in-memory storage. For production, consider
 %% implementing a persistent store.
 %%
-%% @author Reckon-DB
+%% @author rgfaber
 -module(evoq_dead_letter).
 -behaviour(gen_server).
 

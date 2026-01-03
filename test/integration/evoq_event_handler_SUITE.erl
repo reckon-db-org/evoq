@@ -7,7 +7,7 @@
 %% - Event upcasting
 %% - Type provider
 %%
-%% @author Reckon-DB
+%% @author rgfaber
 -module(evoq_event_handler_SUITE).
 
 -include_lib("common_test/include/ct.hrl").

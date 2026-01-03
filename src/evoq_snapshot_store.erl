@@ -13,7 +13,7 @@
 %% ]}
 %% '''
 %%
-%% @author Reckon-DB
+%% @author rgfaber
 -module(evoq_snapshot_store).
 
 -include_lib("reckon_gater/include/esdb_gater_types.hrl").

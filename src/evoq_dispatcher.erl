@@ -14,7 +14,7 @@
 %% 7. Handle consistency (wait for handlers if strong)
 %% 8. Cache result for idempotency
 %%
-%% @author Reckon-DB
+%% @author rgfaber
 -module(evoq_dispatcher).
 
 -include("evoq.hrl").

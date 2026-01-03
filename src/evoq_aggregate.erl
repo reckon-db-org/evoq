@@ -18,7 +18,7 @@
 %% - snapshot(State) -> SnapshotData
 %% - from_snapshot(SnapshotData) -> State
 %%
-%% @author Reckon-DB
+%% @author rgfaber
 -module(evoq_aggregate).
 -behaviour(gen_server).
 

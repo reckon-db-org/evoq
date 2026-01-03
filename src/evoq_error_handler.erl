@@ -16,7 +16,7 @@
 %% Without implementing on_error/4, handlers use exponential backoff
 %% with max 5 retries, then dead letter.
 %%
-%% @author Reckon-DB
+%% @author rgfaber
 -module(evoq_error_handler).
 
 -include("evoq.hrl").

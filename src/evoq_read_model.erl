@@ -21,7 +21,7 @@
 %% - list(Prefix, State) -> {ok, [{Key, Value}]}
 %% - clear(State) -> {ok, NewState}
 %%
-%% @author Reckon-DB
+%% @author rgfaber
 -module(evoq_read_model).
 
 %% Required callbacks

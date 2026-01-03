@@ -7,7 +7,7 @@
 %% - Dead letter store
 %% - Consistency acknowledgments
 %%
-%% @author Reckon-DB
+%% @author rgfaber
 -module(evoq_error_handling_SUITE).
 
 -include_lib("common_test/include/ct.hrl").

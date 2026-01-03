@@ -16,7 +16,7 @@
 %% Available adapters:
 %% - evoq_esdb_gater_adapter (from reckon_evoq package)
 %%
-%% @author Reckon-DB
+%% @author rgfaber
 -module(evoq_event_store).
 
 -include_lib("reckon_gater/include/esdb_gater_types.hrl").

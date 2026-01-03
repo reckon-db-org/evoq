@@ -31,7 +31,7 @@
 %%     skip.  %% No compensation needed
 %% '''
 %%
-%% @author Reckon-DB
+%% @author rgfaber
 -module(evoq_saga_compensation).
 
 -include("evoq.hrl").

@@ -2,7 +2,7 @@
 %%
 %% Tests aggregate lifecycle, TTL, and passivation behavior.
 %%
-%% @author Reckon-DB
+%% @author rgfaber
 -module(evoq_aggregate_tests).
 
 -compile({no_auto_import, [apply/2]}).

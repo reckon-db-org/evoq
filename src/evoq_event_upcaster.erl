@@ -25,7 +25,7 @@
 %%     {ok, Event#{data := NewData}}.
 %% '''
 %%
-%% @author Reckon-DB
+%% @author rgfaber
 -module(evoq_event_upcaster).
 
 %% Required callbacks

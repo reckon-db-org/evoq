@@ -4,7 +4,7 @@
 %% Used to implement sophisticated retry strategies with
 %% exponential backoff, jitter, and dead letter handling.
 %%
-%% @author Reckon-DB
+%% @author rgfaber
 -module(evoq_failure_context).
 
 -include("evoq.hrl").

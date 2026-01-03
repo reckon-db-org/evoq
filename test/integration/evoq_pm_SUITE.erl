@@ -6,7 +6,7 @@
 %% - PM instance lifecycle
 %% - Saga compensation
 %%
-%% @author Reckon-DB
+%% @author rgfaber
 -module(evoq_pm_SUITE).
 
 -include_lib("common_test/include/ct.hrl").

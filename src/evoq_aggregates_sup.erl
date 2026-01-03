@@ -5,7 +5,7 @@
 %%
 %% Aggregates are distributed across partitions using phash2(StreamId, 4).
 %%
-%% @author Reckon-DB
+%% @author rgfaber
 -module(evoq_aggregates_sup).
 -behaviour(supervisor).
 

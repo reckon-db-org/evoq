@@ -5,7 +5,7 @@
 %%
 %% Where stage is: start | stop | exception
 %%
-%% @author Reckon-DB
+%% @author rgfaber
 
 -ifndef(EVOQ_TELEMETRY_HRL).
 -define(EVOQ_TELEMETRY_HRL, true).

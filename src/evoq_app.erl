@@ -4,7 +4,7 @@
 %% Starts the top-level supervisor and initializes the pg groups
 %% for aggregate registry and event routing.
 %%
-%% @author Reckon-DB
+%% @author rgfaber
 -module(evoq_app).
 -behaviour(application).
 

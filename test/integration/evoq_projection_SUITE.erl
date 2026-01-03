@@ -6,7 +6,7 @@
 %% - Checkpoint persistence
 %% - Idempotent event processing
 %%
-%% @author Reckon-DB
+%% @author rgfaber
 -module(evoq_projection_SUITE).
 
 -include_lib("common_test/include/ct.hrl").

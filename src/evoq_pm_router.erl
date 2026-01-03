@@ -10,7 +10,7 @@
 %% 3. For each PM, call correlate/2 to determine process instance
 %% 4. Route to existing instance or start new one
 %%
-%% @author Reckon-DB
+%% @author rgfaber
 -module(evoq_pm_router).
 -behaviour(gen_server).
 

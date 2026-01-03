@@ -10,7 +10,7 @@
 %% - Halt the pipeline (prevents further processing)
 %% - Modify the response
 %%
-%% @author Reckon-DB
+%% @author rgfaber
 -module(evoq_middleware).
 
 -include("evoq.hrl").

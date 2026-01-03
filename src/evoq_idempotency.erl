@@ -6,7 +6,7 @@
 %%
 %% Uses ETS with automatic TTL-based expiration.
 %%
-%% @author Reckon-DB
+%% @author rgfaber
 -module(evoq_idempotency).
 -behaviour(gen_server).
 

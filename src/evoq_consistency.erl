@@ -15,7 +15,7 @@
 %% 4. Handlers call acknowledge/4 after processing
 %% 5. wait_for/4 returns when all required handlers ack
 %%
-%% @author Reckon-DB
+%% @author rgfaber
 -module(evoq_consistency).
 
 -include("evoq_telemetry.hrl").

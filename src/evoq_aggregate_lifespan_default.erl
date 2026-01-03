@@ -8,7 +8,7 @@
 %% This prevents the memory explosion that occurs when aggregates
 %% live indefinitely (as in Commanded's default lifespan).
 %%
-%% @author Reckon-DB
+%% @author rgfaber
 -module(evoq_aggregate_lifespan_default).
 -behaviour(evoq_aggregate_lifespan).
 

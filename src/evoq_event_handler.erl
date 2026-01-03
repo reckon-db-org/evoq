@@ -20,7 +20,7 @@
 %% - on_error(Error, Event, FailureContext, State) -> error_action()
 %%   Handle errors during event processing
 %%
-%% @author Reckon-DB
+%% @author rgfaber
 -module(evoq_event_handler).
 
 -include("evoq.hrl").
