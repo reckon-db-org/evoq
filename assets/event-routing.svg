@@ -18,7 +18,7 @@
 
   <!-- Event Store -->
   <rect x="50" y="100" width="150" height="80" rx="5" fill="#8b5cf6" stroke="#7c3aed" stroke-width="2"/>
-  <text x="125" y="135" font-family="system-ui, sans-serif" font-size="12" font-weight="bold" text-anchor="middle" fill="white">erl-esdb</text>
+  <text x="125" y="135" font-family="system-ui, sans-serif" font-size="12" font-weight="bold" text-anchor="middle" fill="white">reckon-db</text>
   <text x="125" y="155" font-family="system-ui, sans-serif" font-size="9" text-anchor="middle" fill="#ddd6fe">Event Store</text>
 
   <!-- Events coming out -->

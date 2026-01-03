@@ -70,7 +70,7 @@
 
   <!-- Event Store -->
   <rect x="130" y="430" width="200" height="50" rx="5" fill="url(#storeGrad)"/>
-  <text x="230" y="455" font-family="system-ui, sans-serif" font-size="12" font-weight="bold" text-anchor="middle" fill="white">erl-esdb</text>
+  <text x="230" y="455" font-family="system-ui, sans-serif" font-size="12" font-weight="bold" text-anchor="middle" fill="white">reckon-db</text>
   <text x="230" y="470" font-family="system-ui, sans-serif" font-size="9" text-anchor="middle" fill="#ddd6fe">Event Store (Khepri/Ra)</text>
 
   <!-- Snapshot indicator -->
