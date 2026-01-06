@@ -13,7 +13,7 @@
 
 -module(evoq_subscription_adapter).
 
--include_lib("reckon_gater/include/esdb_gater_types.hrl").
+-include_lib("evoq/include/evoq_types.hrl").
 
 %%====================================================================
 %% Types
@@ -39,7 +39,7 @@
 %%                      - start_from: origin | current | {position, N}
 %%                      - pool_size: Number of emitters (for load distribution)
 -callback subscribe(StoreId :: atom(),
-                    Type :: subscription_type(),
+                    Type :: evoq_subscription_type(),
                     Selector :: binary() | map(),
                     SubscriptionName :: binary(),
                     Opts :: map()) ->
@@ -67,8 +67,8 @@
 
 %% List all subscriptions for a store.
 -callback list(StoreId :: atom()) ->
-    {ok, [subscription()]} | {error, term()}.
+    {ok, [evoq_subscription()]} | {error, term()}.
 
 %% Get a subscription by name.
 -callback get_by_name(StoreId :: atom(), SubscriptionName :: binary()) ->
-    {ok, subscription()} | {error, not_found | term()}.
+    {ok, evoq_subscription()} | {error, not_found | term()}.

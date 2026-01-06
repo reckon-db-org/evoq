@@ -16,7 +16,7 @@
 %% @author rgfaber
 -module(evoq_snapshot_store).
 
--include_lib("reckon_gater/include/esdb_gater_types.hrl").
+-include_lib("evoq/include/evoq_types.hrl").
 
 %% API
 -export([save/5, load/2, load/3, delete/2, delete/3]).
@@ -57,7 +57,7 @@ save(StoreId, StreamId, Version, Data, Metadata) ->
 load(StoreId, StreamId) ->
     Adapter = get_adapter(),
     case Adapter:read(StoreId, StreamId) of
-        {ok, #snapshot{} = Snapshot} ->
+        {ok, #evoq_snapshot{} = Snapshot} ->
             {ok, snapshot_to_map(Snapshot)};
         {ok, SnapshotMap} when is_map(SnapshotMap) ->
             {ok, SnapshotMap};
@@ -70,7 +70,7 @@ load(StoreId, StreamId) ->
 load(StoreId, StreamId, Version) ->
     Adapter = get_adapter(),
     case Adapter:read_at_version(StoreId, StreamId, Version) of
-        {ok, #snapshot{} = Snapshot} ->
+        {ok, #evoq_snapshot{} = Snapshot} ->
             {ok, snapshot_to_map(Snapshot)};
         {ok, SnapshotMap} when is_map(SnapshotMap) ->
             {ok, SnapshotMap};
@@ -95,12 +95,12 @@ delete(StoreId, StreamId, Version) ->
 %%====================================================================
 
 %% @private Convert snapshot record to map
--spec snapshot_to_map(snapshot()) -> map().
-snapshot_to_map(#snapshot{} = Snapshot) ->
+-spec snapshot_to_map(evoq_snapshot()) -> map().
+snapshot_to_map(#evoq_snapshot{} = Snapshot) ->
     #{
-        stream_id => Snapshot#snapshot.stream_id,
-        version => Snapshot#snapshot.version,
-        data => Snapshot#snapshot.data,
-        metadata => Snapshot#snapshot.metadata,
-        timestamp => Snapshot#snapshot.timestamp
+        stream_id => Snapshot#evoq_snapshot.stream_id,
+        version => Snapshot#evoq_snapshot.version,
+        data => Snapshot#evoq_snapshot.data,
+        metadata => Snapshot#evoq_snapshot.metadata,
+        timestamp => Snapshot#evoq_snapshot.timestamp
     }.

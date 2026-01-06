@@ -7,7 +7,7 @@
 
 -module(evoq_snapshot_adapter).
 
--include_lib("reckon_gater/include/esdb_gater_types.hrl").
+-include_lib("evoq/include/evoq_types.hrl").
 
 %%====================================================================
 %% Callback Definitions
@@ -33,7 +33,7 @@
 %% Returns the most recent snapshot that exists for the stream.
 %% Used during aggregate reconstruction to skip replaying all events.
 -callback read(StoreId :: atom(), StreamId :: binary()) ->
-    {ok, snapshot()} | {error, not_found | term()}.
+    {ok, evoq_snapshot()} | {error, not_found | term()}.
 
 %% Read a snapshot at a specific version.
 %%
@@ -42,7 +42,7 @@
 -callback read_at_version(StoreId :: atom(),
                           StreamId :: binary(),
                           Version :: non_neg_integer()) ->
-    {ok, snapshot()} | {error, not_found | term()}.
+    {ok, evoq_snapshot()} | {error, not_found | term()}.
 
 %% Delete all snapshots for a stream.
 -callback delete(StoreId :: atom(), StreamId :: binary()) ->

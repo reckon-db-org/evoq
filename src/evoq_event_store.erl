@@ -19,7 +19,7 @@
 %% @author rgfaber
 -module(evoq_event_store).
 
--include_lib("reckon_gater/include/esdb_gater_types.hrl").
+-include_lib("evoq/include/evoq_types.hrl").
 
 %% API
 -export([append/4, read/5, version/2, exists/2]).
@@ -153,19 +153,19 @@ read_events_by_types(StoreId, EventTypes, BatchSize) ->
 %%====================================================================
 
 %% @private Convert event record to map
--spec event_to_map(event() | map()) -> map().
-event_to_map(#event{} = Event) ->
+-spec event_to_map(evoq_event() | map()) -> map().
+event_to_map(#evoq_event{} = Event) ->
     #{
-        event_id => Event#event.event_id,
-        event_type => Event#event.event_type,
-        stream_id => Event#event.stream_id,
-        version => Event#event.version,
-        data => Event#event.data,
-        metadata => Event#event.metadata,
-        timestamp => Event#event.timestamp,
-        epoch_us => Event#event.epoch_us,
-        data_content_type => Event#event.data_content_type,
-        metadata_content_type => Event#event.metadata_content_type
+        event_id => Event#evoq_event.event_id,
+        event_type => Event#evoq_event.event_type,
+        stream_id => Event#evoq_event.stream_id,
+        version => Event#evoq_event.version,
+        data => Event#evoq_event.data,
+        metadata => Event#evoq_event.metadata,
+        timestamp => Event#evoq_event.timestamp,
+        epoch_us => Event#evoq_event.epoch_us,
+        data_content_type => Event#evoq_event.data_content_type,
+        metadata_content_type => Event#evoq_event.metadata_content_type
     };
 event_to_map(EventMap) when is_map(EventMap) ->
     EventMap.

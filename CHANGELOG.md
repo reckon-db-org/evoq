@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.2] - 2026-01-06
+
+### Changed
+
+- **Independence from reckon_gater**: Removed direct dependency on reckon_gater
+  - Introduced `include/evoq_types.hrl` with evoq's own type definitions
+  - Adapters (like reckon_evoq) now handle type translation between evoq and backend
+  - evoq is now a pure CQRS/ES framework without storage backend coupling
+
+### Fixed
+
+- **hex.pm dependencies**: Package now correctly publishes with only telemetry as dependency
+
 ## [1.0.1] - 2026-01-03
 
 ### Fixed

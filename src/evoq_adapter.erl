@@ -28,7 +28,7 @@
 
 -module(evoq_adapter).
 
--include_lib("reckon_gater/include/esdb_gater_types.hrl").
+-include_lib("evoq/include/evoq_types.hrl").
 
 %%====================================================================
 %% Callback Definitions
@@ -63,13 +63,13 @@
                StartVersion :: non_neg_integer(),
                Count :: pos_integer(),
                Direction :: forward | backward) ->
-    {ok, [event()]} | {error, term()}.
+    {ok, [evoq_event()]} | {error, term()}.
 
 %% Read all events from a stream.
 -callback read_all(StoreId :: atom(),
                    StreamId :: binary(),
                    Direction :: forward | backward) ->
-    {ok, [event()]} | {error, term()}.
+    {ok, [evoq_event()]} | {error, term()}.
 
 %% Read events by event types across all streams.
 %%
@@ -78,7 +78,7 @@
 -callback read_by_event_types(StoreId :: atom(),
                               EventTypes :: [binary()],
                               BatchSize :: pos_integer()) ->
-    {ok, [event()]} | {error, term()}.
+    {ok, [evoq_event()]} | {error, term()}.
 
 %% Get current version of a stream.
 %%
