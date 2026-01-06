@@ -11,23 +11,36 @@
 
 %%====================================================================
 %% Version Constants
+%% (guarded to avoid redefinition when used with esdb_gater_types.hrl)
 %%====================================================================
 
 %% NO_STREAM: Stream must not exist (first write)
+-ifndef(NO_STREAM).
 -define(NO_STREAM, -1).
+-endif.
 
 %% ANY_VERSION: No version check, always append
+-ifndef(ANY_VERSION).
 -define(ANY_VERSION, -2).
+-endif.
 
 %% STREAM_EXISTS: Stream must exist
+-ifndef(STREAM_EXISTS).
 -define(STREAM_EXISTS, -4).
+-endif.
 
 %%====================================================================
 %% Content Types
+%% (guarded to avoid redefinition when used with esdb_gater_types.hrl)
 %%====================================================================
 
+-ifndef(CONTENT_TYPE_JSON).
 -define(CONTENT_TYPE_JSON, <<"application/json">>).
+-endif.
+
+-ifndef(CONTENT_TYPE_BINARY).
 -define(CONTENT_TYPE_BINARY, <<"application/octet-stream">>).
+-endif.
 
 %%====================================================================
 %% Event Record

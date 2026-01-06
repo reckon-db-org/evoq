@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.3] - 2026-01-06
+
+### Fixed
+
+- **Macro guard compatibility**: Added `-ifndef` guards around macro definitions
+  in `evoq_types.hrl` to prevent redefinition errors when used alongside
+  `esdb_gater_types.hrl` in adapters like reckon_evoq
+
 ## [1.0.2] - 2026-01-06
 
 ### Changed
