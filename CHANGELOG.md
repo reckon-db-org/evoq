@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-01-08
+
+### Added
+
+- **Bit Flags Module** (`evoq_bit_flags`): Efficient bitwise flag manipulation for aggregate state
+  - `set/2`, `unset/2`: Set/unset single flags
+  - `set_all/2`, `unset_all/2`: Set/unset multiple flags
+  - `has/2`, `has_not/2`: Check single flag state
+  - `has_all/2`, `has_any/2`: Check multiple flags
+  - `to_list/2`, `to_string/2,3`: Human-readable conversions with flag maps
+  - `decompose/1`: Extract power-of-2 components
+  - `highest/2`, `lowest/2`: Get highest/lowest set flag description
+
+- **Bit Flags Guide** (`guides/bit_flags.md`): Comprehensive documentation
+  - Why use bit flags in event sourcing
+  - Core operations with examples
+  - Aggregate state management patterns
+  - Best practices for flag definition
+  - Complete function reference
+
+### Changed
+
+- Aggregate status fields should now use integer bit flags instead of atoms
+  for better memory efficiency, query performance, and event store compatibility
+
 ## [1.0.3] - 2026-01-06
 
 ### Fixed

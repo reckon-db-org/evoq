@@ -1,6 +1,6 @@
 {application, evoq, [
     {description, "Erlang CQRS/Event Sourcing framework built on reckon-db"},
-    {vsn, "1.0.3"},
+    {vsn, "1.1.0"},
     {registered, []},
     {mod, {evoq_app, []}},
     {applications, [
