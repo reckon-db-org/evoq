@@ -229,7 +229,7 @@ The adapter pattern allows different backends:
 ```erlang
 %% Configure adapter in sys.config
 {evoq, [
-    {event_store_adapter, evoq_esdb_adapter}
+    {event_store_adapter, reckon_evoq}
 ]}
 ```
 
