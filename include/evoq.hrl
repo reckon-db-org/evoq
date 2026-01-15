@@ -55,6 +55,7 @@
 -record(evoq_aggregate_state, {
     stream_id :: binary(),
     aggregate_module :: atom(),
+    store_id :: atom(),
     state :: term(),
     version = 0 :: non_neg_integer(),
     lifespan_module :: atom(),
@@ -78,6 +79,7 @@
     correlation_id :: binary() | undefined,
     aggregate_id :: binary(),
     aggregate_type :: atom(),
+    store_id :: atom(),
     expected_version = -1 :: integer(),
     retry_attempts = ?DEFAULT_RETRY_ATTEMPTS :: non_neg_integer(),
     consistency = eventual :: eventual | strong | {handlers, [atom()]},

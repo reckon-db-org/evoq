@@ -11,7 +11,7 @@
 
 %% API
 -export([start_link/0]).
--export([register/2, unregister/1, lookup/1, get_or_start/2]).
+-export([register/2, unregister/1, lookup/1, get_or_start/2, get_or_start/3]).
 
 %% gen_server callbacks
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
@@ -55,14 +55,22 @@ lookup(AggregateId) ->
             {error, not_found}
     end.
 
-%% @doc Get an existing aggregate or start a new one.
+%% @doc Get an existing aggregate or start a new one (uses env store_id).
+%%
+%% @deprecated Use get_or_start/3 with explicit store_id instead.
 -spec get_or_start(atom(), binary()) -> {ok, pid()} | {error, term()}.
 get_or_start(AggregateModule, AggregateId) ->
+    StoreId = application:get_env(evoq, store_id, default_store),
+    get_or_start(AggregateModule, AggregateId, StoreId).
+
+%% @doc Get an existing aggregate or start a new one with explicit store_id.
+-spec get_or_start(atom(), binary(), atom()) -> {ok, pid()} | {error, term()}.
+get_or_start(AggregateModule, AggregateId, StoreId) ->
     case lookup(AggregateId) of
         {ok, Pid} ->
             {ok, Pid};
         {error, not_found} ->
-            start_aggregate(AggregateModule, AggregateId)
+            start_aggregate(AggregateModule, AggregateId, StoreId)
     end.
 
 %%====================================================================
@@ -95,5 +103,5 @@ terminate(_Reason, _State) ->
 %%====================================================================
 
 %% @private
-start_aggregate(AggregateModule, AggregateId) ->
-    evoq_aggregates_sup:start_aggregate(AggregateModule, AggregateId).
+start_aggregate(AggregateModule, AggregateId, StoreId) ->
+    evoq_aggregates_sup:start_aggregate(AggregateModule, AggregateId, StoreId).

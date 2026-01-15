@@ -38,7 +38,7 @@
 -optional_callbacks([snapshot/1, from_snapshot/1]).
 
 %% API
--export([start_link/2]).
+-export([start_link/2, start_link/3]).
 -export([execute_command/2, get_state/1, get_version/1]).
 
 %% gen_server callbacks
@@ -48,10 +48,18 @@
 %% API
 %%====================================================================
 
-%% @doc Start an aggregate process.
+%% @doc Start an aggregate process (uses env store_id).
+%%
+%% @deprecated Use start_link/3 with explicit store_id instead.
 -spec start_link(atom(), binary()) -> {ok, pid()} | {error, term()}.
 start_link(AggregateModule, AggregateId) ->
-    gen_server:start_link(?MODULE, {AggregateModule, AggregateId}, []).
+    StoreId = application:get_env(evoq, store_id, default_store),
+    start_link(AggregateModule, AggregateId, StoreId).
+
+%% @doc Start an aggregate process with explicit store_id.
+-spec start_link(atom(), binary(), atom()) -> {ok, pid()} | {error, term()}.
+start_link(AggregateModule, AggregateId, StoreId) ->
+    gen_server:start_link(?MODULE, {AggregateModule, AggregateId, StoreId}, []).
 
 %% @doc Execute a command against an aggregate.
 -spec execute_command(pid(), #evoq_command{}) ->
@@ -74,7 +82,7 @@ get_version(Pid) ->
 %%====================================================================
 
 %% @private
-init({AggregateModule, AggregateId}) ->
+init({AggregateModule, AggregateId, StoreId}) ->
     %% Register with the registry
     evoq_aggregate_registry:register(AggregateId, self()),
 
@@ -82,11 +90,12 @@ init({AggregateModule, AggregateId}) ->
     LifespanModule = get_lifespan_module(),
 
     %% Try to load from snapshot, otherwise initialize fresh
-    {InitialState, Version} = load_or_init(AggregateModule, AggregateId),
+    {InitialState, Version} = load_or_init(AggregateModule, AggregateId, StoreId),
 
     State = #evoq_aggregate_state{
         stream_id = AggregateId,
         aggregate_module = AggregateModule,
+        store_id = StoreId,
         state = InitialState,
         version = Version,
         lifespan_module = LifespanModule,
@@ -98,6 +107,7 @@ init({AggregateModule, AggregateId}) ->
     telemetry:execute(?TELEMETRY_AGGREGATE_INIT, #{}, #{
         aggregate_id => AggregateId,
         aggregate_module => AggregateModule,
+        store_id => StoreId,
         version => Version
     }),
 
@@ -110,6 +120,7 @@ handle_call({execute, Command}, _From, State) ->
     #evoq_aggregate_state{
         stream_id = StreamId,
         aggregate_module = Module,
+        store_id = StoreId,
         state = AggState,
         version = Version,
         lifespan_module = LifespanModule
@@ -123,6 +134,7 @@ handle_call({execute, Command}, _From, State) ->
     }, #{
         aggregate_id => StreamId,
         aggregate_module => Module,
+        store_id => StoreId,
         command_type => maps:get(command_type, Command#evoq_command.payload, unknown)
     }),
 
@@ -134,8 +146,8 @@ handle_call({execute, Command}, _From, State) ->
                 Module:apply(AccState, Event)
             end, AggState, Events),
 
-            %% Append events to reckon-db
-            case append_events(StreamId, Version, Events, Command) of
+            %% Append events to reckon-db using stored store_id
+            case append_events(StoreId, StreamId, Version, Events, Command) of
                 {ok, NewVersion} ->
                     %% Update state
                     NewState = State#evoq_aggregate_state{
@@ -240,9 +252,7 @@ get_lifespan_module() ->
     application:get_env(evoq, lifespan_module, evoq_aggregate_lifespan_default).
 
 %% @private
-load_or_init(Module, AggregateId) ->
-    StoreId = application:get_env(evoq, store_id, default_store),
-
+load_or_init(Module, AggregateId, StoreId) ->
     %% Try to load snapshot first
     case try_load_snapshot(Module, StoreId, AggregateId) of
         {ok, SnapshotState, SnapshotVersion} ->
@@ -306,11 +316,9 @@ replay_events(Module, StoreId, AggregateId, FromVersion, InitState) ->
     end.
 
 %% @private
-append_events(_StreamId, _Version, [], _Command) ->
+append_events(_StoreId, _StreamId, _Version, [], _Command) ->
     {ok, 0};
-append_events(StreamId, Version, Events, Command) ->
-    StoreId = application:get_env(evoq, store_id, default_store),
-
+append_events(StoreId, StreamId, Version, Events, Command) ->
     %% Add metadata to events
     EventsWithMeta = lists:map(fun(Event) ->
         Event#{
@@ -336,17 +344,18 @@ maybe_snapshot(#evoq_aggregate_state{snapshot_count = Count} = State) ->
 save_snapshot(#evoq_aggregate_state{
     stream_id = StreamId,
     aggregate_module = Module,
+    store_id = StoreId,
     state = AggState,
     version = Version
 } = State) ->
     case erlang:function_exported(Module, snapshot, 1) of
         true ->
-            StoreId = application:get_env(evoq, store_id, default_store),
             SnapshotData = Module:snapshot(AggState),
             _ = evoq_snapshot_store:save(StoreId, StreamId, Version, SnapshotData, #{}),
 
             telemetry:execute(?TELEMETRY_AGGREGATE_SNAPSHOT_SAVE, #{}, #{
                 aggregate_id => StreamId,
+                store_id => StoreId,
                 version => Version
             }),
 

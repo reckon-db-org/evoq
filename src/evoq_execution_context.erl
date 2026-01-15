@@ -23,14 +23,19 @@ new(Command) ->
     new(Command, #{}).
 
 %% @doc Create a new execution context with options.
+%%
+%% The `store_id` option determines which ReckonDB store to use.
+%% If not specified, falls back to the application env configuration.
 -spec new(#evoq_command{}, map()) -> #evoq_execution_context{}.
 new(Command, Opts) ->
+    StoreId = maps:get(store_id, Opts, application:get_env(evoq, store_id, default_store)),
     #evoq_execution_context{
         command_id = Command#evoq_command.command_id,
         causation_id = Command#evoq_command.causation_id,
         correlation_id = Command#evoq_command.correlation_id,
         aggregate_id = Command#evoq_command.aggregate_id,
         aggregate_type = Command#evoq_command.aggregate_type,
+        store_id = StoreId,
         expected_version = maps:get(expected_version, Opts, -1),
         retry_attempts = maps:get(retry_attempts, Opts, ?DEFAULT_RETRY_ATTEMPTS),
         consistency = maps:get(consistency, Opts, eventual),

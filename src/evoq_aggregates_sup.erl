@@ -13,7 +13,7 @@
 
 %% API
 -export([start_link/0]).
--export([start_aggregate/2, get_aggregate/1, partition_for/1]).
+-export([start_aggregate/2, start_aggregate/3, get_aggregate/1, partition_for/1]).
 
 %% Supervisor callbacks
 -export([init/1]).
@@ -29,12 +29,20 @@
 start_link() ->
     supervisor:start_link({local, ?MODULE}, ?MODULE, []).
 
-%% @doc Start an aggregate process in the appropriate partition.
+%% @doc Start an aggregate process in the appropriate partition (uses env store_id).
+%%
+%% @deprecated Use start_aggregate/3 with explicit store_id instead.
 -spec start_aggregate(atom(), binary()) -> {ok, pid()} | {error, term()}.
 start_aggregate(AggregateModule, AggregateId) ->
+    StoreId = application:get_env(evoq, store_id, default_store),
+    start_aggregate(AggregateModule, AggregateId, StoreId).
+
+%% @doc Start an aggregate process in the appropriate partition with explicit store_id.
+-spec start_aggregate(atom(), binary(), atom()) -> {ok, pid()} | {error, term()}.
+start_aggregate(AggregateModule, AggregateId, StoreId) ->
     Partition = partition_for(AggregateId),
     PartitionSup = partition_sup_name(Partition),
-    supervisor:start_child(PartitionSup, [AggregateModule, AggregateId]).
+    supervisor:start_child(PartitionSup, [AggregateModule, AggregateId, StoreId]).
 
 %% @doc Get an existing aggregate process.
 -spec get_aggregate(binary()) -> {ok, pid()} | {error, not_found}.

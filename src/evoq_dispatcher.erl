@@ -95,11 +95,12 @@ execute_and_finalize(Pipeline, Middleware, StartTime) ->
     Command = Pipeline#evoq_pipeline.command,
     Context = Pipeline#evoq_pipeline.context,
 
-    %% Get or start the aggregate
+    %% Get or start the aggregate with the store_id from context
     AggregateType = Command#evoq_command.aggregate_type,
     AggregateId = Command#evoq_command.aggregate_id,
+    StoreId = Context#evoq_execution_context.store_id,
 
-    case evoq_aggregate_registry:get_or_start(AggregateType, AggregateId) of
+    case evoq_aggregate_registry:get_or_start(AggregateType, AggregateId, StoreId) of
         {ok, Pid} ->
             execute_on_aggregate(Pipeline, Pid, Middleware, StartTime, Context);
         {error, Reason} ->
@@ -140,8 +141,9 @@ maybe_retry(Pipeline, Error, Middleware, StartTime, Context) ->
             Command = Pipeline#evoq_pipeline.command,
             AggregateType = Command#evoq_command.aggregate_type,
             AggregateId = Command#evoq_command.aggregate_id,
+            StoreId = NewContext#evoq_execution_context.store_id,
 
-            case evoq_aggregate_registry:get_or_start(AggregateType, AggregateId) of
+            case evoq_aggregate_registry:get_or_start(AggregateType, AggregateId, StoreId) of
                 {ok, Pid} ->
                     execute_on_aggregate(NewPipeline, Pid, Middleware, StartTime, NewContext);
                 {error, Reason} ->
@@ -175,6 +177,7 @@ handle_failure(Pipeline, Error, Middleware, StartTime) ->
 handle_consistency(Pipeline, Context) ->
     Response = evoq_middleware:get_response(Pipeline),
     Consistency = Context#evoq_execution_context.consistency,
+    StoreId = Context#evoq_execution_context.store_id,
 
     case {Consistency, Response} of
         {eventual, _} ->
@@ -183,14 +186,12 @@ handle_consistency(Pipeline, Context) ->
             Response;
         {strong, {ok, Version, _Events}} ->
             AggregateId = Context#evoq_execution_context.aggregate_id,
-            StoreId = application:get_env(evoq, store_id, default_store),
             case evoq_consistency:wait_for(StoreId, AggregateId, Version, #{}) of
                 ok -> Response;
                 {error, timeout} -> {error, consistency_timeout}
             end;
         {{handlers, Handlers}, {ok, Version, _Events}} ->
             AggregateId = Context#evoq_execution_context.aggregate_id,
-            StoreId = application:get_env(evoq, store_id, default_store),
             case evoq_consistency:wait_for(StoreId, AggregateId, Version, #{handlers => Handlers}) of
                 ok -> Response;
                 {error, timeout} -> {error, consistency_timeout}
