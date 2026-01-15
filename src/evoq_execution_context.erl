@@ -24,7 +24,7 @@ new(Command) ->
 
 %% @doc Create a new execution context with options.
 %%
-%% The `store_id` option determines which ReckonDB store to use.
+%% The store_id option determines which ReckonDB store to use.
 %% If not specified, falls back to the application env configuration.
 -spec new(#evoq_command{}, map()) -> #evoq_execution_context{}.
 new(Command, Opts) ->
