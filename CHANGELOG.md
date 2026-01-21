@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-01-21
+
+### Added
+
+- **Tag-Based Querying**: Cross-stream event queries using tags
+  - `tags` field added to `#evoq_event{}` record in `evoq_types.hrl`
+  - `evoq_tag_match()` type - Support for `any` (union) and `all` (intersection) matching
+  - `tags` subscription type for tag-based subscriptions
+  - Tags are for QUERY purposes only, NOT for concurrency control
+
+## [1.1.3] - 2026-01-19
+
+### Fixed
+
+- **Documentation**: Minor documentation improvements
+
 ## [1.1.0] - 2026-01-08
 
 ### Added
