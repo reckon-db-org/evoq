@@ -1,0 +1,151 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 800">
+  <!-- Title -->
+  <text x="500" y="30" font-size="24" font-weight="bold" text-anchor="middle" fill="#1a1a1a">
+    Event Envelope Lifecycle
+  </text>
+  <text x="500" y="55" font-size="14" text-anchor="middle" fill="#666">
+    How business events flow through the evoq_event envelope
+  </text>
+
+  <!-- Phase 1: Command Handling -->
+  <g id="phase1">
+    <rect x="50" y="90" width="280" height="140" fill="#e3f2fd" stroke="#1976d2" stroke-width="2" rx="8"/>
+    <text x="190" y="110" font-size="16" font-weight="bold" text-anchor="middle" fill="#1976d2">
+      1. Command Handling
+    </text>
+
+    <!-- Handler box -->
+    <rect x="70" y="130" width="240" height="80" fill="white" stroke="#1976d2" stroke-width="1" rx="4"/>
+    <text x="190" y="150" font-size="12" font-weight="bold" text-anchor="middle">maybe_announce_capability:handle/1</text>
+    <text x="80" y="170" font-size="11" font-family="monospace" fill="#333">Returns: {ok, [Event]}</text>
+    <text x="80" y="190" font-size="11" font-family="monospace" fill="#666">Event = #capability_announced_v1{</text>
+    <text x="90" y="205" font-size="11" font-family="monospace" fill="#666">  capability_mri, agent_identity, ...</text>
+    <text x="80" y="220" font-size="11" font-family="monospace" fill="#666">}</text>
+  </g>
+
+  <!-- Arrow 1 -->
+  <path d="M 190 230 L 190 270" stroke="#333" stroke-width="2" fill="none" marker-end="url(#arrowhead)"/>
+  <text x="200" y="255" font-size="11" fill="#333">to_map/1</text>
+
+  <!-- Phase 2: Event Payload -->
+  <g id="phase2">
+    <rect x="50" y="280" width="280" height="140" fill="#fff3e0" stroke="#f57c00" stroke-width="2" rx="8"/>
+    <text x="190" y="300" font-size="16" font-weight="bold" text-anchor="middle" fill="#f57c00">
+      2. Business Event (Payload)
+    </text>
+
+    <!-- Payload box -->
+    <rect x="70" y="320" width="240" height="80" fill="white" stroke="#f57c00" stroke-width="1" rx="4"/>
+    <text x="190" y="340" font-size="12" font-weight="bold" text-anchor="middle">Map for evoq_event.data</text>
+    <text x="80" y="360" font-size="11" font-family="monospace" fill="#666">#{</text>
+    <text x="90" y="375" font-size="11" font-family="monospace" fill="#666">capability_mri => &lt;&lt;"mri:..."&gt;&gt;,</text>
+    <text x="90" y="390" font-size="11" font-family="monospace" fill="#666">agent_identity => &lt;&lt;"did:..."&gt;&gt;</text>
+    <text x="80" y="405" font-size="11" font-family="monospace" fill="#666">}</text>
+  </g>
+
+  <!-- Arrow 2 -->
+  <path d="M 190 420 L 190 460" stroke="#333" stroke-width="2" fill="none" marker-end="url(#arrowhead)"/>
+  <text x="200" y="445" font-size="11" fill="#333">evoq wraps</text>
+
+  <!-- Phase 3: evoq_event Envelope -->
+  <g id="phase3">
+    <rect x="50" y="470" width="280" height="240" fill="#f3e5f5" stroke="#7b1fa2" stroke-width="2" rx="8"/>
+    <text x="190" y="490" font-size="16" font-weight="bold" text-anchor="middle" fill="#7b1fa2">
+      3. evoq_event Envelope
+    </text>
+
+    <!-- Envelope box -->
+    <rect x="70" y="510" width="240" height="180" fill="white" stroke="#7b1fa2" stroke-width="1" rx="4"/>
+    <text x="80" y="530" font-size="11" font-family="monospace" fill="#666">#evoq_event{</text>
+    <text x="90" y="545" font-size="11" font-family="monospace" fill="#666">event_id = &lt;&lt;"uuid..."&gt;&gt;,</text>
+    <text x="90" y="560" font-size="11" font-family="monospace" fill="#666">event_type = &lt;&lt;"Capability...</text>
+    <text x="90" y="575" font-size="11" font-family="monospace" fill="#666">stream_id = &lt;&lt;"capability-..."&gt;&gt;,</text>
+    <text x="90" y="590" font-size="11" font-family="monospace" fill="#666">version = 0,</text>
+
+    <!-- Highlight data field -->
+    <rect x="85" y="595" width="210" height="30" fill="#fffacd" stroke="#f57c00" stroke-width="1" rx="2"/>
+    <text x="90" y="610" font-size="11" font-weight="bold" font-family="monospace" fill="#f57c00">data = #{...},  ← PAYLOAD HERE</text>
+
+    <text x="90" y="640" font-size="11" font-family="monospace" fill="#666">metadata = #{correlation_id, ...},</text>
+    <text x="90" y="655" font-size="11" font-family="monospace" fill="#666">tags = [&lt;&lt;"realm:..."&gt;&gt;],</text>
+    <text x="90" y="670" font-size="11" font-family="monospace" fill="#666">timestamp = 1703001234567</text>
+    <text x="80" y="685" font-size="11" font-family="monospace" fill="#666">}</text>
+  </g>
+
+  <!-- Right side: Storage and Projection -->
+
+  <!-- Arrow 3 -->
+  <path d="M 330 590 L 410 590" stroke="#333" stroke-width="2" fill="none" marker-end="url(#arrowhead)"/>
+  <text x="345" y="585" font-size="11" fill="#333">persist</text>
+
+  <!-- Phase 4: ReckonDB Storage -->
+  <g id="phase4">
+    <rect x="420" y="470" width="260" height="120" fill="#e8f5e9" stroke="#388e3c" stroke-width="2" rx="8"/>
+    <text x="550" y="490" font-size="16" font-weight="bold" text-anchor="middle" fill="#388e3c">
+      4. ReckonDB Storage
+    </text>
+
+    <!-- Storage box -->
+    <rect x="440" y="510" width="220" height="60" fill="white" stroke="#388e3c" stroke-width="1" rx="4"/>
+    <text x="550" y="530" font-size="12" font-weight="bold" text-anchor="middle">Event Stream</text>
+    <text x="450" y="550" font-size="11" font-family="monospace" fill="#666">Stream: capability-mri:...</text>
+    <text x="450" y="565" font-size="11" font-family="monospace" fill="#666">Version: 0, 1, 2, ...</text>
+  </g>
+
+  <!-- Arrow 4 -->
+  <path d="M 550 590 L 550 635" stroke="#333" stroke-width="2" fill="none" marker-end="url(#arrowhead)"/>
+  <text x="560" y="615" font-size="11" fill="#333">subscribe</text>
+
+  <!-- Phase 5: Projection -->
+  <g id="phase5">
+    <rect x="420" y="645" width="260" height="140" fill="#fce4ec" stroke="#c2185b" stroke-width="2" rx="8"/>
+    <text x="550" y="665" font-size="16" font-weight="bold" text-anchor="middle" fill="#c2185b">
+      5. Query Service Projection
+    </text>
+
+    <!-- Projection box -->
+    <rect x="440" y="685" width="220" height="80" fill="white" stroke="#c2185b" stroke-width="1" rx="4"/>
+    <text x="550" y="705" font-size="12" font-weight="bold" text-anchor="middle">handle_event/1</text>
+    <text x="450" y="725" font-size="11" font-family="monospace" fill="#666">#{event_type, data, metadata}</text>
+    <text x="450" y="740" font-size="11" font-family="monospace" fill="#f57c00">  → Extract 'data' field</text>
+    <text x="450" y="755" font-size="11" font-family="monospace" fill="#666">  → from_map(Data)</text>
+  </g>
+
+  <!-- Arrow 5 -->
+  <path d="M 680 715 L 760 715" stroke="#333" stroke-width="2" fill="none" marker-end="url(#arrowhead)"/>
+  <text x="690" y="710" font-size="11" fill="#333">project</text>
+
+  <!-- Phase 6: SQLite Read Model -->
+  <g id="phase6">
+    <rect x="770" y="645" width="200" height="140" fill="#e0f2f1" stroke="#00796b" stroke-width="2" rx="8"/>
+    <text x="870" y="665" font-size="16" font-weight="bold" text-anchor="middle" fill="#00796b">
+      6. SQLite Read Model
+    </text>
+
+    <!-- Read model box -->
+    <rect x="790" y="685" width="160" height="80" fill="white" stroke="#00796b" stroke-width="1" rx="4"/>
+    <text x="870" y="705" font-size="12" font-weight="bold" text-anchor="middle">capabilities table</text>
+    <text x="800" y="725" font-size="11" font-family="monospace" fill="#666">mri, agent_id,</text>
+    <text x="800" y="740" font-size="11" font-family="monospace" fill="#666">tags, description,</text>
+    <text x="800" y="755" font-size="11" font-family="monospace" fill="#666">announced_at</text>
+  </g>
+
+  <!-- Legend -->
+  <g id="legend">
+    <rect x="50" y="730" width="920" height="50" fill="#f5f5f5" stroke="#999" stroke-width="1" rx="4"/>
+    <text x="60" y="750" font-size="14" font-weight="bold" fill="#333">Key Insight:</text>
+    <text x="60" y="768" font-size="12" fill="#666">
+      Your business event (capability_announced_v1) produces/consumes ONLY the 'data' field.
+    </text>
+    <text x="490" y="768" font-size="12" fill="#666">
+      evoq handles wrapping (event_id, metadata, tags, timestamps).
+    </text>
+  </g>
+
+  <!-- Arrow marker definition -->
+  <defs>
+    <marker id="arrowhead" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto">
+      <polygon points="0 0, 10 3, 0 6" fill="#333"/>
+    </marker>
+  </defs>
+</svg>

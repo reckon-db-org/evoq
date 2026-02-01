@@ -15,6 +15,40 @@ Use projections for:
 
 The key insight: read models can be **rebuilt** by replaying events.
 
+## Understanding Event Envelope Structure
+
+**IMPORTANT:** Projections receive events wrapped in an `evoq_event` envelope. The first parameter to `project/4` is a map with this structure:
+
+```erlang
+#{
+    event_type => <<"OrderPlaced">>,     %% Event type (binary)
+    data => #{                            %% ← YOUR BUSINESS EVENT PAYLOAD
+        order_id => <<"ord-123">>,
+        customer_id => <<"cust-456">>,
+        total => 99.99,
+        items => [...]
+    },
+    metadata => #{                        %% ← Envelope metadata
+        aggregate_id => <<"ord-123">>,
+        correlation_id => <<"req-abc">>,
+        causation_id => <<"cmd-xyz">>,
+        timestamp => 1703001234567
+    },
+    tags => [<<"tenant:acme">>],
+    ...
+}
+```
+
+**Key fields:**
+- `event_type` - Binary identifying the event type
+- `data` - **Your business event payload** (extract this)
+- `metadata` - Cross-cutting metadata (correlation_id, causation_id, etc.)
+- `tags` - Optional tags for cross-stream queries
+
+The second parameter (`Metadata`) is the envelope metadata, duplicated for convenience.
+
+**See [Event Envelope Guide](event_envelope.md) for complete details.**
+
 ## Basic Projection
 
 ```erlang

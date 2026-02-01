@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.1] - 2026-02-01
+
+### Added
+
+- **Event Envelope Documentation**: Comprehensive guide explaining `evoq_event` record structure
+  - New guide: `guides/event_envelope.md` - Complete explanation of envelope fields
+  - New diagram: `assets/event-envelope-diagram.svg` - Visual event lifecycle
+  - Updated `guides/projections.md` - Clarified envelope structure in projections
+  - Documents where business event payloads fit (`data` field)
+  - Explains metadata usage (correlation_id, causation_id, etc.)
+  - Event naming conventions and versioning patterns
+  - Common mistakes to avoid
+
+### Documentation
+
+- Improved clarity on event envelope structure
+- Added visual diagrams for event lifecycle
+- Standardized metadata field documentation
+
 ## [1.2.0] - 2026-01-21
 
 ### Added
