@@ -28,13 +28,23 @@
 %%====================================================================
 
 %% @doc Dispatch a command through the middleware pipeline.
+%%
+%% If command_id is undefined, auto-generates one.
+%% If idempotency_key is set, uses it for deduplication cache.
+%% Otherwise, command_id is used (each dispatch is unique).
 -spec dispatch(#evoq_command{}, map()) -> {ok, non_neg_integer(), [map()]} | {error, term()}.
-dispatch(Command, Opts) ->
-    CommandId = Command#evoq_command.command_id,
+dispatch(Command0, Opts) ->
+    %% Auto-generate command_id if not provided
+    Command = evoq_command:ensure_id(Command0),
     TTL = application:get_env(evoq, idempotency_ttl, ?DEFAULT_IDEMPOTENCY_TTL),
 
-    %% Use idempotency check
-    evoq_idempotency:check_and_store(CommandId, fun() ->
+    %% Use idempotency_key for cache if provided, otherwise command_id
+    CacheKey = case Command#evoq_command.idempotency_key of
+        undefined -> Command#evoq_command.command_id;
+        Key -> Key
+    end,
+
+    evoq_idempotency:check_and_store(CacheKey, fun() ->
         dispatch_internal(Command, Opts)
     end, TTL).
 

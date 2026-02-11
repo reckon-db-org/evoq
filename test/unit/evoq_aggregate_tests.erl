@@ -201,6 +201,88 @@ execution_context_metadata_test() ->
     ?assertEqual(value2, evoq_execution_context:get(key2, Context2)).
 
 %%====================================================================
+%% Command Tests
+%%====================================================================
+
+command_new_auto_generates_id_test() ->
+    Cmd = evoq_command:new(increment, ?MODULE, <<"agg-1">>, #{amount => 1}),
+    ?assertNotEqual(undefined, Cmd#evoq_command.command_id),
+    ?assert(is_binary(Cmd#evoq_command.command_id)).
+
+command_new_auto_generates_correlation_id_test() ->
+    Cmd = evoq_command:new(increment, ?MODULE, <<"agg-1">>, #{amount => 1}),
+    ?assertNotEqual(undefined, Cmd#evoq_command.correlation_id),
+    ?assert(is_binary(Cmd#evoq_command.correlation_id)).
+
+command_new_unique_ids_test() ->
+    Cmd1 = evoq_command:new(increment, ?MODULE, <<"agg-1">>, #{amount => 1}),
+    Cmd2 = evoq_command:new(increment, ?MODULE, <<"agg-1">>, #{amount => 1}),
+    ?assertNotEqual(Cmd1#evoq_command.command_id, Cmd2#evoq_command.command_id).
+
+command_idempotency_key_default_undefined_test() ->
+    Cmd = evoq_command:new(increment, ?MODULE, <<"agg-1">>, #{amount => 1}),
+    ?assertEqual(undefined, evoq_command:get_idempotency_key(Cmd)).
+
+command_set_idempotency_key_test() ->
+    Cmd0 = evoq_command:new(increment, ?MODULE, <<"agg-1">>, #{amount => 1}),
+    Cmd = evoq_command:set_idempotency_key(<<"form-submit-123">>, Cmd0),
+    ?assertEqual(<<"form-submit-123">>, evoq_command:get_idempotency_key(Cmd)).
+
+command_ensure_id_generates_when_undefined_test() ->
+    Cmd0 = #evoq_command{
+        command_type = increment,
+        aggregate_type = ?MODULE,
+        aggregate_id = <<"agg-1">>,
+        payload = #{amount => 1}
+    },
+    ?assertEqual(undefined, Cmd0#evoq_command.command_id),
+    Cmd = evoq_command:ensure_id(Cmd0),
+    ?assertNotEqual(undefined, Cmd#evoq_command.command_id),
+    ?assert(is_binary(Cmd#evoq_command.command_id)).
+
+command_ensure_id_preserves_existing_test() ->
+    Cmd0 = #evoq_command{
+        command_id = <<"my-custom-id">>,
+        command_type = increment,
+        aggregate_type = ?MODULE,
+        aggregate_id = <<"agg-1">>
+    },
+    Cmd = evoq_command:ensure_id(Cmd0),
+    ?assertEqual(<<"my-custom-id">>, Cmd#evoq_command.command_id).
+
+command_validate_allows_undefined_command_id_test() ->
+    Cmd = #evoq_command{
+        command_type = increment,
+        aggregate_type = ?MODULE,
+        aggregate_id = <<"agg-1">>
+    },
+    ?assertEqual(ok, evoq_command:validate(Cmd)).
+
+command_validate_rejects_missing_command_type_test() ->
+    Cmd = #evoq_command{
+        command_id = <<"cmd-1">>,
+        aggregate_type = ?MODULE,
+        aggregate_id = <<"agg-1">>
+    },
+    ?assertEqual({error, missing_command_type}, evoq_command:validate(Cmd)).
+
+command_validate_rejects_missing_aggregate_type_test() ->
+    Cmd = #evoq_command{
+        command_id = <<"cmd-1">>,
+        command_type = increment,
+        aggregate_id = <<"agg-1">>
+    },
+    ?assertEqual({error, missing_aggregate_type}, evoq_command:validate(Cmd)).
+
+command_validate_rejects_missing_aggregate_id_test() ->
+    Cmd = #evoq_command{
+        command_id = <<"cmd-1">>,
+        command_type = increment,
+        aggregate_type = ?MODULE
+    },
+    ?assertEqual({error, missing_aggregate_id}, evoq_command:validate(Cmd)).
+
+%%====================================================================
 %% Lifespan Tests
 %%====================================================================
 

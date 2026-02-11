@@ -7,6 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-02-11
+
+### Added
+
+- **`idempotency_key` field on `#evoq_command{}`**: Optional caller-provided key for
+  deterministic command deduplication. When set, the idempotency cache uses this key
+  instead of `command_id`. Use for scenarios like "user cannot submit the same form twice"
+  where the deduplication key should be deterministic and intent-based.
+
+- **Auto-generated `command_id`**: The dispatcher now auto-generates `command_id` via
+  `crypto:strong_rand_bytes/1` if the field is `undefined`. Callers no longer need to
+  generate their own command IDs — the framework handles it.
+
+- **`evoq_command:ensure_id/1`**: Fills in `command_id` if undefined, returns command
+  unchanged if already set.
+
+- **`evoq_command:get_idempotency_key/1`** and **`set_idempotency_key/2`**: Accessors
+  for the new `idempotency_key` field.
+
+### Changed
+
+- **Idempotency cache key selection**: The dispatcher now uses `idempotency_key` (if set)
+  for cache lookups, falling back to `command_id`. This separates the concerns of command
+  identification (tracing, unique per invocation) from command deduplication (deterministic
+  per intent).
+
+- **Validation relaxed**: `evoq_command:validate/1` no longer rejects commands with
+  `undefined` command_id, since the dispatcher auto-generates it before execution.
+
+### Migration
+
+- **No breaking changes for existing code.** Commands with manually-set `command_id` continue
+  to work exactly as before. The new `idempotency_key` field defaults to `undefined`.
+- **Recommended**: Stop generating `command_id` manually in dispatch modules. Let the
+  framework handle it. If you need deduplication, use `idempotency_key` instead.
+
 ## [1.2.1] - 2026-02-01
 
 ### Added

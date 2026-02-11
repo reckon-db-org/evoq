@@ -23,7 +23,7 @@
 %% @doc Command structure for dispatching to aggregates.
 %%
 %% Fields:
-%% - command_id: Unique identifier for idempotency
+%% - command_id: Unique identifier for tracing (auto-generated if undefined)
 %% - command_type: Atom identifying the command type
 %% - aggregate_type: Module implementing evoq_aggregate behavior
 %% - aggregate_id: Unique identifier for the aggregate instance
@@ -31,6 +31,11 @@
 %% - metadata: Additional context (user_id, tenant_id, etc.)
 %% - causation_id: ID of the command/event that caused this
 %% - correlation_id: ID linking related commands/events
+%% - idempotency_key: Optional caller-provided key for deduplication.
+%%   When set, this key is used for the idempotency cache instead of
+%%   command_id. Use this for deterministic deduplication (e.g. "user
+%%   cannot submit the same form twice"). When undefined, command_id
+%%   is used (each dispatch is unique).
 -record(evoq_command, {
     command_id :: binary() | undefined,
     command_type :: atom() | undefined,
@@ -39,7 +44,8 @@
     payload = #{} :: map(),
     metadata = #{} :: map(),
     causation_id :: binary() | undefined,
-    correlation_id :: binary() | undefined
+    correlation_id :: binary() | undefined,
+    idempotency_key :: binary() | undefined
 }).
 
 -type evoq_command() :: #evoq_command{}.
