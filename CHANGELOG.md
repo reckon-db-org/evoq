@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.1] - 2026-02-13
+
+### Fixed
+
+- **Aggregate replay at version 0**: `load_or_init/3` now uses `State =/= undefined`
+  instead of `Version > 0` to detect replayed events. The first event in a stream
+  is version 0, so the previous guard skipped it and re-initialized fresh.
+
+### Added
+
+- **`event_to_map/1` exported**: `evoq_event_store:event_to_map/1` is now public API.
+  Converts `#evoq_event{}` records to flat maps, merging business data from the `data`
+  field into the top level so aggregates see consistent shapes regardless of source.
+
 ## [1.3.0] - 2026-02-11
 
 ### Added

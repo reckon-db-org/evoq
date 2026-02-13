@@ -26,6 +26,9 @@
 -export([list_streams/1, read_all/3, read_all/4]).
 -export([read_all_events/2, read_events_by_types/3]).
 
+%% Event conversion
+-export([event_to_map/1]).
+
 %% Configuration
 -export([get_adapter/0, set_adapter/1]).
 
@@ -152,20 +155,50 @@ read_events_by_types(StoreId, EventTypes, BatchSize) ->
 %% Internal Functions
 %%====================================================================
 
-%% @private Convert event record to map
+%% @private Convert event record to a flat map.
+%%
+%% Business event fields (stored in the `data` field by reckon_db) are
+%% merged into the top level so that aggregate apply/2 callbacks always
+%% see the same shape regardless of whether the event came from execute
+%% (flat map) or from a store replay (envelope with nested data).
+%%
+%% Envelope fields (event_id, version, metadata, etc.) are preserved
+%% at the top level.  If a data field collides with an envelope field
+%% the envelope value wins (atom keys take precedence).
 -spec event_to_map(evoq_event() | map()) -> map().
 event_to_map(#evoq_event{} = Event) ->
-    #{
+    %% Resolve event_type: prefer the record field, but fall back to the
+    %% value inside data when the record field is undefined (happens when
+    %% the event was stored with binary keys that the adapter didn't extract).
+    RawType = Event#evoq_event.event_type,
+    EventType = case RawType of
+        undefined ->
+            Data0 = Event#evoq_event.data,
+            case is_map(Data0) of
+                true ->
+                    case maps:find(event_type, Data0) of
+                        {ok, T} -> T;
+                        error -> maps:get(<<"event_type">>, Data0, undefined)
+                    end;
+                false -> undefined
+            end;
+        T -> T
+    end,
+    Envelope = #{
         event_id => Event#evoq_event.event_id,
-        event_type => Event#evoq_event.event_type,
+        event_type => EventType,
         stream_id => Event#evoq_event.stream_id,
         version => Event#evoq_event.version,
-        data => Event#evoq_event.data,
         metadata => Event#evoq_event.metadata,
         timestamp => Event#evoq_event.timestamp,
         epoch_us => Event#evoq_event.epoch_us,
         data_content_type => Event#evoq_event.data_content_type,
         metadata_content_type => Event#evoq_event.metadata_content_type
-    };
+    },
+    %% Flatten: merge business data into top level, envelope wins on collision
+    case Event#evoq_event.data of
+        Data when is_map(Data) -> maps:merge(Data, Envelope);
+        _ -> Envelope
+    end;
 event_to_map(EventMap) when is_map(EventMap) ->
     EventMap.

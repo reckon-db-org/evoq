@@ -262,9 +262,12 @@ load_or_init(Module, AggregateId, StoreId) ->
                 {error, _} -> init_fresh(Module, AggregateId)
             end;
         {error, not_found} ->
-            %% No snapshot, replay all events or init fresh
+            %% No snapshot, replay all events or init fresh.
+            %% Note: first event in a stream is version 0, so we check
+            %% State =/= undefined (set by replay_events when events exist)
+            %% instead of Version > 0.
             case replay_events(Module, StoreId, AggregateId, 0, undefined) of
-                {ok, State, Version} when Version > 0 -> {State, Version};
+                {ok, State, Version} when State =/= undefined -> {State, Version};
                 _ -> init_fresh(Module, AggregateId)
             end
     end.
