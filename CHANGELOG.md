@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-02-25
+
+### Added
+
+- **`evoq_subscriptions` facade module**: Application-level API for subscription
+  operations, mirroring the `evoq_event_store` pattern. Application code should call
+  `evoq_subscriptions:subscribe/5` instead of the adapter directly. Delegates to a
+  configured `subscription_adapter` (set via `{evoq, [{subscription_adapter, Module}]}`).
+  Exports: `subscribe/5`, `unsubscribe/2`, `ack/4`, `get_checkpoint/2`, `list/1`,
+  `get_by_name/2`, `get_adapter/0`, `set_adapter/1`.
+
 ## [1.3.1] - 2026-02-13
 
 ### Fixed
