@@ -322,16 +322,35 @@ replay_events(Module, StoreId, AggregateId, FromVersion, InitState) ->
 append_events(_StoreId, _StreamId, _Version, [], _Command) ->
     {ok, 0};
 append_events(StoreId, StreamId, Version, Events, Command) ->
-    %% Add metadata to events
-    EventsWithMeta = lists:map(fun(Event) ->
-        Event#{
-            causation_id => Command#evoq_command.command_id,
-            correlation_id => Command#evoq_command.correlation_id,
-            metadata => Command#evoq_command.metadata
-        }
-    end, Events),
+    %% Build infrastructure metadata from command
+    CmdMeta = Command#evoq_command.metadata,
+    %% Cross-stream tags live in command metadata under 'tags' key
+    Tags = maps:get(tags, CmdMeta, undefined),
+    CleanMeta = maps:without([tags], CmdMeta),
+    BaseMeta = CleanMeta#{
+        causation_id => Command#evoq_command.command_id,
+        correlation_id => Command#evoq_command.correlation_id
+    },
 
-    evoq_event_store:append(StoreId, StreamId, Version, EventsWithMeta).
+    %% Wrap each event into nested #{event_type, data, metadata} structure.
+    %% This eliminates guesswork in the adapter — we KNOW which keys are
+    %% infrastructure (we put them there) and which are business data.
+    EventsNested = lists:map(fun(Event) ->
+        EventType = maps:get(event_type, Event, undefined),
+        Data = maps:without([event_type], Event),
+        Wrapped = #{
+            event_type => EventType,
+            data => Data,
+            metadata => BaseMeta
+        },
+        case Tags of
+            undefined -> Wrapped;
+            [] -> Wrapped;
+            L when is_list(L) -> Wrapped#{tags => L};
+            _ -> Wrapped
+        end
+    end, Events),
+    evoq_event_store:append(StoreId, StreamId, Version, EventsNested).
 
 %% @private
 maybe_snapshot(#evoq_aggregate_state{snapshot_count = Count} = State) ->
