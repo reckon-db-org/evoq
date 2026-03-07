@@ -355,12 +355,12 @@ do_rebuild(#state{
     %% Clear the read model
     case evoq_read_model:clear(ReadModel) of
         {ok, ClearedRM} ->
-            %% Reset checkpoint
-            save_checkpoint(ProjectionModule, CheckpointStore, 0),
+            %% Reset checkpoint (-1 = nothing processed yet)
+            save_checkpoint(ProjectionModule, CheckpointStore, -1),
 
             InitialState = State#state{
                 read_model = ClearedRM,
-                checkpoint = 0
+                checkpoint = -1
             },
 
             %% Replay all events from event store
@@ -441,7 +441,7 @@ replay_events_list([Event | Rest], State) ->
 
 %% @private
 load_checkpoint(_ProjectionModule, undefined) ->
-    0;
+    -1;
 load_checkpoint(ProjectionModule, CheckpointStore) ->
     case erlang:function_exported(CheckpointStore, load, 1) of
         true ->

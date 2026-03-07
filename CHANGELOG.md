@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.8.1] - 2026-03-07
+
+### Fixed
+
+- **Projection checkpoint skips first event (version 0)**: Initial checkpoint
+  was 0, and the idempotency check `EventVersion =< Checkpoint` skipped events
+  at version 0. Since ReckonDB stream versions are 0-based, the first event in
+  every stream was silently dropped. Changed initial checkpoint to -1 (sentinel
+  for "nothing processed yet"). Same fix applied to `do_rebuild/1`. This is the
+  same class of bug that was fixed in aggregates in v1.3.1.
+
 ## [1.8.0] - 2026-03-07
 
 ### Changed
