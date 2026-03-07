@@ -20,6 +20,7 @@
 -export([register_handler/2, unregister_handler/2]).
 -export([get_handlers/1]).
 -export([get_all_event_types/0]).
+-export([register_listener/1, unregister_listener/1]).
 
 %% gen_server callbacks
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
@@ -39,6 +40,8 @@ start_link() ->
     gen_server:start_link({local, ?SERVER}, ?MODULE, [], []).
 
 %% @doc Register a handler pid for an event type.
+%% Notifies any registered store subscription listeners when a
+%% previously unseen event type gets its first handler.
 -spec register(binary(), pid()) -> ok.
 register(EventType, HandlerPid) ->
     gen_server:call(?SERVER, {register, EventType, HandlerPid}).
@@ -69,6 +72,25 @@ get_handlers(EventType) ->
 get_all_event_types() ->
     gen_server:call(?SERVER, get_all_event_types).
 
+%% @doc Register a store subscription listener.
+%%
+%% Atomically returns the current list of event types AND subscribes
+%% the listener for future type registration notifications.
+%% This is race-free: no register/2 call can execute between
+%% returning the current types and subscribing for notifications,
+%% because both happen in the same gen_server call.
+%%
+%% The listener receives `{new_event_type, EventType :: binary()}'
+%% messages when a previously unseen event type gets its first handler.
+-spec register_listener(pid()) -> {ok, [binary()]}.
+register_listener(ListenerPid) ->
+    gen_server:call(?SERVER, {register_listener, ListenerPid}).
+
+%% @doc Unregister a store subscription listener.
+-spec unregister_listener(pid()) -> ok.
+unregister_listener(ListenerPid) ->
+    gen_server:call(?SERVER, {unregister_listener, ListenerPid}).
+
 %%====================================================================
 %% gen_server callbacks
 %%====================================================================
@@ -85,7 +107,14 @@ init([]) ->
 %% @private
 handle_call({register, EventType, HandlerPid}, _From, State) ->
     Group = event_type_group(EventType),
+    %% Check if this is a new event type (no existing handlers)
+    IsNew = pg:get_members(?PG_SCOPE, Group) =:= [],
     ok = pg:join(?PG_SCOPE, Group, HandlerPid),
+    %% Notify store subscription listeners about new event type
+    case IsNew of
+        true -> notify_listeners(EventType);
+        false -> ok
+    end,
     {reply, ok, State};
 
 handle_call({unregister, EventType, HandlerPid}, _From, State) ->
@@ -111,6 +140,18 @@ handle_call(get_all_event_types, _From, State) ->
     Groups = pg:which_groups(?PG_SCOPE),
     Types = [extract_event_type(G) || G <- Groups, is_event_type_group(G)],
     {reply, Types, State};
+
+handle_call({register_listener, ListenerPid}, _From, State) ->
+    %% Add listener to notification group
+    ok = pg:join(?PG_SCOPE, store_subscription_listeners, ListenerPid),
+    %% Return current types atomically (same gen_server call)
+    Groups = pg:which_groups(?PG_SCOPE),
+    Types = [extract_event_type(G) || G <- Groups, is_event_type_group(G)],
+    {reply, {ok, Types}, State};
+
+handle_call({unregister_listener, ListenerPid}, _From, State) ->
+    _ = pg:leave(?PG_SCOPE, store_subscription_listeners, ListenerPid),
+    {reply, ok, State};
 
 handle_call(_Request, _From, State) ->
     {reply, {error, unknown_request}, State}.
@@ -141,3 +182,10 @@ is_event_type_group(_) -> false.
 
 %% @private
 extract_event_type({event_type, EventType}) -> EventType.
+
+%% @private Notify store subscription listeners about a new event type.
+notify_listeners(EventType) ->
+    Listeners = pg:get_members(?PG_SCOPE, store_subscription_listeners),
+    lists:foreach(fun(Pid) ->
+        Pid ! {new_event_type, EventType}
+    end, Listeners).

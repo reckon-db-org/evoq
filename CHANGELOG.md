@@ -7,6 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.6.0] - 2026-03-07
+
+### Added
+
+- **`evoq_store_subscription` module**: Bridge between event stores and evoq's
+  routing infrastructure. Creates per-event-type subscriptions to a reckon-db
+  store, matching evoq's event-type-oriented architecture. Only events that have
+  registered handlers/projections/PMs are subscribed to — filtering happens at
+  the store level, not the application level. This is the critical missing link
+  that connects the event store to evoq behaviours (`evoq_event_handler`,
+  `evoq_projection`, `evoq_process_manager`).
+  - Start one instance per store: `evoq_store_subscription:start_link(my_store)`
+  - Automatically discovers registered event types from `evoq_event_type_registry`
+  - Dynamically subscribes to new event types as handlers register
+  - Routes events to both `evoq_event_router` and `evoq_pm_router`
+
+- **`evoq_event_type_registry:register_listener/1`**: Atomically returns all
+  currently registered event types AND subscribes the caller for future
+  type registration notifications. Race-free — no `register/2` call can
+  execute between returning types and subscribing for notifications.
+
+- **`evoq_event_type_registry:unregister_listener/1`**: Removes a store
+  subscription listener.
+
+### Changed
+
+- **`evoq_event_type_registry:register/2`**: Now detects when an event type
+  gets its first handler and notifies registered store subscription listeners
+  via `{new_event_type, EventType}` messages.
+
+## [1.5.0] - 2026-03-05
+
+### Fixed
+
+- **Nested event structure in `append_events`**: Events produced by aggregates
+  now use proper nested `#{event_type, data, metadata}` structure.
+
 ## [1.4.0] - 2026-02-25
 
 ### Added
