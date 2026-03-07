@@ -7,7 +7,12 @@
 %%
 %% - name: ETS table name (default: auto-generated)
 %% - type: ETS table type (default: set)
-%% - access: public | protected | private (default: protected)
+%% - access: public | protected | private (default: public)
+%%
+%% Named tables are shared by default: if the table already exists,
+%% new instances join it instead of crashing. This allows multiple
+%% projections to write to the same read model while each maintaining
+%% their own checkpoint.
 %%
 %% @author rgfaber
 -module(evoq_read_model_ets).
@@ -31,20 +36,20 @@ init(Config) ->
     Type = maps:get(type, Config, set),
     Access = maps:get(access, Config, public),
 
-    try
-        %% Use unnamed table (returns tid) for isolation between instances
-        Table = case maps:get(name, Config, undefined) of
-            undefined ->
-                %% Anonymous table
-                ets:new(?MODULE, [Type, Access, {read_concurrency, true}]);
-            Name when is_atom(Name) ->
-                %% Named table
-                ets:new(Name, [Type, Access, named_table, {read_concurrency, true}])
-        end,
-        {ok, #state{table = Table}}
-    catch
-        error:Reason ->
-            {error, Reason}
+    case maps:get(name, Config, undefined) of
+        undefined ->
+            %% Anonymous table — isolated per instance
+            Table = ets:new(?MODULE, [Type, Access, {read_concurrency, true}]),
+            {ok, #state{table = Table}};
+        Name when is_atom(Name) ->
+            %% Named table — shared across projections
+            Table = case ets:whereis(Name) of
+                undefined ->
+                    ets:new(Name, [Type, Access, named_table, {read_concurrency, true}]);
+                Tid ->
+                    Tid
+            end,
+            {ok, #state{table = Table}}
     end.
 
 %% @doc Get a value by key.
