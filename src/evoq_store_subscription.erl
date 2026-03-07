@@ -1,20 +1,21 @@
 %% @doc Bridge between event stores and evoq routing infrastructure.
 %%
-%% Creates per-event-type subscriptions to a reckon-db store,
-%% matching evoq's event-type-oriented architecture. Only events
-%% that have registered handlers/projections/PMs are subscribed to.
+%% Creates a single $all subscription to a reckon-db store, receiving
+%% ALL events in global store order. Events are filtered locally by
+%% checking against registered event types in the type registry.
 %%
-%% This is the critical link that connects the event store to evoq
-%% behaviours (`evoq_event_handler', `evoq_projection',
-%% `evoq_process_manager'). Without it, the routing infrastructure
-%% exists but receives no events.
+%% This preserves causal ordering across event types within a store,
+%% which is critical when projections for related events must execute
+%% in the order they were appended (e.g., license_initiated before
+%% license_published).
 %%
-%% == How It Differs from Commanded ==
+%% == How It Works ==
 %%
-%% Commanded subscribes to ALL events (stream-oriented) and filters
-%% at the handler level. Evoq subscribes per event type at the store
-%% level — only relevant events are delivered. This scales better
-%% because the store does the filtering, not the application.
+%% 1. Subscribes to the store's $all stream (by_stream, selector $all)
+%% 2. Receives ALL events in store-global order
+%% 3. For each event, checks if any handler is registered for its type
+%% 4. Routes matching events to evoq_event_router and evoq_pm_router
+%% 5. Skips events with no registered handlers (zero cost)
 %%
 %% == Usage ==
 %%
@@ -28,13 +29,6 @@
 %%
 %% All modules implementing evoq behaviours that have registered with
 %% `evoq_event_type_registry' will automatically receive matching events.
-%%
-%% == Dynamic Registration ==
-%%
-%% When a handler registers interest in a new event type AFTER the
-%% store subscription has started, the type registry notifies this
-%% module via `{new_event_type, EventType}' messages. A new per-type
-%% subscription is created automatically.
 %%
 %% @author rgfaber
 -module(evoq_store_subscription).
@@ -53,8 +47,7 @@
 
 -record(state, {
     store_id :: atom(),
-    %% Map of event_type => subscription_id
-    subscriptions = #{} :: #{binary() => binary()},
+    subscription_id :: binary() | undefined,
     opts :: map()
 }).
 
@@ -83,56 +76,38 @@ start_link(StoreId, Opts) ->
 %% @private
 init({StoreId, Opts}) ->
     %% Register as a listener with the type registry.
-    %% This atomically returns all currently registered event types
-    %% AND subscribes us for future type registration notifications.
-    {ok, CurrentTypes} = evoq_event_type_registry:register_listener(self()),
+    %% We still register so we know about new types, but we no longer
+    %% need to create per-type subscriptions — we subscribe to $all.
+    {ok, _CurrentTypes} = evoq_event_type_registry:register_listener(self()),
 
-    %% Create per-event-type subscriptions for all current types
-    Subs = lists:foldl(fun(EventType, Acc) ->
-        case subscribe_to_type(StoreId, EventType, Opts) of
-            {ok, SubId} ->
-                Acc#{EventType => SubId};
-            {error, Reason} ->
-                logger:warning("[evoq] Failed to subscribe to ~s/~s: ~p",
-                               [StoreId, EventType, Reason]),
-                Acc
-        end
-    end, #{}, CurrentTypes),
+    %% Create a single $all subscription for the entire store.
+    %% This receives ALL events in global store order.
+    SubId = case subscribe_to_all(StoreId, Opts) of
+        {ok, Id} ->
+            Id;
+        {error, Reason} ->
+            logger:warning("[evoq] Failed to subscribe to $all for ~s: ~p",
+                           [StoreId, Reason]),
+            undefined
+    end,
 
-    logger:info("[evoq] Store subscription started for ~s (~b event types)",
-                [StoreId, map_size(Subs)]),
+    logger:info("[evoq] Store subscription started for ~s (single $all subscription)",
+                [StoreId]),
 
     {ok, #state{
         store_id = StoreId,
-        subscriptions = Subs,
+        subscription_id = SubId,
         opts = Opts
     }}.
 
 %% @private
-handle_info({new_event_type, EventType}, #state{
-    store_id = StoreId,
-    subscriptions = Subs,
-    opts = Opts
-} = State) ->
-    %% A new event type was registered in the type registry.
-    %% Create a subscription if we don't have one yet.
-    case maps:is_key(EventType, Subs) of
-        true ->
-            {noreply, State};
-        false ->
-            case subscribe_to_type(StoreId, EventType, Opts) of
-                {ok, SubId} ->
-                    logger:info("[evoq] New subscription for ~s/~s",
-                                [StoreId, EventType]),
-                    {noreply, State#state{
-                        subscriptions = Subs#{EventType => SubId}
-                    }};
-                {error, Reason} ->
-                    logger:warning("[evoq] Failed to subscribe to ~s/~s: ~p",
-                                   [StoreId, EventType, Reason]),
-                    {noreply, State}
-            end
-    end;
+%% New event types are registered dynamically. Since we subscribe to
+%% $all, we don't need to create new subscriptions — events for this
+%% type are already being delivered. We just acknowledge and move on.
+handle_info({new_event_type, EventType}, #state{store_id = StoreId} = State) ->
+    logger:info("[evoq] New event type registered for ~s: ~s (already covered by $all)",
+                [StoreId, EventType]),
+    {noreply, State};
 
 handle_info({events, Events}, State) when is_list(Events) ->
     lists:foreach(fun route_event/1, Events),
@@ -159,23 +134,32 @@ terminate(_Reason, #state{store_id = StoreId}) ->
 %% Internal functions
 %%====================================================================
 
-%% @private Subscribe to a single event type on the store.
--spec subscribe_to_type(atom(), binary(), map()) -> {ok, binary()} | {error, term()}.
-subscribe_to_type(StoreId, EventType, Opts) ->
-    SubName = subscription_name(StoreId, EventType),
+%% @private Subscribe to the $all stream on the store.
+%% Uses by_stream subscription type with <<"$all">> selector,
+%% which matches events in ALL streams (global store order).
+-spec subscribe_to_all(atom(), map()) -> {ok, binary()} | {error, term()}.
+subscribe_to_all(StoreId, Opts) ->
+    SubName = subscription_name(StoreId),
     StartFrom = maps:get(start_from, Opts, 0),
     evoq_subscriptions:subscribe(
-        StoreId, event_type, EventType, SubName,
+        StoreId, stream, <<"$all">>, SubName,
         #{subscriber_pid => self(), start_from => StartFrom}
     ).
 
 %% @private Route a single evoq event to both event router and PM router.
+%% Only routes events that have registered handlers — others are skipped.
 -spec route_event(evoq_event() | term()) -> ok.
-route_event(#evoq_event{} = E) ->
-    {Event, Metadata} = evoq_event_to_routable(E),
-    evoq_event_router:route_event(Event, Metadata),
-    evoq_pm_router:route_event(Event, Metadata),
-    ok;
+route_event(#evoq_event{event_type = EventType} = E) ->
+    case evoq_event_type_registry:get_handlers(EventType) of
+        [] ->
+            %% No handlers registered for this event type — skip
+            ok;
+        _Handlers ->
+            {Event, Metadata} = evoq_event_to_routable(E),
+            evoq_event_router:route_event(Event, Metadata),
+            evoq_pm_router:route_event(Event, Metadata),
+            ok
+    end;
 route_event(_Other) ->
     ok.
 
@@ -218,12 +202,10 @@ evoq_event_to_routable(#evoq_event{
 registration_name(StoreId) ->
     list_to_atom("evoq_store_sub_" ++ atom_to_list(StoreId)).
 
-%% @private Generate a subscription name for a specific event type.
--spec subscription_name(atom(), binary()) -> binary().
-subscription_name(StoreId, EventType) ->
+%% @private Generate a subscription name for the $all subscription.
+-spec subscription_name(atom()) -> binary().
+subscription_name(StoreId) ->
     iolist_to_binary([
-        <<"evoq_router_">>,
-        atom_to_binary(StoreId, utf8),
-        <<"_">>,
-        EventType
+        <<"evoq_all_">>,
+        atom_to_binary(StoreId, utf8)
     ]).

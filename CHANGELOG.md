@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.8.0] - 2026-03-07
+
+### Changed
+
+- **`evoq_store_subscription`: Single `$all` subscription for global ordering**.
+  Previously created N independent per-event-type subscriptions to ReckonDB,
+  one per registered handler type. Each subscription had its own bridge process,
+  so events of different types had no ordering guarantee relative to each other.
+  Now uses a single `by_stream` subscription with `<<"$all">>` selector, receiving
+  ALL events in global store order. Events are filtered locally by checking
+  `evoq_event_type_registry:get_handlers/1` — types with no handlers are skipped.
+  This fixes race conditions where causally related events of different types
+  (e.g., `license_initiated_v1` before `license_published_v1`) could be delivered
+  out of order to their respective projections.
+
+## [1.7.0] - 2026-03-07
+
+### Changed
+
+- **`evoq_read_model_ets` shared named tables**: Named ETS tables now support
+  multiple projections writing to the same read model. If a named table already
+  exists, new instances join it instead of crashing. This enables the vertical
+  slicing pattern where each projection (desk) handles one event type but all
+  project into the same read model. Anonymous (unnamed) tables remain isolated
+  per instance as before.
+
 ## [1.6.0] - 2026-03-07
 
 ### Added
