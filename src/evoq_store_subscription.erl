@@ -11,11 +11,12 @@
 %%
 %% == How It Works ==
 %%
-%% 1. Subscribes to the store's $all stream (by_stream, selector $all)
-%% 2. Receives ALL events in store-global order
-%% 3. For each event, checks if any handler is registered for its type
-%% 4. Routes matching events to evoq_event_router and evoq_pm_router
-%% 5. Skips events with no registered handlers (zero cost)
+%% 1. Replays all historical events from the store (catch-up phase)
+%% 2. Subscribes to the store's $all stream (by_stream, selector $all)
+%% 3. Receives ALL new events in store-global order
+%% 4. For each event, checks if any handler is registered for its type
+%% 5. Routes matching events to evoq_event_router and evoq_pm_router
+%% 6. Skips events with no registered handlers (zero cost)
 %%
 %% == Usage ==
 %%
@@ -85,8 +86,15 @@ init({StoreId, Opts}) ->
     %% need to create per-type subscriptions — we subscribe to $all.
     {ok, _CurrentTypes} = evoq_event_type_registry:register_listener(self()),
 
-    %% Create a single $all subscription for the entire store.
-    %% This receives ALL events in global store order.
+    %% Phase 1: Replay historical events (catch-up).
+    %% This populates projections with all events stored before this
+    %% subscription was created. Events are routed through the same
+    %% path as live events, maintaining causal order.
+    Seq0 = catch_up_historical(StoreId),
+
+    %% Phase 2: Subscribe to new events going forward.
+    %% The $all subscription will only deliver events appended AFTER
+    %% the subscription is created (Khepri triggers are prospective).
     SubId = case subscribe_to_all(StoreId, Opts) of
         {ok, Id} ->
             Id;
@@ -96,14 +104,14 @@ init({StoreId, Opts}) ->
             undefined
     end,
 
-    logger:info("[evoq] Store subscription started for ~s (single $all subscription)",
-                [StoreId]),
+    logger:info("[evoq] Store subscription started for ~s (catch-up: ~b events replayed)",
+                [StoreId, Seq0]),
 
     {ok, #state{
         store_id = StoreId,
         subscription_id = SubId,
         opts = Opts,
-        seq = 0
+        seq = Seq0
     }}.
 
 %% @private
@@ -139,6 +147,35 @@ terminate(_Reason, #state{store_id = StoreId}) ->
 %%====================================================================
 %% Internal functions
 %%====================================================================
+
+%% @private Replay all historical events from the store.
+%% Reads events in batches via read_all_global and routes each batch
+%% through the same routing path as live events.
+%% Returns the final sequence number (= total events replayed).
+-spec catch_up_historical(atom()) -> non_neg_integer().
+catch_up_historical(StoreId) ->
+    BatchSize = 1000,
+    catch_up_loop(StoreId, 0, BatchSize, 0).
+
+-spec catch_up_loop(atom(), non_neg_integer(), pos_integer(), non_neg_integer()) ->
+    non_neg_integer().
+catch_up_loop(StoreId, Offset, BatchSize, Seq) ->
+    case evoq_event_store:read_all_global(StoreId, Offset, BatchSize) of
+        {ok, []} ->
+            Seq;
+        {ok, Events} ->
+            Seq1 = route_events_with_seq(Events, Seq),
+            case length(Events) < BatchSize of
+                true ->
+                    Seq1;
+                false ->
+                    catch_up_loop(StoreId, Offset + length(Events), BatchSize, Seq1)
+            end;
+        {error, Reason} ->
+            logger:warning("[evoq] Catch-up failed for ~s at offset ~b: ~p",
+                           [StoreId, Offset, Reason]),
+            Seq
+    end.
 
 %% @private Subscribe to the $all stream on the store.
 %% Uses by_stream subscription type with <<"$all">> selector,

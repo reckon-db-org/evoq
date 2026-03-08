@@ -25,6 +25,7 @@
 -export([append/4, read/5, version/2, exists/2]).
 -export([list_streams/1, read_all/3, read_all/4]).
 -export([read_all_events/2, read_events_by_types/3]).
+-export([read_all_global/3]).
 
 %% Event conversion
 -export([event_to_map/1]).
@@ -149,6 +150,23 @@ read_events_by_types(StoreId, EventTypes, BatchSize) ->
             {ok, EventMaps};
         {error, _} = Error ->
             Error
+    end.
+
+%% @doc Read all events across all streams in global order.
+%%
+%% Returns events sorted by epoch_us, starting from Offset.
+%% Used for catch-up subscriptions and global event replay.
+%% Falls back to read_all_events/2 if adapter does not implement
+%% the optional read_all_global/3 callback.
+-spec read_all_global(atom(), non_neg_integer(), pos_integer()) ->
+    {ok, [evoq_event()]} | {error, term()}.
+read_all_global(StoreId, Offset, BatchSize) ->
+    Adapter = get_adapter(),
+    case erlang:function_exported(Adapter, read_all_global, 3) of
+        true ->
+            Adapter:read_all_global(StoreId, Offset, BatchSize);
+        false ->
+            read_all_events(StoreId, BatchSize)
     end.
 
 %%====================================================================

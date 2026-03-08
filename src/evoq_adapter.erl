@@ -99,3 +99,14 @@
 %% Delete a stream and all its events.
 -callback delete_stream(StoreId :: atom(), StreamId :: binary()) ->
     ok | {error, term()}.
+
+%% Read all events across all streams in global order.
+%%
+%% Returns events sorted by epoch_us, starting from Offset.
+%% Used for catch-up subscriptions and global event replay.
+-callback read_all_global(StoreId :: atom(),
+                          Offset :: non_neg_integer(),
+                          BatchSize :: pos_integer()) ->
+    {ok, [evoq_event()]} | {error, term()}.
+
+-optional_callbacks([read_all_global/3]).
