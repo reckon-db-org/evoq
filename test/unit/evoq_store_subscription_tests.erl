@@ -83,3 +83,103 @@ event_to_routable_metadata_routing_fields_override_test() ->
     ?assertEqual(5, maps:get(version, Metadata)),
     %% Custom metadata preserved
     ?assertEqual(<<"value">>, maps:get(custom, Metadata)).
+
+%%====================================================================
+%% Sequence-based routing tests
+%%====================================================================
+
+%% @doc Verify that route_events_with_seq advances the sequence counter
+%% and that the counter increases monotonically even across events
+%% from different streams (which have overlapping stream-local versions).
+route_events_with_seq_skips_unhandled_test() ->
+    %% Start evoq_event_type_registry if not running
+    ensure_routing_infrastructure(),
+
+    %% No handlers registered — events should be skipped, seq unchanged
+    Events = [
+        make_event(<<"unregistered_type">>, <<"stream-a">>, 0),
+        make_event(<<"unregistered_type">>, <<"stream-b">>, 0)
+    ],
+    FinalSeq = evoq_store_subscription:route_events_with_seq(Events, 0),
+    ?assertEqual(0, FinalSeq).
+
+route_events_with_seq_advances_for_handled_test() ->
+    ensure_routing_infrastructure(),
+
+    EventType = <<"test_handled_v1">>,
+    %% Register a dummy handler
+    Self = self(),
+    ok = evoq_event_type_registry:register(EventType, Self),
+
+    %% Two events from different streams, both with stream version 0
+    Events = [
+        make_event(EventType, <<"stream-a">>, 0),
+        make_event(EventType, <<"stream-b">>, 0)
+    ],
+    FinalSeq = evoq_store_subscription:route_events_with_seq(Events, 0),
+    ?assertEqual(2, FinalSeq),
+
+    %% Clean up
+    ok = evoq_event_type_registry:unregister(EventType, Self),
+    drain_notifications().
+
+route_events_with_seq_continues_from_previous_test() ->
+    ensure_routing_infrastructure(),
+
+    EventType = <<"test_continue_v1">>,
+    Self = self(),
+    ok = evoq_event_type_registry:register(EventType, Self),
+
+    Events = [make_event(EventType, <<"stream-x">>, 0)],
+    %% Start from seq 42
+    FinalSeq = evoq_store_subscription:route_events_with_seq(Events, 42),
+    ?assertEqual(43, FinalSeq),
+
+    ok = evoq_event_type_registry:unregister(EventType, Self),
+    drain_notifications().
+
+%%====================================================================
+%% Test Helpers
+%%====================================================================
+
+make_event(EventType, StreamId, Version) ->
+    #evoq_event{
+        event_id = iolist_to_binary([<<"evt-">>, StreamId, <<"-">>,
+                                     integer_to_binary(Version)]),
+        event_type = EventType,
+        stream_id = StreamId,
+        version = Version,
+        data = #{},
+        metadata = #{},
+        tags = undefined,
+        timestamp = 0,
+        epoch_us = 0
+    }.
+
+ensure_routing_infrastructure() ->
+    case whereis(evoq_event_type_registry) of
+        undefined ->
+            {ok, _} = evoq_event_type_registry:start_link();
+        _ -> ok
+    end,
+    case whereis(evoq_type_provider) of
+        undefined ->
+            {ok, _} = evoq_type_provider:start_link();
+        _ -> ok
+    end,
+    case whereis(evoq_event_router) of
+        undefined ->
+            {ok, _} = evoq_event_router:start_link();
+        _ -> ok
+    end,
+    case whereis(evoq_pm_router) of
+        undefined ->
+            {ok, _} = evoq_pm_router:start_link();
+        _ -> ok
+    end,
+    ok.
+
+drain_notifications() ->
+    receive _ -> drain_notifications()
+    after 0 -> ok
+    end.

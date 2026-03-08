@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.8.2] - 2026-03-08
+
+### Fixed
+
+- **`evoq_store_subscription`: Cross-stream checkpoint collision with `$all` subscriptions**.
+  The `$all` subscription delivers events from multiple streams, but stream-local
+  versions overlap (stream A version 0, stream B version 0). When these were passed
+  to `evoq_projection` as the `version` in metadata, the idempotency check
+  `EventVersion =< Checkpoint` incorrectly skipped events from the second stream.
+  Now maintains a monotonically increasing sequence counter per subscription instance.
+  The global sequence is injected as `version` in metadata (for projection checkpoints),
+  and the original stream version is preserved as `stream_version`.
+
+- **Test infrastructure**: Added `evoq_type_provider` to test helper
+  `ensure_routing_infrastructure/0`, preventing ETS table crashes when
+  `evoq_event_router` attempts upcasting during tests.
+
 ## [1.8.1] - 2026-03-07
 
 ### Fixed

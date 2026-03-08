@@ -40,7 +40,7 @@
 -export([start_link/1, start_link/2]).
 
 %% Internal (exported for testing)
--export([evoq_event_to_routable/1, route_event/1]).
+-export([evoq_event_to_routable/1, route_event/1, route_events_with_seq/2]).
 
 %% gen_server callbacks
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
@@ -48,7 +48,12 @@
 -record(state, {
     store_id :: atom(),
     subscription_id :: binary() | undefined,
-    opts :: map()
+    opts :: map(),
+    %% Monotonically increasing sequence number for events delivered
+    %% through this subscription. Used instead of stream-local version
+    %% in metadata so that projections receiving events from $all
+    %% subscriptions (multiple streams) have a valid checkpoint.
+    seq :: non_neg_integer()
 }).
 
 %%====================================================================
@@ -97,7 +102,8 @@ init({StoreId, Opts}) ->
     {ok, #state{
         store_id = StoreId,
         subscription_id = SubId,
-        opts = Opts
+        opts = Opts,
+        seq = 0
     }}.
 
 %% @private
@@ -109,9 +115,9 @@ handle_info({new_event_type, EventType}, #state{store_id = StoreId} = State) ->
                 [StoreId, EventType]),
     {noreply, State};
 
-handle_info({events, Events}, State) when is_list(Events) ->
-    lists:foreach(fun route_event/1, Events),
-    {noreply, State};
+handle_info({events, Events}, #state{seq = Seq0} = State) when is_list(Events) ->
+    Seq1 = route_events_with_seq(Events, Seq0),
+    {noreply, State#state{seq = Seq1}};
 
 handle_info(_Info, State) ->
     {noreply, State}.
@@ -146,13 +152,25 @@ subscribe_to_all(StoreId, Opts) ->
         #{subscriber_pid => self(), start_from => StartFrom}
     ).
 
+%% @private Route events with a monotonically increasing sequence number.
+%% Returns the next sequence number after all events are routed.
+-spec route_events_with_seq([evoq_event() | term()], non_neg_integer()) -> non_neg_integer().
+route_events_with_seq([], Seq) ->
+    Seq;
+route_events_with_seq([E | Rest], Seq) ->
+    NextSeq = route_event_with_seq(E, Seq),
+    route_events_with_seq(Rest, NextSeq).
+
 %% @private Route a single evoq event to both event router and PM router.
 %% Only routes events that have registered handlers — others are skipped.
+%% The sequence number is injected into metadata as `version' so that
+%% projections receiving events from $all subscriptions (multiple streams)
+%% see a monotonically increasing checkpoint value instead of stream-local
+%% versions that can repeat across streams.
 -spec route_event(evoq_event() | term()) -> ok.
 route_event(#evoq_event{event_type = EventType} = E) ->
     case evoq_event_type_registry:get_handlers(EventType) of
         [] ->
-            %% No handlers registered for this event type — skip
             ok;
         _Handlers ->
             {Event, Metadata} = evoq_event_to_routable(E),
@@ -162,6 +180,26 @@ route_event(#evoq_event{event_type = EventType} = E) ->
     end;
 route_event(_Other) ->
     ok.
+
+%% @private Route a single event with sequence-based version override.
+-spec route_event_with_seq(evoq_event() | term(), non_neg_integer()) -> non_neg_integer().
+route_event_with_seq(#evoq_event{event_type = EventType} = E, Seq) ->
+    case evoq_event_type_registry:get_handlers(EventType) of
+        [] ->
+            Seq;
+        _Handlers ->
+            {Event, Metadata0} = evoq_event_to_routable(E),
+            %% Override version with global sequence so projections
+            %% using $all subscriptions get monotonic checkpoints.
+            %% Preserve the original stream version as stream_version.
+            StreamVersion = maps:get(version, Metadata0, 0),
+            Metadata = Metadata0#{version => Seq, stream_version => StreamVersion},
+            evoq_event_router:route_event(Event, Metadata),
+            evoq_pm_router:route_event(Event, Metadata),
+            Seq + 1
+    end;
+route_event_with_seq(_Other, Seq) ->
+    Seq.
 
 %% @private Convert an #evoq_event{} record to the map format
 %% expected by evoq_event_router and evoq_pm_router.
