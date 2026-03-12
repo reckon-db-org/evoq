@@ -5,7 +5,38 @@ All notable changes to evoq will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.9.2] - 2026-03-12
+
+### Fixed
+
+- **`evoq_projection`: Per-projection `store_id` for replay**. Projections that
+  replay events on rebuild used a global `application:get_env(evoq, store_id)`
+  which defaults to `default_store`. In multi-store systems (e.g. one store per
+  bounded context), this caused projections to replay from the wrong store —
+  or a non-existent one — resulting in empty read models after restart.
+  Projections now accept `store_id` in Opts (3rd argument to `start_link/3`),
+  which takes precedence over the global app env during replay.
+
+## [1.9.1] - 2026-03-08
+
+### Added
+
+- **`evoq_event_store:has_events/1`**: Check if a store contains at least one event.
+  Delegates to adapter's `has_events/1` if available, falls back to reading 1 event
+  via `read_all_global`.
+- **Catch-up diagnostic logging**: `evoq_store_subscription` now logs each event's
+  type and handler count during historical replay for troubleshooting.
+
+## [1.9.0] - 2026-03-06
+
+### Added
+
+- **Catch-up historical replay**: `evoq_store_subscription` now replays all historical
+  events from the store before subscribing to new events. Uses `read_all_global/3`
+  to read events in batches, routing through the same path as live events.
+- **`evoq_event_store:read_all_global/3`**: Read all events across all streams in
+  global order with offset/batch pagination. Falls back to `read_all_events/2` if
+  adapter does not implement the optional callback.
 
 ## [1.8.2] - 2026-03-08
 

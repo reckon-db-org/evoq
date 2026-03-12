@@ -162,9 +162,23 @@ catch_up_historical(StoreId) ->
 catch_up_loop(StoreId, Offset, BatchSize, Seq) ->
     case evoq_event_store:read_all_global(StoreId, Offset, BatchSize) of
         {ok, []} ->
+            logger:info("[evoq] Catch-up ~s: read_all_global returned 0 events at offset ~b",
+                        [StoreId, Offset]),
             Seq;
         {ok, Events} ->
+            %% Log event types and handler status for diagnostics
+            lists:foreach(fun(E) ->
+                ET = case E of
+                    #evoq_event{event_type = T} -> T;
+                    _ -> unknown
+                end,
+                Handlers = evoq_event_type_registry:get_handlers(ET),
+                logger:info("[evoq] Catch-up ~s: event_type=~p handlers=~b",
+                            [StoreId, ET, length(Handlers)])
+            end, Events),
             Seq1 = route_events_with_seq(Events, Seq),
+            logger:info("[evoq] Catch-up ~s: routed ~b events (seq ~b -> ~b)",
+                        [StoreId, length(Events), Seq, Seq1]),
             case length(Events) < BatchSize of
                 true ->
                     Seq1;

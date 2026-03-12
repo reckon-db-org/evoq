@@ -90,7 +90,8 @@
     read_model :: evoq_read_model:read_model(),
     event_types :: [binary()],
     checkpoint :: non_neg_integer(),
-    checkpoint_store :: atom() | undefined
+    checkpoint_store :: atom() | undefined,
+    store_id :: atom() | undefined
 }).
 
 %%====================================================================
@@ -104,6 +105,7 @@ start_link(ProjectionModule, Config) ->
 
 %% @doc Start a projection with options.
 %% Options:
+%% - store_id: Event store to replay from (overrides app env)
 %% - checkpoint_store: Module for persistent checkpoint storage
 %% - start_from: origin | latest | {position, N}
 -spec start_link(atom(), map(), map()) -> {ok, pid()} | {error, term()}.
@@ -154,6 +156,7 @@ init({ProjectionModule, Config, Opts}) ->
     case ProjectionModule:init(Config) of
         {ok, ProjectionState, ReadModel} ->
             CheckpointStore = maps:get(checkpoint_store, Opts, undefined),
+            OverrideStoreId = maps:get(store_id, Opts, undefined),
 
             %% Load checkpoint if store available
             Checkpoint = load_checkpoint(ProjectionModule, CheckpointStore),
@@ -174,7 +177,8 @@ init({ProjectionModule, Config, Opts}) ->
                 read_model = ReadModel,
                 event_types = EventTypes,
                 checkpoint = Checkpoint,
-                checkpoint_store = CheckpointStore
+                checkpoint_store = CheckpointStore,
+                store_id = OverrideStoreId
             },
             {ok, State};
 
@@ -371,9 +375,13 @@ do_rebuild(#state{
     end.
 
 %% @private
-%% Replay all events of the specified types from the event store
+%% Replay all events of the specified types from the event store.
+%% Uses store_id from Opts if provided, otherwise falls back to app env.
 replay_events(State, EventTypes) ->
-    StoreId = application:get_env(evoq, store_id, default_store),
+    StoreId = case State#state.store_id of
+        undefined -> application:get_env(evoq, store_id, default_store);
+        Id -> Id
+    end,
     BatchSize = application:get_env(evoq, replay_batch_size, 1000),
 
     case evoq_event_store:read_events_by_types(StoreId, EventTypes, BatchSize) of

@@ -22,7 +22,7 @@
 -include_lib("evoq/include/evoq_types.hrl").
 
 %% API
--export([append/4, read/5, version/2, exists/2]).
+-export([append/4, read/5, version/2, exists/2, has_events/1]).
 -export([list_streams/1, read_all/3, read_all/4]).
 -export([read_all_events/2, read_events_by_types/3]).
 -export([read_all_global/3]).
@@ -86,6 +86,19 @@ version(StoreId, StreamId) ->
 exists(StoreId, StreamId) ->
     Adapter = get_adapter(),
     Adapter:exists(StoreId, StreamId).
+
+%% @doc Check if a store contains at least one event.
+-spec has_events(atom()) -> boolean().
+has_events(StoreId) ->
+    Adapter = get_adapter(),
+    case erlang:function_exported(Adapter, has_events, 1) of
+        true -> Adapter:has_events(StoreId);
+        false ->
+            case read_all_global(StoreId, 0, 1) of
+                {ok, [_ | _]} -> true;
+                _ -> false
+            end
+    end.
 
 %% @doc List all streams in the store.
 -spec list_streams(atom()) -> {ok, [binary()]} | {error, term()}.
