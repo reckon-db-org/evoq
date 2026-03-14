@@ -4,21 +4,34 @@
 %% - Imperative (present tense): open_account, deposit_money
 %% - Targeted at a specific aggregate
 %% - Validated before dispatch
+%% - Domain artifacts: atom keys, Erlang terms, stay inside bounded context
 %%
-%% == Callbacks ==
+%% == Required Callbacks ==
 %%
-%% Optional:
+%% - command_type() -> atom()
+%% - new(Params) -> {ok, Command} | {error, Reason}
+%% - to_map(Command) -> map()
+%%
+%% == Optional Callbacks ==
+%%
 %% - validate(Command) -> ok | {error, Reason}
+%% - from_map(Map) -> {ok, Command} | {error, Reason}
 %%
 %% @author rgfaber
 -module(evoq_command).
 
 -include("evoq.hrl").
 
-%% Optional callbacks
--callback validate(Command :: map()) -> ok | {error, Reason :: term()}.
+%% Required callbacks
+-callback command_type() -> atom().
+-callback new(Params :: map()) -> {ok, Command :: term()} | {error, Reason :: term()}.
+-callback to_map(Command :: term()) -> map().
 
--optional_callbacks([validate/1]).
+%% Optional callbacks
+-callback validate(Command :: term()) -> ok | {ok, Command :: term()} | {error, Reason :: term()}.
+-callback from_map(Map :: map()) -> {ok, Command :: term()} | {error, Reason :: term()}.
+
+-optional_callbacks([validate/1, from_map/1]).
 
 %% API
 -export([new/4, new/5]).

@@ -233,8 +233,30 @@ The adapter pattern allows different backends:
 ]}
 ```
 
+## Domain vs Integration Artifacts
+
+evoq formalizes the distinction between internal and external data:
+
+| | Domain Artifacts | Integration Artifacts |
+|---|---|---|
+| **Types** | Commands, Events | Facts, Hopes |
+| **Scope** | Inside bounded context | Cross boundaries |
+| **Keys** | Atoms | Binaries (JSON-safe) |
+| **Transport** | In-process, event store | pg, mesh, RPC |
+
+Domain events are implementation details. Integration facts are explicit public contracts. A process manager decides which domain events become integration facts, transforming internal structure into stable external schemas.
+
+```
+Domain Event (internal)           Integration Fact (external)
+  venture_initiated_v1       -->    <<"hecate.venture.initiated">>
+  (atom keys, full state)          (binary keys, curated subset)
+```
+
+See the [Artifacts Guide](artifacts.md) for detailed documentation and examples.
+
 ## Next Steps
 
+- [Artifacts Guide](artifacts.md) - Domain and integration artifact behaviours
 - [Aggregates Guide](aggregates.md) - Deep dive into aggregate patterns
 - [Event Handlers Guide](event_handlers.md) - Building reactive systems
 - [Process Managers Guide](process_managers.md) - Orchestrating workflows

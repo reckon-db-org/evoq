@@ -5,6 +5,43 @@ All notable changes to evoq will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.10.0] - 2026-03-14
+
+### Added
+
+- **`evoq_command` behaviour expanded**: Commands are now formal domain artifacts.
+  Added required callbacks `command_type/0`, `new/1`, `to_map/1` and optional
+  `from_map/1`. Existing `validate/1` remains optional. Modules without the
+  behaviour continue to work unchanged -- the callbacks are opt-in.
+
+- **`evoq_event` behaviour** (NEW): Events are formal domain artifacts with
+  required callbacks `event_type/0`, `new/1`, `to_map/1` and optional `from_map/1`.
+  Event construction via `new/1` returns the event directly (no `{ok, _}` wrapper)
+  since events are produced from validated handler output.
+
+- **`evoq_fact` behaviour** (NEW): Integration artifacts for cross-boundary
+  communication. Facts translate domain events into serializable payloads with
+  binary keys for external consumption via pg or mesh. Required callbacks:
+  `fact_type/0` (returns binary topic), `from_event/3` (translates event to
+  payload or returns `skip`). Optional: `serialize/1`, `deserialize/1`, `schema/0`.
+  Default JSON serialization via OTP 27 `json` module provided as
+  `evoq_fact:default_serialize/1` and `default_deserialize/1`.
+
+- **`evoq_hope` behaviour** (NEW): Integration artifacts for outbound RPC
+  requests between agents. Required: `hope_type/0`, `new/1`, `to_payload/1`,
+  `from_payload/1`. Optional: `validate/1`, `serialize/1`, `deserialize/1`,
+  `schema/0`. Default JSON serialization provided. No implementations yet --
+  behaviour defined for when RPC use cases arise.
+
+- **Atom `event_type` support in aggregates**: `evoq_aggregate:append_events/5`
+  now auto-converts atom `event_type` values to binary for storage via
+  `resolve_event_type/1`. Typed event modules can return atom `event_type` in
+  `to_map/1` (e.g., `venture_initiated_v1`) and evoq stores it as binary
+  (`<<"venture_initiated_v1">>`). Binary values pass through unchanged.
+
+- **Artifacts guide**: New `guides/artifacts.md` documenting the 4 artifact types
+  (command, event, fact, hope), when to use each, and reference implementations.
+
 ## [1.9.2] - 2026-03-12
 
 ### Fixed

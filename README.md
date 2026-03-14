@@ -150,6 +150,84 @@ project(#{event_type := <<"MoneyDeposited">>, data := #{amount := A}},
 
 ## Core Behaviors
 
+### Domain Artifacts
+
+Domain artifacts stay inside the bounded context. They use atom keys and Erlang terms.
+
+#### evoq_command
+
+Commands represent intentions to change state. Formal contract for command modules.
+
+```erlang
+-behaviour(evoq_command).
+
+%% Required
+-callback command_type() -> atom().
+-callback new(Params :: map()) -> {ok, Command} | {error, Reason}.
+-callback to_map(Command) -> map().
+
+%% Optional
+-callback validate(Command) -> ok | {ok, Command} | {error, Reason}.
+-callback from_map(Map :: map()) -> {ok, Command} | {error, Reason}.
+```
+
+#### evoq_event
+
+Events represent facts that have happened. Immutable once stored.
+
+```erlang
+-behaviour(evoq_event).
+
+%% Required
+-callback event_type() -> atom().
+-callback new(Params :: map()) -> Event.
+-callback to_map(Event) -> map().
+
+%% Optional
+-callback from_map(Map :: map()) -> {ok, Event} | {error, Reason}.
+```
+
+### Integration Artifacts
+
+Integration artifacts cross bounded context boundaries. They use binary keys and are JSON-serializable.
+
+#### evoq_fact
+
+Facts translate domain events into payloads for external consumption via pg or mesh.
+
+```erlang
+-behaviour(evoq_fact).
+
+%% Required
+-callback fact_type() -> binary().          %% e.g., <<"hecate.venture.initiated">>
+-callback from_event(EventType :: atom(), EventData :: map(), Metadata :: map()) ->
+    {ok, Payload :: map()} | skip.
+
+%% Optional (defaults use OTP 27 json module)
+-callback serialize(Payload :: map()) -> {ok, binary()} | {error, Reason}.
+-callback deserialize(Binary :: binary()) -> {ok, map()} | {error, Reason}.
+-callback schema() -> map().
+```
+
+#### evoq_hope
+
+Hopes are outbound RPC requests between agents. Unlike facts (fire-and-forget), hopes expect a response.
+
+```erlang
+-behaviour(evoq_hope).
+
+%% Required
+-callback hope_type() -> binary().
+-callback new(Params :: map()) -> {ok, Hope} | {error, Reason}.
+-callback to_payload(Hope) -> map().
+-callback from_payload(Payload :: map()) -> {ok, Hope} | {error, Reason}.
+
+%% Optional
+-callback validate(Hope) -> ok | {error, Reason}.
+```
+
+See [Artifacts Guide](guides/artifacts.md) for detailed documentation and examples.
+
 ### evoq_aggregate
 
 Aggregates maintain business invariants and produce events.

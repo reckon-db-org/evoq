@@ -336,7 +336,7 @@ append_events(StoreId, StreamId, Version, Events, Command) ->
     %% This eliminates guesswork in the adapter — we KNOW which keys are
     %% infrastructure (we put them there) and which are business data.
     EventsNested = lists:map(fun(Event) ->
-        EventType = maps:get(event_type, Event, undefined),
+        EventType = resolve_event_type(Event),
         Data = maps:without([event_type], Event),
         Wrapped = #{
             event_type => EventType,
@@ -410,6 +410,15 @@ handle_lifespan_action(Timeout, State) when is_integer(Timeout) ->
 %% @private
 get_timeout(LifespanModule, init) ->
     LifespanModule:after_command(#{}).
+
+%% @private Resolve event_type to binary for storage.
+%% Atom event_type values (from typed evoq_event modules) are auto-converted.
+resolve_event_type(#{event_type := Type}) when is_atom(Type) ->
+    atom_to_binary(Type, utf8);
+resolve_event_type(#{event_type := Type}) when is_binary(Type) ->
+    Type;
+resolve_event_type(_) ->
+    undefined.
 
 %% @private
 get_remaining_timeout(#evoq_aggregate_state{
