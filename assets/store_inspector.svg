@@ -1,0 +1,64 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 700 350">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#1a1a2e"/>
+      <stop offset="100%" style="stop-color:#16213e"/>
+    </linearGradient>
+    <linearGradient id="evoqGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" style="stop-color:#e94560"/>
+      <stop offset="100%" style="stop-color:#c73e54"/>
+    </linearGradient>
+    <linearGradient id="adapterGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" style="stop-color:#0f3460"/>
+      <stop offset="100%" style="stop-color:#0a2540"/>
+    </linearGradient>
+    <linearGradient id="dbGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" style="stop-color:#533483"/>
+      <stop offset="100%" style="stop-color:#3d2666"/>
+    </linearGradient>
+    <filter id="shadow" x="-10%" y="-10%" width="120%" height="120%">
+      <feDropShadow dx="2" dy="3" stdDeviation="3" flood-opacity="0.3"/>
+    </filter>
+  </defs>
+
+  <rect width="700" height="350" fill="url(#bg)" rx="8"/>
+  <text x="350" y="30" text-anchor="middle" fill="#e0e0e0" font-family="monospace" font-size="14" font-weight="bold">evoq Store Inspector Chain</text>
+
+  <!-- evoq layer -->
+  <g filter="url(#shadow)">
+    <rect x="50" y="55" width="600" height="45" rx="8" fill="url(#evoqGrad)" opacity="0.95"/>
+    <text x="350" y="75" text-anchor="middle" fill="#fff" font-family="monospace" font-size="12" font-weight="bold">evoq_store_inspector</text>
+    <text x="350" y="92" text-anchor="middle" fill="#ffb3b3" font-family="monospace" font-size="9">store_stats | list_all_snapshots | list_subscriptions | subscription_lag</text>
+  </g>
+
+  <line x1="350" y1="100" x2="350" y2="125" stroke="#e94560" stroke-width="1.5"/>
+  <text x="365" y="117" fill="#888" font-family="monospace" font-size="8">delegates to adapter</text>
+
+  <!-- Adapter layer -->
+  <g filter="url(#shadow)">
+    <rect x="100" y="125" width="500" height="45" rx="8" fill="url(#adapterGrad)" opacity="0.9"/>
+    <text x="350" y="145" text-anchor="middle" fill="#8ab4f8" font-family="monospace" font-size="12" font-weight="bold">reckon_evoq_adapter</text>
+    <text x="350" y="162" text-anchor="middle" fill="#6090c0" font-family="monospace" font-size="9">delegates to esdb_gater_api (load-balanced)</text>
+  </g>
+
+  <line x1="350" y1="170" x2="350" y2="195" stroke="#0f3460" stroke-width="1.5"/>
+  <text x="365" y="187" fill="#888" font-family="monospace" font-size="8">round-robin + retry</text>
+
+  <!-- Gater layer -->
+  <g filter="url(#shadow)">
+    <rect x="100" y="195" width="500" height="45" rx="8" fill="url(#adapterGrad)" opacity="0.85"/>
+    <text x="350" y="215" text-anchor="middle" fill="#8ab4f8" font-family="monospace" font-size="12" font-weight="bold">esdb_gater_api (reckon_gater)</text>
+    <text x="350" y="232" text-anchor="middle" fill="#6090c0" font-family="monospace" font-size="9">route_call -> select_worker -> gen_server:call</text>
+  </g>
+
+  <line x1="350" y1="240" x2="350" y2="265" stroke="#533483" stroke-width="1.5"/>
+
+  <!-- reckon_db layer -->
+  <g filter="url(#shadow)">
+    <rect x="50" y="265" width="600" height="55" rx="8" fill="url(#dbGrad)" opacity="0.9"/>
+    <text x="350" y="288" text-anchor="middle" fill="#d0a0f0" font-family="monospace" font-size="12" font-weight="bold">reckon_db_store_inspector</text>
+    <text x="350" y="308" text-anchor="middle" fill="#a080c0" font-family="monospace" font-size="9">Khepri queries: streams + snapshots + subscriptions</text>
+  </g>
+
+  <text x="350" y="340" text-anchor="middle" fill="#555" font-family="monospace" font-size="8">Read-only — all operations go through the load-balanced gateway worker pool</text>
+</svg>
