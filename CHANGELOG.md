@@ -5,6 +5,63 @@ All notable changes to evoq will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.13.0] - 2026-03-19
+
+### Added
+
+- **`evoq_store_inspector`** (NEW): Store-level introspection via adapter.
+  - `store_stats/1`, `list_all_snapshots/1`, `list_subscriptions/1`
+  - `subscription_lag/2`, `event_type_summary/1`, `stream_info/2`
+  - Delegates to the configured event store adapter (graceful fallback if not supported)
+
+## [1.12.0] - 2026-03-14
+
+### Added
+
+- **`evoq_state` behaviour** (NEW): Formalizes the aggregate state as a first-class
+  module — the "default read model". Every aggregate MUST have a corresponding state
+  module declared via `state_module/0`. Required callbacks: `new/1`, `apply_event/2`,
+  `to_map/1`. Optional: `from_map/1`. This separation keeps the aggregate focused on
+  command validation and business rules, while the state module owns the data shape,
+  field access, event folding, and serialization.
+
+- **`evoq_aggregate:state_module/0` callback** (REQUIRED): Every aggregate must now
+  declare which module implements `evoq_state` for its state. This makes codegen fully
+  mechanical — every aggregate gets a state module, no exceptions.
+
+## [1.11.0] - 2026-03-14
+
+### Added
+
+- **`evoq_emitter` behaviour** (NEW): Formalizes emitters that subscribe to domain
+  events and publish integration facts to external transports (pg or mesh). Required
+  callbacks: `source_event/0`, `fact_module/0`, `transport/0`, `emit/3`.
+
+- **`evoq_listener` behaviour** (NEW): Formalizes listeners that receive integration
+  facts from external transports and dispatch commands to the local aggregate. Required
+  callbacks: `source_fact/0`, `transport/0`, `handle_fact/3`.
+
+- **`evoq_requester` behaviour** (NEW): Formalizes requesters that send hopes over
+  mesh and wait for feedback (cross-daemon RPC). Required callbacks: `hope_module/0`,
+  `send/2`.
+
+- **`evoq_responder` behaviour** (NEW): Formalizes responders that receive hopes,
+  dispatch commands, and return feedback with the post-event aggregate state. Required
+  callbacks: `hope_type/0`, `handle_hope/3`. Optional: `feedback_module/0`.
+
+- **`evoq_feedback` behaviour** (NEW): Typed feedback for hope/response cycles.
+  Serializes command execution results (`{ok, State}` or `{error, Reason}`) for
+  transport. Required callbacks: `feedback_type/0`, `from_result/1`, `to_result/1`.
+  Optional: `serialize/1`, `deserialize/1`. Default JSON serialization provided.
+
+- **`evoq_aggregate:execute_command_with_state/2`**: Execute a command and return
+  the post-event aggregate state along with version and events. Enables session-level
+  consistency where callers receive immediate truth about the resulting state.
+
+- **`evoq_dispatcher:dispatch_with_state/2`**: Dispatch a command through the
+  middleware pipeline and return `{ok, Version, Events, AggregateState}` on success.
+  Full middleware pipeline, idempotency, and consistency support.
+
 ## [1.10.0] - 2026-03-14
 
 ### Added

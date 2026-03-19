@@ -2,14 +2,16 @@
 %%
 %% Aggregates are the consistency boundary in event sourcing. Each aggregate:
 %% - Has a unique stream ID
+%% - Declares a state module via state_module/0
 %% - Processes commands via execute/2 callback
-%% - Applies events via apply/2 callback
+%% - Applies events via apply/2 callback (typically delegates to state module)
 %% - Supports snapshots for fast recovery
 %% - Has configurable lifespan (TTL, hibernate, passivate)
 %%
 %% == Callbacks ==
 %%
 %% Required:
+%% - state_module() -> module()
 %% - init(AggregateId) -> {ok, State}
 %% - execute(State, Command) -> {ok, [Event]} | {error, Reason}
 %% - apply(State, Event) -> NewState
@@ -26,6 +28,7 @@
 -include("evoq_telemetry.hrl").
 
 %% Behavior callbacks
+-callback state_module() -> module().
 -callback init(AggregateId :: binary()) -> {ok, State :: term()}.
 -callback execute(State :: term(), Command :: map()) ->
     {ok, [Event :: map()]} | {error, Reason :: term()}.
@@ -39,7 +42,7 @@
 
 %% API
 -export([start_link/2, start_link/3]).
--export([execute_command/2, get_state/1, get_version/1]).
+-export([execute_command/2, execute_command_with_state/2, get_state/1, get_version/1]).
 
 %% gen_server callbacks
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
@@ -66,6 +69,16 @@ start_link(AggregateModule, AggregateId, StoreId) ->
     {ok, non_neg_integer(), [map()]} | {error, term()}.
 execute_command(Pid, Command) ->
     gen_server:call(Pid, {execute, Command}, infinity).
+
+%% @doc Execute a command and return the post-event aggregate state.
+%%
+%% Like execute_command/2 but includes the aggregate state after applying
+%% all new events. Enables session-level consistency where the caller
+%% receives immediate truth about the resulting state.
+-spec execute_command_with_state(pid(), #evoq_command{}) ->
+    {ok, non_neg_integer(), [map()], term()} | {error, term()}.
+execute_command_with_state(Pid, Command) ->
+    gen_server:call(Pid, {execute_with_state, Command}, infinity).
 
 %% @doc Get the current state of an aggregate (for debugging).
 -spec get_state(pid()) -> {ok, term()}.
@@ -184,6 +197,77 @@ handle_call({execute, Command}, _From, State) ->
 
         {error, Reason} = Error ->
             %% Emit exception telemetry
+            Duration = erlang:system_time(microsecond) - StartTime,
+            telemetry:execute(?TELEMETRY_AGGREGATE_EXECUTE_EXCEPTION, #{
+                duration => Duration
+            }, #{
+                aggregate_id => StreamId,
+                error => Reason
+            }),
+
+            Timeout = LifespanModule:after_error(Reason),
+            {reply, Error, State, Timeout}
+    end;
+
+handle_call({execute_with_state, Command}, _From, State) ->
+    #evoq_aggregate_state{
+        stream_id = StreamId,
+        aggregate_module = Module,
+        store_id = StoreId,
+        state = AggState,
+        version = Version,
+        lifespan_module = LifespanModule
+    } = State,
+
+    StartTime = erlang:system_time(microsecond),
+
+    telemetry:execute(?TELEMETRY_AGGREGATE_EXECUTE_START, #{
+        system_time => StartTime
+    }, #{
+        aggregate_id => StreamId,
+        aggregate_module => Module,
+        store_id => StoreId,
+        command_type => maps:get(command_type, Command#evoq_command.payload, unknown)
+    }),
+
+    case Module:execute(AggState, Command#evoq_command.payload) of
+        {ok, Events} when is_list(Events) ->
+            NewAggState = lists:foldl(fun(Event, AccState) ->
+                Module:apply(AccState, Event)
+            end, AggState, Events),
+
+            case append_events(StoreId, StreamId, Version, Events, Command) of
+                {ok, NewVersion} ->
+                    NewState = State#evoq_aggregate_state{
+                        state = NewAggState,
+                        version = NewVersion,
+                        last_activity = erlang:system_time(millisecond),
+                        snapshot_count = State#evoq_aggregate_state.snapshot_count + length(Events)
+                    },
+
+                    NewState2 = maybe_snapshot(NewState),
+
+                    Duration = erlang:system_time(microsecond) - StartTime,
+                    telemetry:execute(?TELEMETRY_AGGREGATE_EXECUTE_STOP, #{
+                        duration => Duration,
+                        event_count => length(Events)
+                    }, #{
+                        aggregate_id => StreamId,
+                        new_version => NewVersion
+                    }),
+
+                    Timeout = LifespanModule:after_event(hd(Events)),
+                    {reply, {ok, NewVersion, Events, NewAggState}, NewState2, Timeout};
+
+                {error, wrong_expected_version} ->
+                    {reply, {error, wrong_expected_version}, State};
+
+                {error, Reason} = Error ->
+                    Timeout = LifespanModule:after_error(Reason),
+                    {reply, Error, State, Timeout}
+            end;
+
+        {error, Reason} = Error ->
             Duration = erlang:system_time(microsecond) - StartTime,
             telemetry:execute(?TELEMETRY_AGGREGATE_EXECUTE_EXCEPTION, #{
                 duration => Duration

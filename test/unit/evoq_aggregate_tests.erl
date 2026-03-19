@@ -16,7 +16,9 @@
 
 %% Sample aggregate for testing
 -behaviour(evoq_aggregate).
--export([init/1, execute/2, apply/2, snapshot/1, from_snapshot/1]).
+-export([state_module/0, init/1, execute/2, apply/2, snapshot/1, from_snapshot/1]).
+
+state_module() -> ?MODULE.
 
 init(_AggregateId) ->
     {ok, #{counter => 0, status => active}}.

@@ -21,7 +21,7 @@
 -include("evoq_telemetry.hrl").
 
 %% API
--export([dispatch/2]).
+-export([dispatch/2, dispatch_with_state/2]).
 
 %%====================================================================
 %% API
@@ -46,6 +46,26 @@ dispatch(Command0, Opts) ->
 
     evoq_idempotency:check_and_store(CacheKey, fun() ->
         dispatch_internal(Command, Opts)
+    end, TTL).
+
+%% @doc Dispatch a command and return the post-event aggregate state.
+%%
+%% Like dispatch/2 but includes the aggregate state after applying all
+%% new events. Enables session-level consistency where the caller
+%% receives immediate truth about the resulting state.
+-spec dispatch_with_state(#evoq_command{}, map()) ->
+    {ok, non_neg_integer(), [map()], term()} | {error, term()}.
+dispatch_with_state(Command0, Opts) ->
+    Command = evoq_command:ensure_id(Command0),
+    TTL = application:get_env(evoq, idempotency_ttl, ?DEFAULT_IDEMPOTENCY_TTL),
+
+    CacheKey = case Command#evoq_command.idempotency_key of
+        undefined -> Command#evoq_command.command_id;
+        Key -> Key
+    end,
+
+    evoq_idempotency:check_and_store(CacheKey, fun() ->
+        dispatch_internal_with_state(Command, Opts)
     end, TTL).
 
 %%====================================================================
@@ -94,6 +114,82 @@ dispatch_internal(Command, Opts) ->
         false ->
             %% Execute the command
             execute_and_finalize(Pipeline2, Middleware, StartTime)
+    end.
+
+%% @private
+dispatch_internal_with_state(Command, Opts) ->
+    StartTime = erlang:system_time(microsecond),
+    Context = evoq_execution_context:new(Command, Opts),
+    Pipeline = #evoq_pipeline{
+        command = Command,
+        context = Context,
+        assigns = #{},
+        halted = false,
+        response = undefined
+    },
+    DefaultMiddleware = application:get_env(evoq, middleware, []),
+    ExtraMiddleware = maps:get(middleware, Opts, []),
+    Middleware = DefaultMiddleware ++ ExtraMiddleware,
+
+    telemetry:execute(?TELEMETRY_DISPATCH_START, #{
+        system_time => StartTime
+    }, #{
+        command_id => Command#evoq_command.command_id,
+        command_type => Command#evoq_command.command_type,
+        aggregate_id => Command#evoq_command.aggregate_id
+    }),
+
+    Pipeline2 = run_before_dispatch(Pipeline, Middleware),
+
+    case evoq_middleware:halted(Pipeline2) of
+        true ->
+            Response = evoq_middleware:get_response(Pipeline2),
+            emit_stop_telemetry(StartTime, Command, Response),
+            Response;
+        false ->
+            execute_and_finalize_with_state(Pipeline2, Middleware, StartTime)
+    end.
+
+%% @private
+execute_and_finalize_with_state(Pipeline, Middleware, StartTime) ->
+    Command = Pipeline#evoq_pipeline.command,
+    Context = Pipeline#evoq_pipeline.context,
+    AggregateType = Command#evoq_command.aggregate_type,
+    AggregateId = Command#evoq_command.aggregate_id,
+    StoreId = Context#evoq_execution_context.store_id,
+
+    case evoq_aggregate_registry:get_or_start(AggregateType, AggregateId, StoreId) of
+        {ok, Pid} ->
+            execute_on_aggregate_with_state(Pipeline, Pid, Middleware, StartTime, Context);
+        {error, Reason} ->
+            handle_failure(Pipeline, {error, Reason}, Middleware, StartTime)
+    end.
+
+%% @private
+execute_on_aggregate_with_state(Pipeline, Pid, Middleware, StartTime, Context) ->
+    Command = Pipeline#evoq_pipeline.command,
+
+    case evoq_aggregate:execute_command_with_state(Pid, Command) of
+        {ok, Version, Events, AggState} ->
+            BaseResult = {ok, Version, Events},
+            Pipeline2 = evoq_middleware:assign(events, Events, Pipeline),
+            Pipeline3 = evoq_middleware:assign(version, Version, Pipeline2),
+            Pipeline4 = evoq_middleware:respond(BaseResult, Pipeline3),
+            Pipeline5 = evoq_middleware:chain(Pipeline4, after_dispatch, Middleware),
+
+            ConsistencyResult = handle_consistency(Pipeline5, Context),
+            FinalResult = case ConsistencyResult of
+                {ok, V, E} -> {ok, V, E, AggState};
+                Other -> Other
+            end,
+            emit_stop_telemetry(StartTime, Command, ConsistencyResult),
+            FinalResult;
+
+        {error, wrong_expected_version} = Error ->
+            maybe_retry(Pipeline, Error, Middleware, StartTime, Context);
+
+        {error, _Reason} = Error ->
+            handle_failure(Pipeline, Error, Middleware, StartTime)
     end.
 
 %% @private
