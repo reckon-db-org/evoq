@@ -129,8 +129,8 @@ upcast_event(Event, EventType, Metadata) ->
     end.
 
 %% @private
-notify_handler(Handler, EventType, Event, Metadata) when is_pid(Handler) ->
-    %% Handler is a pid - use evoq_event_handler:notify
+notify_handler(Handler, EventType, Event, Metadata) when is_pid(Handler), node(Handler) =:= node() ->
+    %% Local handler pid - check alive before notifying
     case is_process_alive(Handler) of
         true ->
             try
@@ -142,6 +142,9 @@ notify_handler(Handler, EventType, Event, Metadata) when is_pid(Handler) ->
         false ->
             ok
     end;
+notify_handler(Handler, _EventType, _Event, _Metadata) when is_pid(Handler) ->
+    %% Remote handler pid — skip (belongs to another node)
+    ok;
 notify_handler(Handler, EventType, Event, Metadata) when is_atom(Handler) ->
     %% Handler is a module - call directly (legacy support)
     try
