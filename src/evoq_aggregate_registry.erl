@@ -46,14 +46,24 @@ unregister(AggregateId) ->
 -spec lookup(binary()) -> {ok, pid()} | {error, not_found}.
 lookup(AggregateId) ->
     case pg:get_members(?PG_SCOPE, {aggregate, AggregateId}) of
-        [Pid | _] when is_pid(Pid) ->
-            case is_process_alive(Pid) of
-                true -> {ok, Pid};
-                false -> {error, not_found}
-            end;
         [] ->
-            {error, not_found}
+            {error, not_found};
+        Pids ->
+            find_alive_local(Pids)
     end.
+
+%% @private Find the first alive local PID from a list.
+%% In a cluster, pg returns PIDs from all nodes. We only want local ones
+%% since aggregate processes must run on the node that owns the store.
+find_alive_local([]) ->
+    {error, not_found};
+find_alive_local([Pid | Rest]) when node(Pid) =:= node() ->
+    case is_process_alive(Pid) of
+        true -> {ok, Pid};
+        false -> find_alive_local(Rest)
+    end;
+find_alive_local([_ | Rest]) ->
+    find_alive_local(Rest).
 
 %% @doc Get an existing aggregate or start a new one (uses env store_id).
 %%
