@@ -187,8 +187,17 @@ handle_call({execute, Command}, _From, State) ->
                     {reply, {ok, NewVersion, Events}, NewState2, Timeout};
 
                 {error, wrong_expected_version} ->
-                    %% Rebuild from events and retry
-                    {reply, {error, wrong_expected_version}, State};
+                    %% Rebuild state from store to get correct version, then signal retry
+                    case rebuild_from_events(Module, StoreId, StreamId) of
+                        {ok, NewAggState, NewVersion} ->
+                            RebuildState = State#evoq_aggregate_state{
+                                state = NewAggState,
+                                version = NewVersion
+                            },
+                            {reply, {error, wrong_expected_version}, RebuildState};
+                        {error, _} ->
+                            {reply, {error, wrong_expected_version}, State}
+                    end;
 
                 {error, Reason} = Error ->
                     Timeout = LifespanModule:after_error(Reason),
@@ -260,7 +269,17 @@ handle_call({execute_with_state, Command}, _From, State) ->
                     {reply, {ok, NewVersion, Events, NewAggState}, NewState2, Timeout};
 
                 {error, wrong_expected_version} ->
-                    {reply, {error, wrong_expected_version}, State};
+                    %% Rebuild state from store to get correct version
+                    case rebuild_from_events(Module, StoreId, StreamId) of
+                        {ok, NewAggState2, NewVersion2} ->
+                            RebuildState = State#evoq_aggregate_state{
+                                state = NewAggState2,
+                                version = NewVersion2
+                            },
+                            {reply, {error, wrong_expected_version}, RebuildState};
+                        {error, _} ->
+                            {reply, {error, wrong_expected_version}, State}
+                    end;
 
                 {error, Reason} = Error ->
                     Timeout = LifespanModule:after_error(Reason),
@@ -359,8 +378,8 @@ load_or_init(Module, AggregateId, StoreId) ->
 %% @private
 init_fresh(Module, AggregateId) ->
     case Module:init(AggregateId) of
-        {ok, State} -> {State, 0};
-        _ -> {#{}, 0}
+        {ok, State} -> {State, -1};
+        _ -> {#{}, -1}
     end.
 
 %% @private
@@ -378,7 +397,16 @@ try_load_snapshot(Module, StoreId, AggregateId) ->
             {error, not_found}
     end.
 
-%% @private
+%% @private Rebuild aggregate state from the event store (full replay).
+%% Used on wrong_expected_version to re-sync with the actual stream.
+rebuild_from_events(Module, StoreId, AggregateId) ->
+    case Module:init(AggregateId) of
+        {ok, InitState} ->
+            replay_events(Module, StoreId, AggregateId, 0, InitState);
+        _ ->
+            replay_events(Module, StoreId, AggregateId, 0, #{})
+    end.
+
 replay_events(Module, StoreId, AggregateId, FromVersion, InitState) ->
     case evoq_event_store:read(StoreId, AggregateId, FromVersion, 1000, forward) of
         {ok, Events} when length(Events) > 0 ->
