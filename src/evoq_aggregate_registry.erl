@@ -114,4 +114,12 @@ terminate(_Reason, _State) ->
 
 %% @private
 start_aggregate(AggregateModule, AggregateId, StoreId) ->
-    evoq_aggregates_sup:start_aggregate(AggregateModule, AggregateId, StoreId).
+    case evoq_aggregates_sup:start_aggregate(AggregateModule, AggregateId, StoreId) of
+        {ok, Pid} ->
+            {ok, Pid};
+        {error, {already_started, Pid}} ->
+            %% Race: another caller started it between our lookup and start
+            {ok, Pid};
+        {error, _} = Error ->
+            Error
+    end.
