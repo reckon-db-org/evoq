@@ -11,7 +11,7 @@
 
 %%====================================================================
 %% Version Constants
-%% (guarded to avoid redefinition when used with esdb_gater_types.hrl)
+%% (guarded to avoid redefinition when used with reckon_gater_types.hrl)
 %%====================================================================
 
 %% NO_STREAM: Stream must not exist (first write)
@@ -31,7 +31,7 @@
 
 %%====================================================================
 %% Content Types
-%% (guarded to avoid redefinition when used with esdb_gater_types.hrl)
+%% (guarded to avoid redefinition when used with reckon_gater_types.hrl)
 %%====================================================================
 
 -ifndef(CONTENT_TYPE_JSON).
