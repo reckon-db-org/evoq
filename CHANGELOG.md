@@ -5,6 +5,17 @@ All notable changes to evoq will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.14.3] - 2026-04-23
+
+### Fixed
+
+- `evoq_aggregate:rebuild_from_events/3` now reports version `-1` for an
+  empty stream, matching `load_or_init/3`. It previously returned `0`,
+  which caused the dispatcher's `wrong_expected_version` retry loop to
+  spin forever against a Ra stream at version `-1` — each retry handed
+  the backend `expected_version=0` for a stream that had never been
+  written. Regression test in `test/unit/evoq_aggregate_rebuild_tests.erl`.
+
 ## [1.14.2] - 2026-04-19
 
 ### Changed

@@ -47,6 +47,10 @@
 %% gen_server callbacks
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
 
+-ifdef(TEST).
+-export([rebuild_from_events/3]).
+-endif.
+
 %%====================================================================
 %% API
 %%====================================================================
@@ -399,12 +403,19 @@ try_load_snapshot(Module, StoreId, AggregateId) ->
 
 %% @private Rebuild aggregate state from the event store (full replay).
 %% Used on wrong_expected_version to re-sync with the actual stream.
+%%
+%% An empty stream MUST report version = -1 (NO_STREAM), not 0. Otherwise
+%% the dispatcher's retry loop hands the Ra backend expected_version=0 for
+%% a stream at version=-1 and the next append fails forever.
 rebuild_from_events(Module, StoreId, AggregateId) ->
-    case Module:init(AggregateId) of
-        {ok, InitState} ->
-            replay_events(Module, StoreId, AggregateId, 0, InitState);
-        _ ->
-            replay_events(Module, StoreId, AggregateId, 0, #{})
+    case replay_events(Module, StoreId, AggregateId, 0, undefined) of
+        {ok, State, Version} when State =/= undefined ->
+            {ok, State, Version};
+        {ok, undefined, _} ->
+            {State, Version} = init_fresh(Module, AggregateId),
+            {ok, State, Version};
+        {error, _} = Error ->
+            Error
     end.
 
 replay_events(Module, StoreId, AggregateId, FromVersion, InitState) ->
