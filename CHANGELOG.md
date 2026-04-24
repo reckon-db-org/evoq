@@ -5,6 +5,26 @@ All notable changes to evoq will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.14.4] - 2026-04-24
+
+### Fixed
+
+- `evoq_aggregate` now recognises every shape of the
+  `wrong_expected_version` error the backend can produce —
+  `{error, wrong_expected_version}`,
+  `{error, {wrong_expected_version, Actual}}`, and the current
+  reckon-db form `{error, {wrong_expected_version, Expected, Actual}}`.
+  The old handle_call matched only the plain-atom form, so the real
+  3-tuple returned by reckon-db fell through to the generic error
+  branch and the rebuild/retry machinery was dead code: commands
+  like `confirm_realm_membership` surfaced the raw conflict up to
+  the caller instead of triggering a rebuild + dispatcher retry.
+
+  The classifier is factored into `is_wrong_version_error/1` and
+  wired through a single reply helper so adding a new shape in the
+  future is a one-line change. Regression test in
+  `test/unit/evoq_aggregate_version_conflict_tests.erl`.
+
 ## [1.14.3] - 2026-04-23
 
 ### Fixed

@@ -48,7 +48,7 @@
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
 
 -ifdef(TEST).
--export([rebuild_from_events/3]).
+-export([rebuild_from_events/3, is_wrong_version_error/1]).
 -endif.
 
 %%====================================================================
@@ -190,22 +190,9 @@ handle_call({execute, Command}, _From, State) ->
                     Timeout = LifespanModule:after_event(hd(Events)),
                     {reply, {ok, NewVersion, Events}, NewState2, Timeout};
 
-                {error, wrong_expected_version} ->
-                    %% Rebuild state from store to get correct version, then signal retry
-                    case rebuild_from_events(Module, StoreId, StreamId) of
-                        {ok, NewAggState, NewVersion} ->
-                            RebuildState = State#evoq_aggregate_state{
-                                state = NewAggState,
-                                version = NewVersion
-                            },
-                            {reply, {error, wrong_expected_version}, RebuildState};
-                        {error, _} ->
-                            {reply, {error, wrong_expected_version}, State}
-                    end;
-
-                {error, Reason} = Error ->
-                    Timeout = LifespanModule:after_error(Reason),
-                    {reply, Error, State, Timeout}
+                AppendError ->
+                    reply_after_append_error(AppendError, State, Module, StoreId,
+                                             StreamId, LifespanModule)
             end;
 
         {error, Reason} = Error ->
@@ -272,22 +259,9 @@ handle_call({execute_with_state, Command}, _From, State) ->
                     Timeout = LifespanModule:after_event(hd(Events)),
                     {reply, {ok, NewVersion, Events, NewAggState}, NewState2, Timeout};
 
-                {error, wrong_expected_version} ->
-                    %% Rebuild state from store to get correct version
-                    case rebuild_from_events(Module, StoreId, StreamId) of
-                        {ok, NewAggState2, NewVersion2} ->
-                            RebuildState = State#evoq_aggregate_state{
-                                state = NewAggState2,
-                                version = NewVersion2
-                            },
-                            {reply, {error, wrong_expected_version}, RebuildState};
-                        {error, _} ->
-                            {reply, {error, wrong_expected_version}, State}
-                    end;
-
-                {error, Reason} = Error ->
-                    Timeout = LifespanModule:after_error(Reason),
-                    {reply, Error, State, Timeout}
+                AppendError ->
+                    reply_after_append_error(AppendError, State, Module, StoreId,
+                                             StreamId, LifespanModule)
             end;
 
         {error, Reason} = Error ->
@@ -399,6 +373,50 @@ try_load_snapshot(Module, StoreId, AggregateId) ->
             end;
         false ->
             {error, not_found}
+    end.
+
+%% @private Classify an append failure so we know whether to rebuild.
+%%
+%% reckon-db's append surfaces a 3-tuple `{wrong_expected_version,
+%% Expected, Actual}`; earlier reckon_gater versions used a 2-tuple
+%% `{wrong_expected_version, Actual}`; and some call sites still
+%% produce the plain atom. Collapsing them here keeps the dispatcher's
+%% 2-tuple retry contract intact regardless of which backend shape
+%% bubbles up.
+-spec is_wrong_version_error(term()) -> boolean().
+is_wrong_version_error({error, wrong_expected_version})           -> true;
+is_wrong_version_error({error, {wrong_expected_version, _}})      -> true;
+is_wrong_version_error({error, {wrong_expected_version, _, _}})   -> true;
+is_wrong_version_error(_)                                         -> false.
+
+%% @private Turn any append error into the correct gen_server reply.
+%%
+%% On a version conflict we rebuild the aggregate from the stream and
+%% hand the dispatcher a normalised `{error, wrong_expected_version}`
+%% so its retry loop fires exactly once per conflict. Any other error
+%% is returned verbatim.
+-spec reply_after_append_error(term(), #evoq_aggregate_state{}, module(),
+                               atom(), binary(), module()) -> term().
+reply_after_append_error(Error, State, Module, StoreId, StreamId, LifespanModule) ->
+    case is_wrong_version_error(Error) of
+        true  ->
+            rebuild_and_reply_conflict(State, Module, StoreId, StreamId);
+        false ->
+            {error, Reason} = Error,
+            Timeout = LifespanModule:after_error(Reason),
+            {reply, Error, State, Timeout}
+    end.
+
+-spec rebuild_and_reply_conflict(#evoq_aggregate_state{}, module(),
+                                 atom(), binary()) -> term().
+rebuild_and_reply_conflict(State, Module, StoreId, StreamId) ->
+    case rebuild_from_events(Module, StoreId, StreamId) of
+        {ok, NewAggState, NewVersion} ->
+            {reply, {error, wrong_expected_version},
+             State#evoq_aggregate_state{state = NewAggState,
+                                        version = NewVersion}};
+        {error, _} ->
+            {reply, {error, wrong_expected_version}, State}
     end.
 
 %% @private Rebuild aggregate state from the event store (full replay).
