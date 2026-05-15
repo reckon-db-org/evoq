@@ -5,6 +5,69 @@ All notable changes to evoq will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.15.0] - 2026-05-15
+
+### Added — Integrity-violation classification and chain-hash propagation
+
+Layer 6 of the cross-package tamper-resistance work in
+reckon-db/plans/PLAN_TAMPER_RESISTANCE.md. Pure additions plus
+one non-breaking error-handling fix; no API removed, no caller
+broken.
+
+#### Schema
+
+- `#evoq_event{}` gains `prev_event_hash :: binary() | undefined`.
+  Carried verbatim from reckon-gater's `#event{}` through the
+  reckon-evoq adapter so projections and process managers can
+  keylessly verify chain continuity as defense-in-depth.
+- The `mac` and `signature` fields on the storage-side record
+  are intentionally NOT propagated into evoq. They belong to
+  the storage layer and require the per-store HMAC / public key
+  that the framework does not (and must not) hold.
+- `evoq_event_store:event_to_map/1` includes `prev_event_hash`
+  in the produced map.
+
+#### Error classification
+
+- New `evoq_aggregate:is_integrity_violation/1` recognises the
+  `{error, {integrity_violation, _}}` class shipped by reckon-db
+  2.1.0. Distinct from `wrong_expected_version`: must NOT enter
+  the rebuild-and-retry loop.
+- Post-append error path now classifies and handles integrity
+  violations explicitly — surface verbatim, emit telemetry
+  `[evoq, aggregate, integrity, violation]`, no retry.
+- `rebuild_and_reply_conflict/4` distinguishes integrity from
+  other rebuild failures. Previous behaviour normalised any
+  rebuild error to `wrong_expected_version`, which would have
+  caused the dispatcher to spin against corrupted state until
+  the retry cap. Integrity errors now surface immediately.
+
+#### Compatibility
+
+- Requires reckon-gater >= 2.1.0 only if you want chain hashes
+  to flow through to the evoq layer. evoq 1.15 builds and runs
+  fine against reckon-gater 2.0.x — the new record field
+  defaults to `undefined` everywhere.
+- Existing callers constructing `#evoq_event{}` without the new
+  field continue to compile and run.
+
+#### Tests
+
+14 new eunit tests in `evoq_aggregate_integrity_tests`:
+classifier shape recognition (storage / replay / snapshot
+violations with various context maps), negative cases that
+must NOT over-match (wrong-version errors, stream-not-found,
+bare violations, atom-collision cases, success tuples,
+arbitrary terms), and schema sanity (record has the field,
+defaults to undefined, survives the record→map boundary).
+
+Full eunit: 75 tests pass (61 existing + 14 new). Zero regression.
+
+### Changed
+
+- `src/evoq.app.src`: `{links, [{"GitHub", ...}]}` updated to
+  `{"Codeberg", ...}` to match canonical hosting.
+
 ## [1.14.4] - 2026-04-24
 
 ### Fixed

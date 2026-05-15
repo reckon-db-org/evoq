@@ -1,6 +1,6 @@
 {application, evoq, [
     {description, "Erlang CQRS/Event Sourcing framework built on reckon-db"},
-    {vsn, "1.14.4"},
+    {vsn, "1.15.0"},
     {registered, []},
     {mod, {evoq_app, []}},
     {applications, [
@@ -26,6 +26,6 @@
     {modules, []},
     {licenses, ["Apache-2.0"]},
     {links, [
-        {"GitHub", "https://github.com/reckon-db-org/evoq"}
+        {"Codeberg", "https://codeberg.org/reckon-db-org/evoq"}
     ]}
 ]}.
