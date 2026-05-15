@@ -224,7 +224,12 @@ event_to_map(#evoq_event{} = Event) ->
         timestamp => Event#evoq_event.timestamp,
         epoch_us => Event#evoq_event.epoch_us,
         data_content_type => Event#evoq_event.data_content_type,
-        metadata_content_type => Event#evoq_event.metadata_content_type
+        metadata_content_type => Event#evoq_event.metadata_content_type,
+        %% Chain hash of the predecessor — preserved through the
+        %% adapter boundary for keyless defense-in-depth chain
+        %% checks by projections / process managers. `undefined`
+        %% for legacy events (pre-2.1 reckon-db).
+        prev_event_hash => Event#evoq_event.prev_event_hash
     },
     %% Flatten: merge business data into top level, envelope wins on collision
     case Event#evoq_event.data of

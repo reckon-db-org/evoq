@@ -80,7 +80,21 @@
     data_content_type = ?CONTENT_TYPE_JSON :: binary(),
 
     %% Content type of metadata field
-    metadata_content_type = ?CONTENT_TYPE_JSON :: binary()
+    metadata_content_type = ?CONTENT_TYPE_JSON :: binary(),
+
+    %% Chain hash of the preceding event in the same stream
+    %% (introduced for the 2.1 tamper-resistance work in
+    %% reckon-db / reckon-gater). When set, projections and
+    %% process managers may keylessly verify chain continuity
+    %% across the events they consume as defense-in-depth.
+    %%
+    %% Carried verbatim from the storage layer through the
+    %% reckon-evoq adapter. The mac and signature fields are
+    %% intentionally NOT propagated into the evoq layer — they
+    %% are the storage layer's responsibility and require the
+    %% per-store HMAC / public key that the framework does not
+    %% (and must not) hold.
+    prev_event_hash = undefined :: binary() | undefined
 }).
 
 -type evoq_event() :: #evoq_event{}.

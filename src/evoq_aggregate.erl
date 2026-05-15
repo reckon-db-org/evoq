@@ -48,7 +48,8 @@
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
 
 -ifdef(TEST).
--export([rebuild_from_events/3, is_wrong_version_error/1]).
+-export([rebuild_from_events/3, is_wrong_version_error/1,
+         is_integrity_violation/1]).
 -endif.
 
 %%====================================================================
@@ -389,6 +390,22 @@ is_wrong_version_error({error, {wrong_expected_version, _}})      -> true;
 is_wrong_version_error({error, {wrong_expected_version, _, _}})   -> true;
 is_wrong_version_error(_)                                         -> false.
 
+%% @doc Recognise the tamper-resistance integrity_violation error
+%% class shipped by reckon-db 2.1.0 storage layer.
+%%
+%% Distinct from `wrong_expected_version` — must NOT enter the
+%% rebuild-and-retry loop. An integrity violation indicates that
+%% on-disk state has been tampered with (or that the operator's
+%% HMAC key is misconfigured); retrying would either spin against
+%% the same corrupted state, or — if the tamper was applied to a
+%% snapshot — silently load forged state via fallback.
+%%
+%% Used by the aggregate's post-append error handling AND by the
+%% dispatcher when classifying replay failures during rebuild.
+-spec is_integrity_violation(term()) -> boolean().
+is_integrity_violation({error, {integrity_violation, _}}) -> true;
+is_integrity_violation(_) -> false.
+
 %% @private Turn any append error into the correct gen_server reply.
 %%
 %% On a version conflict we rebuild the aggregate from the stream and
@@ -398,14 +415,46 @@ is_wrong_version_error(_)                                         -> false.
 -spec reply_after_append_error(term(), #evoq_aggregate_state{}, module(),
                                atom(), binary(), module()) -> term().
 reply_after_append_error(Error, State, Module, StoreId, StreamId, LifespanModule) ->
-    case is_wrong_version_error(Error) of
-        true  ->
+    case classify_append_error(Error) of
+        integrity_violation ->
+            %% Terminal — no retry, surface immediately to caller.
+            %% Emit telemetry so operators can alarm on this class
+            %% even when the caller swallows the error tuple.
+            emit_integrity_telemetry(StoreId, StreamId, Error, append),
+            {error, Reason} = Error,
+            Timeout = LifespanModule:after_error(Reason),
+            {reply, Error, State, Timeout};
+        wrong_version ->
             rebuild_and_reply_conflict(State, Module, StoreId, StreamId);
-        false ->
+        other ->
             {error, Reason} = Error,
             Timeout = LifespanModule:after_error(Reason),
             {reply, Error, State, Timeout}
     end.
+
+%% @private Classify an error from the append path. Integrity
+%% violation comes first because is_wrong_version_error/1 alone
+%% would not distinguish it; the dispatcher must see the original
+%% error tuple, not a normalised wrong_expected_version.
+classify_append_error(Error) ->
+    case is_integrity_violation(Error) of
+        true -> integrity_violation;
+        false ->
+            case is_wrong_version_error(Error) of
+                true  -> wrong_version;
+                false -> other
+            end
+    end.
+
+emit_integrity_telemetry(StoreId, StreamId, Error, Stage) ->
+    telemetry:execute(
+        [evoq, aggregate, integrity, violation],
+        #{system_time => erlang:system_time(millisecond)},
+        #{store_id => StoreId,
+          stream_id => StreamId,
+          stage => Stage,
+          error => Error}
+    ).
 
 -spec rebuild_and_reply_conflict(#evoq_aggregate_state{}, module(),
                                  atom(), binary()) -> term().
@@ -415,8 +464,21 @@ rebuild_and_reply_conflict(State, Module, StoreId, StreamId) ->
             {reply, {error, wrong_expected_version},
              State#evoq_aggregate_state{state = NewAggState,
                                         version = NewVersion}};
-        {error, _} ->
-            {reply, {error, wrong_expected_version}, State}
+        {error, _} = RebuildErr ->
+            %% Rebuild itself failed. Distinguish integrity from
+            %% other rebuild failures: integrity_violation must
+            %% surface verbatim so the dispatcher does NOT retry.
+            %% Without this, the dispatcher would see
+            %% wrong_expected_version, retry, rebuild would fail
+            %% again with the same integrity_violation, and the
+            %% loop would only stop at the retry cap.
+            case is_integrity_violation(RebuildErr) of
+                true ->
+                    emit_integrity_telemetry(StoreId, StreamId, RebuildErr, rebuild),
+                    {reply, RebuildErr, State};
+                false ->
+                    {reply, {error, wrong_expected_version}, State}
+            end
     end.
 
 %% @private Rebuild aggregate state from the event store (full replay).
