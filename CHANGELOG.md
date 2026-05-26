@@ -5,6 +5,79 @@ All notable changes to evoq will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.18.0] - 2026-05-27
+
+### Added — `evoq_decision` behaviour + runtime (DCB)
+
+A new write-side construct that sits alongside `evoq_aggregate`.
+Where an aggregate locks on its own stream's version (stream-per-thing
+optimistic concurrency), a Decision locks on the absence of new events
+matching a tag-filter context query (Dynamic Consistency Boundary).
+
+Decisions are for cross-cutting checks that don't fit the per-entity
+Dossier shape — uniqueness, allocation against shared resources,
+idempotency keys, rate limits.
+
+**Behaviour module** (`evoq_decision`):
+
+```erlang
+-callback context(Command :: map()) -> context_filter().
+-callback decide(ContextEvents :: [map()], Command :: map()) ->
+      {ok, [Event :: map()]}
+    | {error, Reason :: term()}.
+
+%% Optional
+-callback retry_budget() -> non_neg_integer().  %% default 3
+```
+
+`context_filter()` v1 supports `{any_of, [Tag]}` and `{all_of, [Tag]}`
+(flat predicates only).
+
+**Runtime module** (`evoq_decision_runtime`):
+
+```erlang
+evoq_decision_runtime:dispatch(MyDecisionMod, StoreId, Command).
+```
+
+The runtime: calls `context/1`, reads matching DCB-stream events,
+computes the seq cutoff (max version seen, or -1), calls `decide/2`,
+appends conditionally via the configured adapter, retries on
+`{error, {context_changed, _}}` with bounded exponential backoff +
+jitter. Default retry budget 3.
+
+**evoq_event_store** gains two wrapper functions delegating to the
+adapter:
+
+- `evoq_event_store:read_by_tags/4`
+- `evoq_event_store:append_if_no_tag_matches/4`
+
+Adapters must implement these to support `evoq_decision`. The
+`reckon_evoq` adapter has done so since 2.2.0.
+
+### v1 limitations
+
+- **Flat filters only.** Compound `and_` / `or_` filters are supported
+  by the reckon-db backend's conditional-append check, but the
+  runtime's read path doesn't yet translate them. Use multiple
+  decisions or flat filters at the evoq layer.
+- **DCB-stream only.** The runtime considers events from the
+  `<<"_dcb">>` pseudo-stream only when computing the cutoff. Mixed-
+  mode use cases (aggregate streams + DCB sharing tags) are not
+  supported by `evoq_decision` — use `evoq_aggregate` for
+  per-aggregate consistency, `evoq_decision` for pure cross-cutting.
+- **No options API.** Retry budget can be set via callback only;
+  there's no `dispatch/4` taking a per-call options map yet.
+
+### Notes
+
+`evoq_aggregate` is unchanged. Apps that don't use DCB are unaffected.
+This release adds two new modules and two new functions in
+`evoq_event_store`. Backward-compatible.
+
+Publish ordering: reckon-gater 2.3.0 -> reckon-db 3.1.0 ->
+reckon-evoq 2.2.0 -> evoq 1.18.0. For local dev, the local
+reckon_gater is linked via `_checkouts/`.
+
 ## [1.15.0] - 2026-05-15
 
 ### Added — Integrity-violation classification and chain-hash propagation
