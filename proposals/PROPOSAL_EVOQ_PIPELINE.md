@@ -3,7 +3,7 @@
 **Status:** Draft
 **Author:** Raf Lefever
 **Date:** 2026-05-25
-**Related:** [hecate-agents/philosophy/COMMAND_PIPELINES.md](https://codeberg.org/hecate-social/hecate-agents/src/branch/main/philosophy/COMMAND_PIPELINES.md) (canonical conceptual model)
+**Related:** [hecate-corpus/philosophy/COMMAND_PIPELINES.md](https://codeberg.org/hecate-social/hecate-corpus/src/branch/main/philosophy/COMMAND_PIPELINES.md) (canonical conceptual model)
 
 ---
 
@@ -27,7 +27,7 @@ The behaviours encode a structural invariant that's already implicit in evoq: ag
 
 In practice, application authors who need external data for command validation reach for one of two anti-patterns:
 
-1. **Reading from a read model inside `execute/2`, `apply/2`, or the dispatching handler.** This is [Demon 41 — THE Cardinal Sin](https://codeberg.org/hecate-social/hecate-agents/src/branch/main/skills/ANTIPATTERNS_EVENT_SOURCING.md#-demon-41-reading-from-read-models-during-event-flow--the-cardinal-sin). Silent race conditions, replay breakage.
+1. **Reading from a read model inside `execute/2`, `apply/2`, or the dispatching handler.** This is [Demon 41 — THE Cardinal Sin](https://codeberg.org/hecate-social/hecate-corpus/src/branch/main/skills/ANTIPATTERNS_EVENT_SOURCING.md#-demon-41-reading-from-read-models-during-event-flow--the-cardinal-sin). Silent race conditions, replay breakage.
 
 2. **Reading from a read model inside an `evoq_process_manager`'s event-flow code.** Same root cause, different appearance. Same failures.
 
@@ -149,7 +149,7 @@ The `steps/0` callback returns the ordered list of step modules. Order matters: 
 
 ### Metadata propagation convention
 
-Keys placed under `'__meta'` in ctx are auto-serialized into the dispatched command's `metadata` field before the aggregate sees it. This formalizes the payload/metadata separation that [Demon 37 — Flattening Event Envelopes into Business Data](https://codeberg.org/hecate-social/hecate-agents/src/branch/main/skills/ANTIPATTERNS_EVENT_SOURCING.md) demands.
+Keys placed under `'__meta'` in ctx are auto-serialized into the dispatched command's `metadata` field before the aggregate sees it. This formalizes the payload/metadata separation that [Demon 37 — Flattening Event Envelopes into Business Data](https://codeberg.org/hecate-social/hecate-corpus/src/branch/main/skills/ANTIPATTERNS_EVENT_SOURCING.md) demands.
 
 ```erlang
 %% Inside a step:
@@ -343,7 +343,7 @@ Applications that want to adopt:
 
 No breaking changes to existing evoq APIs. Adoption is per-command, per-pipeline.
 
-Applications that have already hand-rolled a runner (e.g., the parksim family, if/when it adopts the pattern from hecate-agents) migrate by:
+Applications that have already hand-rolled a runner (e.g., the parksim family, if/when it adopts the pattern from hecate-corpus) migrate by:
 
 1. Changing the runner call site from `pipeline_runner:run/3` to `evoq_pipeline:run/3`.
 2. Optionally adding the `-behaviour(evoq_pipeline_step)` and `-behaviour(evoq_pipeline)` declarations.
@@ -366,9 +366,9 @@ Step modules keep working — the contract was designed to be compatible.
 
 ## References
 
-- [hecate-agents/philosophy/COMMAND_PIPELINES.md](https://codeberg.org/hecate-social/hecate-agents/src/branch/main/philosophy/COMMAND_PIPELINES.md) — canonical conceptual model, source of truth for the pattern
-- [hecate-agents/skills/codegen/erlang/CODEGEN_ERLANG_PIPELINES.md](https://codeberg.org/hecate-social/hecate-agents/src/branch/main/skills/codegen/erlang/CODEGEN_ERLANG_PIPELINES.md) — templates and checklists
-- [hecate-agents/skills/ANTIPATTERNS_EVENT_SOURCING.md#-demon-41](https://codeberg.org/hecate-social/hecate-agents/src/branch/main/skills/ANTIPATTERNS_EVENT_SOURCING.md#-demon-41-reading-from-read-models-during-event-flow--the-cardinal-sin) — Demon 41, the cardinal sin this pattern cures
+- [hecate-corpus/philosophy/COMMAND_PIPELINES.md](https://codeberg.org/hecate-social/hecate-corpus/src/branch/main/philosophy/COMMAND_PIPELINES.md) — canonical conceptual model, source of truth for the pattern
+- [hecate-corpus/skills/codegen/erlang/CODEGEN_ERLANG_PIPELINES.md](https://codeberg.org/hecate-social/hecate-corpus/src/branch/main/skills/codegen/erlang/CODEGEN_ERLANG_PIPELINES.md) — templates and checklists
+- [hecate-corpus/skills/ANTIPATTERNS_EVENT_SOURCING.md#-demon-41](https://codeberg.org/hecate-social/hecate-corpus/src/branch/main/skills/ANTIPATTERNS_EVENT_SOURCING.md#-demon-41-reading-from-read-models-during-event-flow--the-cardinal-sin) — Demon 41, the cardinal sin this pattern cures
 - Phoenix Plug — Elixir/Erlang precedent for the same shape
 - Bondy interceptors — WAMP-layer precedent within the BEAM ecosystem
 
