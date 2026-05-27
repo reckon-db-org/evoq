@@ -64,7 +64,7 @@ append(StoreId, StreamId, ExpectedVersion, Events) ->
     Adapter:append(StoreId, StreamId, ExpectedVersion, Events).
 
 %% @doc Read events across streams by tag match.
-%% `Match` is `any` (union) or `all` (intersection).
+%% Match is the atom any (union) or all (intersection).
 -spec read_by_tags(atom(), [binary()], any | all, pos_integer()) ->
     {ok, [map()]} | {error, term()}.
 read_by_tags(StoreId, Tags, Match, BatchSize) ->
@@ -75,15 +75,15 @@ read_by_tags(StoreId, Tags, Match, BatchSize) ->
     end.
 
 %% @doc Conditionally append events under the DCB pseudo-stream
-%% (Dynamic Consistency Boundary — paired with reckon-db 3.1.0+).
+%% (Dynamic Consistency Boundary, paired with reckon-db 3.1.0+).
 %%
-%% `TagFilter` is the consistency context query (a backend-defined
-%% tag-filter term). `SeqCutoff` is the highest seq the caller saw
-%% (or -1 for "saw nothing"). Returns `{error, {context_changed, MaxSeq}}`
-%% if any event matching `TagFilter` has seq > `SeqCutoff`.
+%% TagFilter is the consistency context query (a backend-defined
+%% tag-filter term). SeqCutoff is the highest seq the caller saw
+%% (or -1 for "saw nothing"). Returns {error, {context_changed, MaxSeq}}
+%% if any event matching TagFilter has seq above SeqCutoff.
 %%
-%% The typical caller is `evoq_decision_runtime`; user code uses the
-%% `evoq_decision` behaviour rather than calling this directly.
+%% The typical caller is evoq_decision_runtime; user code uses the
+%% evoq_decision behaviour rather than calling this directly.
 -spec append_if_no_tag_matches(atom(), term(), integer(), [map()]) ->
       {ok, non_neg_integer()}
     | {error, {context_changed, non_neg_integer()}}

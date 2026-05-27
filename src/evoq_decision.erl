@@ -1,6 +1,6 @@
 %%% @doc DCB Decision behaviour (Dynamic Consistency Boundary).
 %%%
-%%% A `Decision` is a write-side construct that sits alongside the
+%%% A Decision is a write-side construct that sits alongside the
 %%% aggregate. Where an aggregate locks on its own stream's version,
 %%% a Decision locks on the absence of new events matching a
 %%% tag-filter context query. Decisions are for cross-cutting checks
@@ -14,7 +14,7 @@
 %%%   context(Command :: map()) -> context_filter()
 %%%     Describe the tag-filter context this decision queries.
 %%%     The runtime reads matching events, then passes them to
-%%%     `decide/2`.
+%%%     decide/2.
 %%%
 %%%   decide(ContextEvents :: [map()], Command :: map()) ->
 %%%       {ok, [Event :: map()]} | {error, Reason :: term()}
@@ -29,14 +29,14 @@
 %%%
 %%% == v1 limitations ==
 %%%
-%%%   - `context_filter()` only supports `any_of` / `all_of`. Compound
-%%%     `and_` / `or_` filters are supported by the backend's
+%%%   - context_filter() only supports any_of / all_of. Compound
+%%%     and_ / or_ filters are supported by the backend's
 %%%     conditional-append check but the runtime's read path doesn't
 %%%     yet translate them; flat filters only.
 %%%   - The runtime considers only events from the DCB pseudo-stream
-%%%     (`<<"_dcb">>`). Mixed-mode use cases (aggregate streams +
-%%%     DCB sharing tags) are not supported; use `evoq_aggregate` if
-%%%     the consistency boundary is per-aggregate, `evoq_decision`
+%%%     (the binary "_dcb"). Mixed-mode use cases (aggregate streams +
+%%%     DCB sharing tags) are not supported; use evoq_aggregate if
+%%%     the consistency boundary is per-aggregate, evoq_decision
 %%%     if it's cross-cutting via DCB.
 %%%
 %%% @end
@@ -50,9 +50,9 @@
 %%   and_(Filters)    - event satisfies ALL sub-filters
 %%   or_(Filters)     - event satisfies AT LEAST ONE sub-filter
 %%
-%% Mirrors `reckon_gater_types:tag_filter()` exactly. The runtime
+%% Mirrors reckon_gater_types:tag_filter() exactly. The runtime
 %% read path supports compound filters as of evoq 1.18.1 (see
-%% `evoq_decision_runtime`).
+%% evoq_decision_runtime).
 -type context_filter() ::
       {any_of, [binary()]}
     | {all_of, [binary()]}

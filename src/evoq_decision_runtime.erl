@@ -1,24 +1,24 @@
-%%% @doc Runtime for the `evoq_decision` behaviour.
+%%% @doc Runtime for the evoq_decision behaviour.
 %%%
-%%% Wires the user-facing callback contract (`context/1`, `decide/2`)
+%%% Wires the user-facing callback contract (context/1, decide/2)
 %%% to the event-store adapter's conditional-append primitive
-%%% (`append_if_no_tag_matches/4`):
+%%% (append_if_no_tag_matches/4):
 %%%
-%%%   1. Call `Mod:context(Command)` to get the tag-filter.
+%%%   1. Call Mod:context(Command) to get the tag-filter.
 %%%   2. Read the context events matching that filter (DCB-stream only).
 %%%   3. Compute the seq cutoff from the highest version seen
 %%%      (or -1 for "saw nothing").
-%%%   4. Call `Mod:decide(ContextEvents, Command)`.
+%%%   4. Call Mod:decide(ContextEvents, Command).
 %%%   5. Conditionally append the resulting events.
-%%%   6. On `{error, {context_changed, _}}`, sleep with bounded
+%%%   6. On {error, {context_changed, _}}, sleep with bounded
 %%%      exponential backoff + jitter, then retry from step 2. Retries
-%%%      are bounded by `Mod:retry_budget/0` (default 3).
+%%%      are bounded by Mod:retry_budget/0 (default 3).
 %%%
 %%% Returns:
-%%%   - `{ok, [Event]}` — events appended; commit produced.
-%%%   - `{error, retry_budget_exhausted}` — too many context_changed
+%%%   - {ok, [Event]}: events appended; commit produced.
+%%%   - {error, retry_budget_exhausted}: too many context_changed
 %%%     conflicts. Caller decides whether to escalate or give up.
-%%%   - `{error, Reason}` — domain error from `decide/2` or backend
+%%%   - {error, Reason}: domain error from decide/2 or backend
 %%%     error from the append path. Propagated as-is.
 %%% @end
 -module(evoq_decision_runtime).
@@ -82,9 +82,9 @@ attempt_append(Mod, StoreId, Command, Filter, Cutoff, NewEvents, Retries) ->
             BackendError
     end.
 
-%% Read context events matching `Filter`.
+%% Read context events matching Filter.
 %%
-%% Flat filters (any_of/all_of) hit `read_by_tags` directly with the
+%% Flat filters (any_of/all_of) hit read_by_tags directly with the
 %% appropriate match mode.
 %%
 %% Compound filters (and_/or_) require client-side combination:
@@ -140,7 +140,7 @@ collect_tags({or_, Filters}) when is_list(Filters) ->
     lists:usort(lists:flatmap(fun collect_tags/1, Filters)).
 
 %% Does an event's tag-set satisfy the filter? Per-event semantics
-%% matches the backend's `reckon_db_dcb_filter:match_seqs/2`.
+%% matches the backend's reckon_db_dcb_filter:match_seqs/2.
 event_matches_filter(Event, Filter) ->
     match_filter(Event, Filter).
 
