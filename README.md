@@ -8,6 +8,7 @@ Erlang CQRS/Event Sourcing framework built on reckon-db.
 ## Features
 
 - Aggregate lifecycle with configurable TTL and passivation
+- **Decisions** — `evoq_decision` behaviour for cross-cutting consistency boundaries (uniqueness, allocation, rate limits) via reckon-db DCB. See [guides/decisions.md](guides/decisions.md).
 - Per-event-type subscriptions (not per-stream)
 - Command idempotency
 - Middleware pipeline for command dispatch
