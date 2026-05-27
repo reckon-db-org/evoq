@@ -25,6 +25,10 @@
 
 -export([dispatch/3]).
 
+%% Internal API — exposed for property-based testing. Subject to
+%% change without semver guarantees.
+-export([match_filter/2, collect_tags/1]).
+
 %% Default knobs. Override via application env or per-call options
 %% (options API is a v2 concern).
 -define(DEFAULT_RETRY_BUDGET, 3).
@@ -137,16 +141,27 @@ collect_tags({or_, Filters}) when is_list(Filters) ->
 
 %% Does an event's tag-set satisfy the filter? Per-event semantics
 %% matches the backend's `reckon_db_dcb_filter:match_seqs/2`.
-event_matches_filter(Event, {any_of, Tags}) ->
-    EventTags = event_tags(Event),
-    lists:any(fun(T) -> lists:member(T, EventTags) end, Tags);
-event_matches_filter(Event, {all_of, Tags}) ->
-    EventTags = event_tags(Event),
-    lists:all(fun(T) -> lists:member(T, EventTags) end, Tags);
-event_matches_filter(Event, {and_, Filters}) ->
-    lists:all(fun(F) -> event_matches_filter(Event, F) end, Filters);
-event_matches_filter(Event, {or_, Filters}) ->
-    lists:any(fun(F) -> event_matches_filter(Event, F) end, Filters).
+event_matches_filter(Event, Filter) ->
+    match_filter(Event, Filter).
+
+%% @doc Public-for-testing version of the per-event filter predicate.
+%% Accepts either an event map (using maps:get(tags, ...)) or a raw
+%% tag list — handy for property-based tests that don't want to build
+%% full event maps. Subject to change without semver guarantees.
+-spec match_filter(Event | Tags, evoq_decision:context_filter()) -> boolean()
+    when Event :: map(), Tags :: [binary()].
+match_filter(Tags, {any_of, Wanted}) when is_list(Tags), is_list(Wanted) ->
+    lists:any(fun(T) -> lists:member(T, Tags) end, Wanted);
+match_filter(Tags, {all_of, Wanted}) when is_list(Tags), is_list(Wanted) ->
+    Wanted =/= [] andalso
+        lists:all(fun(T) -> lists:member(T, Tags) end, Wanted);
+match_filter(Tags, {and_, Filters}) when is_list(Tags), is_list(Filters) ->
+    Filters =/= [] andalso
+        lists:all(fun(F) -> match_filter(Tags, F) end, Filters);
+match_filter(Tags, {or_, Filters}) when is_list(Tags), is_list(Filters) ->
+    lists:any(fun(F) -> match_filter(Tags, F) end, Filters);
+match_filter(Event, Filter) when is_map(Event) ->
+    match_filter(event_tags(Event), Filter).
 
 event_tags(#{tags := T}) when is_list(T) -> T;
 event_tags(#{<<"tags">> := T}) when is_list(T) -> T;
