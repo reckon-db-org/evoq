@@ -5,6 +5,36 @@ All notable changes to evoq will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.19.0] - 2026-05-27
+
+### Added — compound filters in `evoq_decision`
+
+The `evoq_decision:context_filter()` type now includes the
+recursive `and_` and `or_` cases, matching the backend's
+`reckon_gater_types:tag_filter()` exactly:
+
+```erlang
+-type context_filter() ::
+      {any_of, [binary()]}
+    | {all_of, [binary()]}
+    | {and_, [context_filter()]}
+    | {or_,  [context_filter()]}.
+```
+
+`evoq_decision_runtime:read_context/2` now plumbs compound filters
+through the read path: walks the filter tree, collects the union of
+referenced tags, hits `read_by_tags` once with the broad set, then
+filters client-side using per-event semantics. Empty `{and_, []}` /
+`{or_, []}` filters short-circuit to an empty context (no read).
+
+This closes the v1 limitation noted in the 1.18.0 release. The
+backend's conditional-append check already supported compound filters
+(in reckon-db 3.1.0); now the runtime can express the same shapes.
+
+5 new eunit tests cover or-of-flats, and-of-flats, nested compound
+(`or_(any_of, all_of)`), and empty-compound short-circuit. All 90
+existing eunit tests still pass.
+
 ## [1.18.0] - 2026-05-27
 
 ### Added — `evoq_decision` behaviour + runtime (DCB)

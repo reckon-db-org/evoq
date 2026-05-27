@@ -78,12 +78,44 @@ attempt_append(Mod, StoreId, Command, Filter, Cutoff, NewEvents, Retries) ->
             BackendError
     end.
 
-%% Read all events matching the tag filter, then filter to DCB-stream
-%% events only (v1 limitation: mixed-mode is unsupported).
-read_context(StoreId, {any_of, Tags}) ->
+%% Read context events matching `Filter`.
+%%
+%% Flat filters (any_of/all_of) hit `read_by_tags` directly with the
+%% appropriate match mode.
+%%
+%% Compound filters (and_/or_) require client-side combination:
+%%   1. Walk the filter tree, collect all tags it references (set union).
+%%   2. Read events tagged with ANY of those tags (broadest possible).
+%%   3. Filter client-side, retaining only events whose tag-set actually
+%%      satisfies the compound predicate.
+%%
+%% All paths filter to DCB-stream events only — same v1 limitation as
+%% before: mixed-mode (aggregate streams + DCB sharing tags) is
+%% unsupported by evoq_decision; the cutoff calculation needs the
+%% consistency check's view of events.
+read_context(StoreId, {any_of, Tags}) when is_list(Tags) ->
     read_filtered_to_dcb(StoreId, Tags, any);
-read_context(StoreId, {all_of, Tags}) ->
-    read_filtered_to_dcb(StoreId, Tags, all).
+read_context(StoreId, {all_of, Tags}) when is_list(Tags) ->
+    read_filtered_to_dcb(StoreId, Tags, all);
+read_context(StoreId, Filter) when is_tuple(Filter) ->
+    %% Compound filter: pull a superset and refine client-side.
+    case collect_tags(Filter) of
+        [] ->
+            %% Vacuous compound filter (e.g., {or_, []}). No tags to
+            %% read, no events to consider.
+            {ok, []};
+        AllTags ->
+            case evoq_event_store:read_by_tags(
+                   StoreId, AllTags, any, ?DEFAULT_BATCH_SIZE) of
+                {ok, Events} ->
+                    DcbOnly = [E || E <- Events, is_dcb_event(E)],
+                    Matching = [E || E <- DcbOnly,
+                                     event_matches_filter(E, Filter)],
+                    {ok, Matching};
+                {error, _} = Error ->
+                    Error
+            end
+    end.
 
 read_filtered_to_dcb(StoreId, Tags, Match) ->
     case evoq_event_store:read_by_tags(StoreId, Tags, Match, ?DEFAULT_BATCH_SIZE) of
@@ -93,6 +125,32 @@ read_filtered_to_dcb(StoreId, Tags, Match) ->
         {error, _} = Error ->
             Error
     end.
+
+%% Walk a filter, returning the set (as a deduped list) of every tag
+%% it references at any depth.
+collect_tags({any_of, Tags}) when is_list(Tags) -> Tags;
+collect_tags({all_of, Tags}) when is_list(Tags) -> Tags;
+collect_tags({and_, Filters}) when is_list(Filters) ->
+    lists:usort(lists:flatmap(fun collect_tags/1, Filters));
+collect_tags({or_, Filters}) when is_list(Filters) ->
+    lists:usort(lists:flatmap(fun collect_tags/1, Filters)).
+
+%% Does an event's tag-set satisfy the filter? Per-event semantics
+%% matches the backend's `reckon_db_dcb_filter:match_seqs/2`.
+event_matches_filter(Event, {any_of, Tags}) ->
+    EventTags = event_tags(Event),
+    lists:any(fun(T) -> lists:member(T, EventTags) end, Tags);
+event_matches_filter(Event, {all_of, Tags}) ->
+    EventTags = event_tags(Event),
+    lists:all(fun(T) -> lists:member(T, EventTags) end, Tags);
+event_matches_filter(Event, {and_, Filters}) ->
+    lists:all(fun(F) -> event_matches_filter(Event, F) end, Filters);
+event_matches_filter(Event, {or_, Filters}) ->
+    lists:any(fun(F) -> event_matches_filter(Event, F) end, Filters).
+
+event_tags(#{tags := T}) when is_list(T) -> T;
+event_tags(#{<<"tags">> := T}) when is_list(T) -> T;
+event_tags(_) -> [].
 
 %% v1: only DCB-stream events count toward the consistency boundary.
 %% The reckon-db backend's tag index is forward-only (per

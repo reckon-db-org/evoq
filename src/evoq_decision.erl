@@ -44,12 +44,20 @@
 
 -export_type([context_filter/0]).
 
-%% v1: flat tag predicates only. The backend supports compound
-%% `and_` / `or_` for conditional-append, but the runtime's read path
-%% doesn't translate them yet.
+%% Tag-filter for the consistency context. Per-event semantics:
+%%   any_of(Tags)     - event has ANY of the given tags
+%%   all_of(Tags)     - event has ALL of the given tags
+%%   and_(Filters)    - event satisfies ALL sub-filters
+%%   or_(Filters)     - event satisfies AT LEAST ONE sub-filter
+%%
+%% Mirrors `reckon_gater_types:tag_filter()` exactly. The runtime
+%% read path supports compound filters as of evoq 1.18.1 (see
+%% `evoq_decision_runtime`).
 -type context_filter() ::
       {any_of, [binary()]}
-    | {all_of, [binary()]}.
+    | {all_of, [binary()]}
+    | {and_, [context_filter()]}
+    | {or_,  [context_filter()]}.
 
 %% Define the tag-filter context this decision queries.
 -callback context(Command :: map()) -> context_filter().

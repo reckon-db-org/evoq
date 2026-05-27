@@ -70,6 +70,11 @@ cleanup(_) ->
     catch meck:unload(test_decision_uniqueness),
     catch meck:unload(test_decision_failing),
     catch meck:unload(test_decision_short_budget),
+    catch meck:unload(test_decision_or),
+    catch meck:unload(test_decision_and),
+    catch meck:unload(test_decision_nested),
+    catch meck:unload(test_decision_empty_or),
+    catch meck:unload(test_decision_empty_and),
     ok.
 
 %%====================================================================
@@ -87,7 +92,12 @@ all_test_() ->
         fun cutoff_is_minus_one_for_empty_read/0,
         fun cutoff_is_max_version_seen/0,
         fun non_dcb_events_filtered_from_context/0,
-        fun custom_retry_budget_honored/0
+        fun custom_retry_budget_honored/0,
+        fun or_filter_unions_subfilter_matches/0,
+        fun and_filter_intersects_subfilter_matches/0,
+        fun nested_compound_filter/0,
+        fun empty_or_filter_yields_empty_context/0,
+        fun empty_and_filter_yields_empty_context/0
     ]}.
 
 %%====================================================================
@@ -264,15 +274,141 @@ custom_retry_budget_honored() ->
     ?assertEqual(1, meck:num_calls(evoq_event_store, append_if_no_tag_matches, '_')).
 
 %%====================================================================
+%% Compound filters
+%%====================================================================
+
+%% Returns an or_ filter over two tags. Decide returns no events
+%% (just exercising the read path).
+test_decision_or_setup() ->
+    meck:new(test_decision_or, [non_strict]),
+    meck:expect(test_decision_or, context,
+        fun(_) -> {or_, [{any_of, [<<"a">>]}, {any_of, [<<"b">>]}]} end),
+    meck:expect(test_decision_or, decide,
+        fun(_Ctx, _Cmd) -> {ok, []} end).  %% empty append (will be no_events)
+
+test_decision_and_setup() ->
+    meck:new(test_decision_and, [non_strict]),
+    meck:expect(test_decision_and, context,
+        fun(_) -> {and_, [{any_of, [<<"a">>]}, {any_of, [<<"b">>]}]} end),
+    meck:expect(test_decision_and, decide,
+        fun(_Ctx, _Cmd) -> {ok, []} end).
+
+test_decision_nested_setup() ->
+    meck:new(test_decision_nested, [non_strict]),
+    %% (any_of [a]) OR (all_of [b, c])
+    meck:expect(test_decision_nested, context,
+        fun(_) -> {or_, [{any_of, [<<"a">>]},
+                         {all_of, [<<"b">>, <<"c">>]}]} end),
+    meck:expect(test_decision_nested, decide,
+        fun(_Ctx, _Cmd) -> {ok, []} end).
+
+test_decision_empty_or_setup() ->
+    meck:new(test_decision_empty_or, [non_strict]),
+    meck:expect(test_decision_empty_or, context, fun(_) -> {or_, []} end),
+    meck:expect(test_decision_empty_or, decide, fun(_, _) -> {ok, []} end).
+
+test_decision_empty_and_setup() ->
+    meck:new(test_decision_empty_and, [non_strict]),
+    meck:expect(test_decision_empty_and, context, fun(_) -> {and_, []} end),
+    meck:expect(test_decision_empty_and, decide, fun(_, _) -> {ok, []} end).
+
+%% Helper: extract the ContextEvents passed to decide.
+captured_decide_context(Mod) ->
+    [Args || {_Pid, {_M, decide, Args}, _Ret} <- meck:history(Mod)].
+
+or_filter_unions_subfilter_matches() ->
+    test_decision_or_setup(),
+    %% Backend returns events tagged a, b, or both, after the
+    %% broad read_by_tags(any). The runtime should pass ALL of them
+    %% to decide (any of {a} or any of {b} = events with either tag).
+    EvA  = dcb_event_with(1, [<<"a">>]),
+    EvB  = dcb_event_with(2, [<<"b">>]),
+    EvAB = dcb_event_with(3, [<<"a">>, <<"b">>]),
+    EvC  = dcb_event_with(4, [<<"c">>]),  %% should NOT match
+    meck:expect(evoq_event_store, read_by_tags,
+        fun(_Store, Tags, any, _Batch) ->
+            %% Verify runtime asked for the UNION of tags.
+            ?assertEqual(lists:usort([<<"a">>, <<"b">>]), lists:usort(Tags)),
+            {ok, [EvA, EvB, EvAB, EvC]}
+        end),
+    %% decide returns no events to keep the test focused on read-path
+    meck:expect(evoq_event_store, append_if_no_tag_matches,
+        fun(_,_,_,_) -> {error, no_events} end),
+    _ = evoq_decision_runtime:dispatch(test_decision_or, ?STORE, #{}),
+    [[Passed, _]] = captured_decide_context(test_decision_or),
+    ?assertEqual([1, 2, 3], lists:sort([V || #{version := V} <- Passed])).
+
+and_filter_intersects_subfilter_matches() ->
+    test_decision_and_setup(),
+    %% any_of([a]) AND any_of([b]) is per-event AND: events bearing
+    %% both a and b. Backend returns events under broad any_of([a,b]);
+    %% client-side filtering keeps only those with BOTH tags.
+    EvA  = dcb_event_with(1, [<<"a">>]),
+    EvB  = dcb_event_with(2, [<<"b">>]),
+    EvAB = dcb_event_with(3, [<<"a">>, <<"b">>]),
+    meck:expect(evoq_event_store, read_by_tags,
+        fun(_,_,_,_) -> {ok, [EvA, EvB, EvAB]} end),
+    meck:expect(evoq_event_store, append_if_no_tag_matches,
+        fun(_,_,_,_) -> {error, no_events} end),
+    _ = evoq_decision_runtime:dispatch(test_decision_and, ?STORE, #{}),
+    [[Passed, _]] = captured_decide_context(test_decision_and),
+    %% Only EvAB has both tags.
+    ?assertEqual([3], [V || #{version := V} <- Passed]).
+
+nested_compound_filter() ->
+    test_decision_nested_setup(),
+    %% Filter: (any_of [a]) OR (all_of [b, c])
+    %% Matches: events tagged with a OR events tagged with BOTH b and c.
+    EvA   = dcb_event_with(1, [<<"a">>]),         %% matches first branch
+    EvB   = dcb_event_with(2, [<<"b">>]),         %% no match (only b)
+    EvBC  = dcb_event_with(3, [<<"b">>, <<"c">>]),%% matches second branch
+    EvABC = dcb_event_with(4, [<<"a">>, <<"b">>, <<"c">>]), %% matches both
+    EvD   = dcb_event_with(5, [<<"d">>]),         %% no match
+    meck:expect(evoq_event_store, read_by_tags,
+        fun(_,_,_,_) -> {ok, [EvA, EvB, EvBC, EvABC, EvD]} end),
+    meck:expect(evoq_event_store, append_if_no_tag_matches,
+        fun(_,_,_,_) -> {error, no_events} end),
+    _ = evoq_decision_runtime:dispatch(test_decision_nested, ?STORE, #{}),
+    [[Passed, _]] = captured_decide_context(test_decision_nested),
+    ?assertEqual([1, 3, 4], lists:sort([V || #{version := V} <- Passed])).
+
+empty_or_filter_yields_empty_context() ->
+    test_decision_empty_or_setup(),
+    %% No tags referenced → no read should happen, context is []
+    %% (and cutoff defaults to -1).
+    meck:expect(evoq_event_store, read_by_tags,
+        fun(_,_,_,_) -> ct:fail(read_should_not_be_called) end),
+    meck:expect(evoq_event_store, append_if_no_tag_matches,
+        fun(_,_,_,_) -> {error, no_events} end),
+    _ = evoq_decision_runtime:dispatch(test_decision_empty_or, ?STORE, #{}),
+    [[Passed, _]] = captured_decide_context(test_decision_empty_or),
+    ?assertEqual([], Passed),
+    ?assertEqual(0, meck:num_calls(evoq_event_store, read_by_tags, '_')).
+
+empty_and_filter_yields_empty_context() ->
+    test_decision_empty_and_setup(),
+    %% Same logic as empty_or.
+    meck:expect(evoq_event_store, read_by_tags,
+        fun(_,_,_,_) -> ct:fail(read_should_not_be_called) end),
+    meck:expect(evoq_event_store, append_if_no_tag_matches,
+        fun(_,_,_,_) -> {error, no_events} end),
+    _ = evoq_decision_runtime:dispatch(test_decision_empty_and, ?STORE, #{}),
+    [[Passed, _]] = captured_decide_context(test_decision_empty_and),
+    ?assertEqual([], Passed).
+
+%%====================================================================
 %% Helpers
 %%====================================================================
 
 dcb_event(Version) ->
+    dcb_event_with(Version, [<<"x">>]).
+
+dcb_event_with(Version, Tags) ->
     #{event_type => <<"some_event">>,
       stream_id => <<"_dcb">>,
       version => Version,
       data => #{},
-      tags => [<<"x">>]}.
+      tags => Tags}.
 
 non_dcb_event(StreamId, Version) ->
     #{event_type => <<"agg_event">>,
