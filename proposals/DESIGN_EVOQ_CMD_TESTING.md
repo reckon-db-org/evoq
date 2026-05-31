@@ -69,11 +69,15 @@ sufficient; §5 and §6 cover the rest.
 | **`mem_evoq` (mem-evoq, hex 0.1.2)** | in-memory `evoq_event_store` adapter: full surface (`append/read/read_all/read_by_event_types/version/exists/list_streams/delete_stream` + snapshots + subscriptions). `mem_evoq:start_store/1,2`. Swap via `application:set_env(evoq, event_store_adapter, mem_evoq_adapter)`. No Khepri/Ra/disk. **This IS Layer B's store.** |
 | `reckon_gater_stream_id:validate/1` | the regex check. mem-evoq deps on `reckon_gater` so it's available, but — see §6 — mem-evoq does NOT call it. |
 
-**Verified gap (read mem_evoq_store.erl 2026-05-31):** mem-evoq's append does
-**not** validate stream ids — zero `reckon_gater` / `validate` references. So a
-scenario with a malformed id passes against mem-evoq while failing in prod.
-This is exactly why the stream-id guard (§6) is a SEPARATE explicit assertion,
-not an emergent property of Layer B. (And §8 recommends mem-evoq close the gap.)
+**Verified gap (read mem_evoq_store.erl, 1002 lines, 2026-05-31):** mem-evoq's
+append path (`do_append` → `check_expected_version` → `append_events_to_stream`)
+checks the *expected version* but **never calls `reckon_gater_stream_id:validate/1`**
+— it accepts any binary stream id. (mem-evoq DOES use `reckon_gater` heavily, but
+only for HMAC integrity — `reckon_gater_integrity`/`reckon_gater_canonical` — not
+for stream-id format.) So a scenario with a malformed id like `leuven-taxi-1`
+passes against mem-evoq while reckon-db rejects it in prod. This is exactly why
+the stream-id guard (§6) is a SEPARATE explicit assertion, not an emergent
+property of Layer B. (And §8 recommends mem-evoq close the gap.)
 
 ---
 
