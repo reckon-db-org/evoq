@@ -1,236 +1,311 @@
 # DESIGN: evoq CMD-level Domain Testing Framework
 
-**Status:** Draft (2026-05-31) — awaiting approval. No code until approved.
+**Status:** Draft v2 (2026-05-31) — awaiting approval. No framework code yet.
 **Repo:** `reckon-db-org/evoq` (currently v1.19.0).
-**Motivated by:** a real hecate-parksim/ClankerCab incident where every layer
-returned `ok` while zero domain events persisted.
+**Depends on:** `reckon-db-org/mem-evoq` (hex `mem_evoq` 0.1.2) — already exists.
+
+> v2 supersedes v1. v1 framed the gap as "no reusable persistence harness" and
+> proposed building a store fixture. Correction: the in-memory adapter already
+> exists (`mem-evoq`), and the user's actual intent is a **sequence-driven CMD
+> spec with four assertions per step**. This version is built around that.
 
 ---
 
-## 1. Motivation — the incident this would have caught
+## 1. What we want (user's spec)
 
-On 2026-05-31 the hecate-parksim robotaxi fleet ran live on beam00-03: the
-brain ticked, telemetry flowed, the map moved, and `dispatch` returned `ok`
-everywhere. Yet the SQLite read model was **empty** — `trips`, `revenue`,
-facility occupancy all 0. Three silent failures hid behind one another:
+Inject a **sequence of commands** into an aggregate. After **each** command,
+assert:
 
-1. **Stream-id rejection (the source).** The vehicle aggregate dispatched with
-   the human id `<<"leuven-taxi-1">>` as the evoq `AggregateId` == reckon-db
-   stream id. reckon-db requires stream ids to match
-   `^[a-z]{1,32}-[a-f0-9]{32}$` (`reckon_gater_stream_id`), so EVERY dispatch
+1. the aggregate is in the **correct state**;
+2. the aggregate **emitted the expected events**;
+3. the aggregate emitted **no unexpected events**;
+4. the aggregate **did not fail**.
+
+State threads through the sequence: command N runs against the state left by
+commands 1..N-1 (folded from their events). This is the pure heart of the
+framework — `execute/2` + `apply/2`, no store.
+
+---
+
+## 2. Why — the incident that proves the need
+
+On 2026-05-31 the hecate-parksim fleet ran live: brain ticking, telemetry
+flowing, `dispatch` returning `ok` everywhere. Yet the read model was empty
+(`trips`/`revenue` 0). Three silent failures nested:
+
+1. **Stream-id rejection.** The aggregate used the human id `leuven-taxi-1` as
+   the evoq `AggregateId` == reckon-db stream id. reckon-db requires
+   `^[a-z]{1,32}-[a-f0-9]{32}$` (`reckon_gater_stream_id`); every dispatch
    returned `{error, {invalid_stream_id, malformed_user_id, _}}`.
-2. **Swallowed dispatch.** The caller did `_ = catch Mod:dispatch(Payload)`, so
-   the error vanished. No crash, no log.
-3. **Empty projection.** With no events persisted, the projection had nothing
-   to fold; the read model stayed empty; the mesh summary fact reported 0s.
+2. **Swallowed dispatch.** The caller did `_ = catch Mod:dispatch(...)` — the
+   error vanished. No crash, no log.
+3. **Empty projection.** No events persisted → nothing to fold → empty read
+   model.
 
-**Every existing test passed.** The lesson the corpus already names —
-*"ok without observability is a lie"* (ANTIPATTERNS_MESH_PUBSUB) — applied at
-the CMD layer. This framework makes "prove the event landed" the default unit
-of domain testing, not "dispatch returned ok."
+The corpus names this exact class — *"ok without observability is a lie"*. Note
+**which layer each bug lives in**, because it dictates the framework's layers:
 
----
+| Bug | Layer | Caught by |
+|-----|-------|-----------|
+| wrong/missing event, wrong precondition, wrong state | `execute/2` logic | **Layer A** (pure spec, §4) |
+| swallowed dispatch error | call site | **Layer A** asserts `execute` result; **Layer B** asserts `dispatch` result |
+| stream-id rejection | adapter/store boundary | **explicit stream-id guard** (§6) — NOT Layer A or B alone |
+| projection/subscription not wiring events into the read model | dispatch→store→project | **Layer B** (mem-evoq, §5) |
 
-## 2. What exists today (do not duplicate)
-
-| Asset | What it does | Gap |
-|-------|-------------|-----|
-| `evoq_test_assertions` | `assert_command_succeeds/fails[_with]`, `assert_event[s]_produced`, `assert_aggregate_state`, `assert_read_model_contains/empty`, telemetry asserts. Dispatches via `evoq_router:dispatch` and asserts the RETURNED `{ok,_,Events}`. | Asserts the dispatch *return value*, not a stream read back from the store. No `given/when/then` matrix sugar. No stream-id validity check. |
-| `test/integration/evoq_dispatch_SUITE.erl` (+ `evoq_pm_SUITE`, `evoq_projection_SUITE`, `evoq_error_handling_SUITE`, `evoq_event_handler_SUITE`) | common_test suites: `init_per_suite` starts `evoq` (+ reckon-db store), dispatch, read back via `evoq_event_store:read_events/4`. | Exercise evoq's OWN internal test aggregate; not reusable by a domain app; not parameterised by a domain aggregate + its stream-id scheme. |
-| `reckon_gater_stream_id:validate/1` | the regex that rejected the id on 2026-05-31 | Never invoked by any evoq test path, so malformed ids only fail in prod. |
-
-The framework **reuses** `evoq_test_assertions` for the pure layer and
-**generalises** the `evoq_dispatch_SUITE` store-fixture idiom into a
-domain-facing harness. It replaces neither.
+A blunt honest point: **the four pure assertions would NOT have caught
+2026-05-31.** `execute/2` was correct — it emitted the right event. The bug was
+downstream at persistence. So the four assertions are necessary but not
+sufficient; §5 and §6 cover the rest.
 
 ---
 
-## 3. Two layers
+## 3. What already exists (reuse, don't rebuild)
 
-### Layer A — pure aggregate spec (fast, the bulk)
+| Asset | Role |
+|-------|------|
+| `evoq_aggregate` behaviour | `state_module/0`, `init/1`, `execute/2 -> {ok,[Event]}|{error,Reason}`, `apply/2`. The contract Layer A drives. |
+| `evoq_test_assertions` | `assert_command_succeeds/fails[_with]`, `assert_event[s]_produced`, etc. — but they assert the dispatch RETURN via `evoq_router:dispatch`, not a folded sequence. Layer A reuses the matching helpers; adds sequence + state threading. |
+| `evoq_event_store:set_adapter/1` | the swap seam for Layer B. |
+| **`mem_evoq` (mem-evoq, hex 0.1.2)** | in-memory `evoq_event_store` adapter: full surface (`append/read/read_all/read_by_event_types/version/exists/list_streams/delete_stream` + snapshots + subscriptions). `mem_evoq:start_store/1,2`. Swap via `application:set_env(evoq, event_store_adapter, mem_evoq_adapter)`. No Khepri/Ra/disk. **This IS Layer B's store.** |
+| `reckon_gater_stream_id:validate/1` | the regex check. mem-evoq deps on `reckon_gater` so it's available, but — see §6 — mem-evoq does NOT call it. |
 
-`given(PriorEvents) → when(Command) → expect_events([...]) | expect_error(R)`.
-Runs `Mod:init/1`, folds `PriorEvents` via `Mod:apply/2`, then calls
-`Mod:execute/2`, asserting on the result. No store, no processes.
+**Verified gap (read mem_evoq_store.erl 2026-05-31):** mem-evoq's append does
+**not** validate stream ids — zero `reckon_gater` / `validate` references. So a
+scenario with a malformed id passes against mem-evoq while failing in prod.
+This is exactly why the stream-id guard (§6) is a SEPARATE explicit assertion,
+not an emergent property of Layer B. (And §8 recommends mem-evoq close the gap.)
 
-```erlang
-%% (arrows are illustrative — Erlang has no |>; real API in §5)
-spec(vehicle_aggregate)
-  | given_events([commissioned(<<"leuven-taxi-1">>)])
-  | when_command(dispatch_vehicle, #{vehicle_id => <<"leuven-taxi-1">>, ...})
-  | expect_event(<<"vehicle_dispatched">>).
+---
 
-spec(vehicle_aggregate)
-  | given_events([])                          %% pristine
-  | when_command(pick_up_passenger, #{...})
-  | expect_error(vehicle_not_dispatched).     %% precondition holds
+## 4. Layer A — the pure CMD spec (the four assertions)
+
+Drives `execute/2` + `apply/2` directly. The whole loop:
+
+```
+State0 = AggMod:init(AggId)                       %% or fold given-events
+%% per step {CmdType, Payload, ExpectEvents, StatePred}:
+  case AggMod:execute(State, Command) of
+      {ok, Events} ->
+          assert_event_types(Events, ExpectEvents),   %% (2) AND (3): exact
+          State1 = lists:foldl(fun(E,S) -> AggMod:apply(S,E) end, State, Events),
+          assert(StatePred(State1)),                   %% (1) correct state
+          thread State1 to next step;                  %% (4) implicit: no {error,_}
+      {error, Reason} ->
+          fail unless this step expected_error(Reason) %% (4)
+  end
 ```
 
-### Layer B — integration dispatch spec (proves persistence)
+**Assertions 2 + 3 are one check.** Comparing the emitted event-type list to the
+expected list *exactly* makes "no unexpected events" free — an extra event is a
+mismatch. (`evoq_test_assertions:assert_events_produced/2` already does an exact
+multiset/order check; Layer A reuses it.)
 
-The layer that would have caught the incident. Dispatches a real command
-sequence through `evoq_dispatcher:dispatch/2` against a real reckon-db store,
-then **reads the stream back and asserts the event types that landed** — and
-that the projection folded them.
+**Assertion 1** runs a predicate on the **folded** state via the state module's
+**public accessors** (`vehicle_state:is_on_trip/1`, or `to_map/1` + field) —
+behaviour, not record-poking (corpus: *"test the behaviour, not the
+implementation"*).
+
+**Assertion 4** is structural: a non-error step that returns `{error, _}` fails;
+an error step asserts the specific reason.
+
+### Step shape — tuple-list core + builder sugar (both, per request)
+
+Core data form (table-drivable, easy to generate):
 
 ```erlang
-evoq_cmd_case:with_store(fun(StoreId) ->
-    Seq = [ {commission_vehicle, #{vehicle_id => Vid, ...}},
-            {dispatch_vehicle,   #{vehicle_id => Vid, ...}},
-            {pick_up_passenger,  #{vehicle_id => Vid, ...}},
-            {drop_off_passenger, #{vehicle_id => Vid, ...}} ],
-    ok = evoq_cmd_case:dispatch_all(vehicle_aggregate, Vid, Seq, StoreId),
-    %% PROVE the events landed — not that dispatch returned ok:
-    evoq_cmd_case:assert_stream(StoreId, Vid,
+Scenario = [
+  {commission_vehicle, #{vehicle_id => V, ...},
+        expect([<<"vehicle_commissioned">>]),
+        fun(S) -> vehicle_state:is_commissioned(S) end},
+  {dispatch_vehicle, #{vehicle_id => V, ...},
+        expect([<<"vehicle_dispatched">>]),
+        fun(S) -> vehicle_state:is_dispatched(S) end},
+  {pick_up_passenger, #{vehicle_id => V, ...},
+        expect([<<"passenger_picked_up">>]),
+        fun(S) -> vehicle_state:is_on_trip(S) end},
+  {pick_up_passenger, #{vehicle_id => V, ...},
+        expect_error(vehicle_not_dispatched),
+        unchanged}
+],
+evoq_aggregate_spec:run(vehicle_aggregate, V, Scenario).
+```
+
+Builder sugar over the same engine (readable for long scenarios):
+
+```erlang
+evoq_aggregate_spec:new(vehicle_aggregate, V)
+  |> exec(commission_vehicle, #{...}) |> emits([<<"vehicle_commissioned">>])
+                                      |> state(fun vehicle_state:is_commissioned/1)
+  |> exec(dispatch_vehicle, #{...})   |> emits([<<"vehicle_dispatched">>])
+  |> exec(pick_up_passenger, #{...})  |> fails_with(vehicle_not_dispatched)
+%% (illustrative arrows; real builder threads an opaque spec record — no |> in Erlang)
+```
+
+### Module sketch
+
+```erlang
+-module(evoq_aggregate_spec).
+-export([new/2, given_events/2, exec/3, emits/2, state/2,
+         fails_with/2, run/3]).
+%% new(AggMod, AggId) -> spec()
+%% given_events(spec(), [EventMap]) -> spec()      %% seed state via apply/2
+%% exec(spec(), CmdType :: atom(), Payload :: map()) -> spec()  %% records a step
+%% emits(spec(), [EventType :: binary()]) -> spec()  %% attaches exact expectation
+%% state(spec(), fun((State) -> boolean())) -> spec()
+%% fails_with(spec(), Reason :: term()) -> spec()
+%% run(AggMod, AggId, [step()]) -> ok               %% tuple-list entry; asserts each step
+```
+
+No store, no processes — milliseconds. This is the bulk of domain testing.
+
+---
+
+## 5. Layer B — persistence via mem-evoq (optional, same scenario)
+
+Replays the **same** scenario through the real dispatch path against mem-evoq,
+proving events persist and the projection folds them — the half Layer A can't
+see.
+
+```erlang
+evoq_cmd_case:with_mem_store(fun(StoreId) ->
+    ok = evoq_cmd_case:dispatch_all(vehicle_aggregate, V, Scenario, StoreId),
+    %% PROVE events landed (read back), not that dispatch returned ok:
+    evoq_cmd_case:assert_stream(StoreId, vehicle_aggregate:stream_id(V),
         [<<"vehicle_commissioned">>, <<"vehicle_dispatched">>,
-         <<"passenger_picked_up">>, <<"passenger_dropped_off">>])
-end).
-```
-
-`assert_stream` fails loudly if any expected event is absent — exactly the
-assertion missing on 2026-05-31, where `[commissioned, dispatched]` landed but
-`picked_up`/`dropped_off` never did.
-
-Optional projection chain:
-
-```erlang
+         <<"passenger_picked_up">>]),
+    %% Optionally: start the projection, assert the read model:
     evoq_cmd_case:assert_projection(StoreId, vehicle_event_to_read_model,
         fun() -> project_fleet_store:overview() end,
         fun(Ov) -> ?assertEqual(1, maps:get(trips, Ov)) end)
+end).
 ```
 
----
+`with_mem_store/1`:
+- `application:ensure_all_started(mem_evoq)`,
+- `mem_evoq:start_store(Unique)`,
+- `evoq_event_store:set_adapter(mem_evoq_adapter)` (saves/restores prior),
+- runs the fun, `mem_evoq:stop_store/1` after.
 
-## 4. The non-negotiable assertion: prove the event landed
-
-> A passing CMD test MUST read the persisted stream back and compare event
-> types. `dispatch` returning `{ok, _, _}` is necessary but NOT sufficient.
-
-`evoq_cmd_case:dispatch_all/4`:
-- asserts each `dispatch/2` returns `{ok, _Version, _Events}` (never silently
-  tolerates `{error, _}` — the swallow that hid bug #2 is impossible here), and
-- after the sequence reads the stream back via `evoq_event_store:read_events(
-  Store, AggId, 0, N)` (the call `evoq_dispatch_SUITE` already uses) and
-  compares event types.
-
-This turns all three 2026-05-31 failures into red tests at the source.
-
----
-
-## 5. API sketch (Erlang)
-
-Two new test-support modules in `src/` (or `test/support/`) + one header. The
-builder threads an opaque spec record (no `|>` in Erlang).
+`dispatch_all/4` builds `evoq_command:new/5` per step, dispatches via
+`evoq_dispatcher:dispatch/2`, and **asserts each returns `{ok,_,_}`** — the
+swallow that hid 2026-05-31's bug #2 is structurally impossible here.
+`assert_stream/3` reads back via `evoq_event_store:read/5` (or
+`read_by_event_types/3`) and compares event types.
 
 ```erlang
-%% Pure layer — builder over execute/2 + apply/2 (+ evoq_test_assertions).
--module(evoq_aggregate_spec).
--export([new/1, given_events/2, when_command/3,
-         expect_event/2, expect_events/2, expect_error/2]).
-%% new(AggMod) -> spec()
-%% given_events(spec(), [EventMap]) -> spec()   %% folded via AggMod:apply/2
-%% when_command(spec(), CmdType :: atom(), Payload :: map()) -> spec()
-%% expect_event(spec(), EventType :: binary()) -> ok   %% runs execute/2 + asserts
-%% expect_error(spec(), Reason :: term())      -> ok
-
-%% Integration layer — real reckon-db store fixture + dispatch + readback.
 -module(evoq_cmd_case).
--export([with_store/1, with_store/2,
-         dispatch_all/4, assert_stream/3, assert_projection/4,
-         assert_valid_stream_id/1]).
-%% with_store(fun((StoreId) -> any())) -> any()
-%%   starts a unique tmp single-mode reckon-db store (idiom from
-%%   evoq_dispatch_SUITE init_per_suite; SKIPS if reckon-db unavailable),
-%%   runs Fun, tears it down (removes the tmp dir).
-%% dispatch_all(AggMod, AggId, [{CmdType, Payload}], StoreId) -> ok
-%%   builds evoq_command:new/5 per step, dispatches, asserts each {ok,_,_};
-%%   also runs assert_valid_stream_id(AggId) up front.
-%% assert_stream(StoreId, AggId, [ExpectedEventType]) -> ok
-%%   evoq_event_store:read_events(StoreId, AggId, 0, N); compares the
-%%   event_type list (order-sensitive).
-%% assert_projection(StoreId, ProjMod, ReadFun, AssertFun) -> ok
-%%   starts ProjMod against the store, lets catch-up run, asserts ReadFun().
-%% assert_valid_stream_id(AggId) -> ok
-%%   reckon_gater_stream_id:validate(AggId) =:= ok, else fail naming the regex.
+-export([with_mem_store/1, dispatch_all/4, assert_stream/3,
+         assert_projection/4]).
 ```
 
 ---
 
-## 6. Stream-id validity as a first-class check
+## 6. The stream-id guard (catches today's bug specifically)
 
-`assert_valid_stream_id/1` (and the automatic check inside `dispatch_all`) runs
-`reckon_gater_stream_id:validate/1` on the AggregateId. A domain author writing
-`assert_valid_stream_id(vehicle_aggregate:stream_id(<<"leuven-taxi-1">>))` gets
-green; writing it for the raw `<<"leuven-taxi-1">>` gets an instant red naming
-the regex. Cheapest possible guard for the exact bug class — no store needed.
+Because mem-evoq does NOT enforce the regex (§3), Layer B alone would pass a
+malformed id. So the framework offers an **explicit, pure** assertion that
+calls the real validator directly:
+
+```erlang
+%% in evoq_aggregate_spec (or evoq_cmd_case):
+assert_valid_stream_id(AggId) ->
+    case reckon_gater_stream_id:validate(AggId) of
+        ok -> ok;
+        {error, R} -> erlang:error({invalid_stream_id, R, AggId,
+                          <<"must match ^[a-z]{1,32}-[a-f0-9]{32}$">>})
+    end.
+```
+
+A domain author asserts this over their `stream_id/1`:
+`assert_valid_stream_id(vehicle_aggregate:stream_id(<<"leuven-taxi-1">>))` →
+green; over the raw id → instant red. No store needed; runs in Layer A. This
+single line, present in the vehicle suite, would have failed on 2026-05-31.
+
+`dispatch_all/4` also calls it up-front on the AggregateId, so Layer B can't
+pass with an id prod would reject — closing the mem-evoq gap at the test
+boundary even before mem-evoq itself is fixed (§8).
 
 ---
 
-## 7. First consumer: guide_vehicle_lifecycle (retrofit table)
+## 7. First consumer: guide_vehicle_lifecycle (retrofit)
 
-The 10 vehicle commands are the framework's proof-of-use. Pure-layer matrix:
+Layer-A matrix (the proof-of-use), all 10 commands:
 
 | Command | Prior phase (given) | Expect |
 |---------|---------------------|--------|
-| `commission_vehicle` | pristine | event `vehicle_commissioned` |
+| `commission_vehicle` | pristine | event `vehicle_commissioned`, state commissioned |
 | `commission_vehicle` | commissioned | error `vehicle_already_commissioned` |
-| `dispatch_vehicle` | cruising/commissioned | event `vehicle_dispatched` |
-| `pick_up_passenger` | dispatched | event `passenger_picked_up` |
+| `dispatch_vehicle` | cruising/commissioned | event `vehicle_dispatched`, state dispatched |
+| `pick_up_passenger` | dispatched | event `passenger_picked_up`, state on_trip |
 | `pick_up_passenger` | pristine | error `vehicle_not_dispatched` |
-| `drop_off_passenger` | on_trip | event `passenger_dropped_off` |
+| `drop_off_passenger` | on_trip | event `passenger_dropped_off`, state cruising |
 | `drop_off_passenger` | dispatched | error (not on trip) |
-| `return_vehicle` | cruising | event `vehicle_returning` |
-| `dock_at_facility` | returning | event `vehicle_docked_at_facility` |
-| `service_vehicle` | docked | event `vehicle_serviced` |
-| `release_vehicle` | servicing | event `vehicle_released` |
-| `deplete_battery` | on_trip | event `battery_depleted` |
+| `return_vehicle` | cruising | event `vehicle_returning`, state returning |
+| `dock_at_facility` | returning | event `vehicle_docked_at_facility`, state docked |
+| `service_vehicle` | docked | event `vehicle_serviced`, state servicing |
+| `release_vehicle` | servicing | event `vehicle_released`, state cruising |
+| `deplete_battery` | on_trip | event `battery_depleted`, state depleted |
 
-Integration-layer: one happy-path sequence
-(`commission→dispatch→pickup→dropoff`) asserting all four events persist + the
-read model shows `trips = 1`, plus `assert_valid_stream_id` over
+Plus: one Layer-B happy-path sequence (`commission→dispatch→pickup→dropoff`)
+asserting persistence + `trips = 1`, and one `assert_valid_stream_id` over
 `vehicle_aggregate:stream_id/1`. These three would each have failed on
 2026-05-31.
 
 ---
 
-## 8. Non-goals
+## 8. Recommendation to mem-evoq (sibling change)
 
-- Not a mocking framework. Layer B uses a real reckon-db store (single mode,
-  tmp dir) — that is the point.
-- Not a mesh/integration-fact tester. Stops at the local event store +
-  projection.
-- Not a property-based generator (`test/property/` stays separate; could feed
-  it later).
-- Does not change `evoq_aggregate`/`evoq_dispatcher` runtime behaviour — test
-  support only.
-
----
-
-## 9. Rollout
-
-1. Land `evoq_aggregate_spec` + `evoq_cmd_case` + header with evoq's own
-   self-tests (reuse the existing internal test aggregate).
-2. Minor version bump (1.19 → 1.20); guide `guides/cmd_testing.md`.
-3. First external consumer: hecate-parksim `guide_vehicle_lifecycle` §7 matrix
-   — proves the framework + permanently locks the stream-id regression.
-4. Backfill other CMD apps opportunistically.
+mem-evoq's README calls itself *"a reference implementation of the
+`evoq_event_store` adapter behaviour."* But reckon-db rejects malformed stream
+ids and mem-evoq does not — so it is NOT a faithful reference for that contract,
+and tests pass against it that fail in prod (the 2026-05-31 trap). Recommend
+mem-evoq add an **opt-in strict mode** (`start_store(Id, #{strict_stream_id =>
+true})`) that runs `reckon_gater_stream_id:validate/1` in `append`, mirroring
+reckon-db. Then Layer B with strict mode catches the bug class by itself, and
+the §6 guard becomes belt-and-suspenders. Filed as a separate proposal in
+mem-evoq if approved.
 
 ---
 
-## 10. Open questions for the reviewer
+## 9. Non-goals
 
-- **Module split** — `evoq_aggregate_spec` (pure) + `evoq_cmd_case`
-  (integration), or one `evoq_cmd_test`? Leaning two: the pure layer must stay
-  store-free and fast.
-- **Where they live** — `src/` (shipped, usable by consumers' test suites) vs
-  `test/support/` (not shipped). Consumers need them at test time, so `src/`
-  with a thin always-available API, mirroring `evoq_test_assertions` (which is
-  in `src/`).
-- **Projection assertion** — assert via the projection's own read-model
-  accessor (honest, tests the real query path, couples to the domain store) or
-  a generic `read_events_by_types` count (decoupled, less honest)?
-- **Canonical stream-id helper** — today each aggregate owns `stream_id/1`
-  (added to `vehicle_aggregate` in the 2026-05-31 fix, `veh-<md5>`). Should
-  evoq ship `evoq_stream_id:derive(Prefix, HumanId)` so every aggregate derives
-  compliant ids identically instead of reinventing md5? Arguably the deeper fix
-  — sibling proposal.
+- Not a mocking framework. Layer B uses the real mem-evoq adapter + real
+  dispatch path.
+- Not a mesh/integration-fact tester. Stops at the local store + projection.
+- Not a property generator (`test/property/` stays separate; could feed it the
+  scenario form later).
+- No runtime changes to `evoq_aggregate`/`evoq_dispatcher` — test support only.
+
+---
+
+## 10. Rollout
+
+1. `evoq_aggregate_spec` (Layer A) + `evoq_cmd_case` (Layer B) + the stream-id
+   guard, in evoq `src/` (usable from consumers' test suites, like
+   `evoq_test_assertions`), with evoq self-tests using its internal test
+   aggregate + mem-evoq.
+2. Add `mem_evoq` as a `{test, ...}` profile dep of evoq (or document it as a
+   consumer test dep — decide in review; evoq must not gain a prod dep on a
+   test store).
+3. Minor bump (1.19 → 1.20); `guides/cmd_testing.md`.
+4. First consumer: hecate-parksim `guide_vehicle_lifecycle` (§7) — locks the
+   regression.
+5. Optional: the mem-evoq strict-mode change (§8).
+
+---
+
+## 11. Open questions for the reviewer
+
+- **Layer A reuse vs new** — build `evoq_aggregate_spec` purely as sugar over
+  `evoq_test_assertions`, or as a standalone engine that calls `execute/2`+
+  `apply/2` directly? The state-threading + `apply/2` fold is the new part
+  `evoq_test_assertions` lacks; leaning standalone engine that *uses* the
+  assertion helpers for the event comparison.
+- **mem-evoq as evoq test dep** — acceptable for evoq's own test profile to dep
+  on mem-evoq, given mem-evoq already deps on evoq? (No cycle at runtime — it's
+  test-only — but worth a conscious nod.)
+- **Strict stream-id in mem-evoq (§8)** — do it as part of this work, or a
+  separate mem-evoq proposal?
+- **State predicate ergonomics** — predicate fun on folded state (as sketched),
+  or also offer `expect_state_map(#{field => value})` sugar that checks
+  `to_map/1` fields?
