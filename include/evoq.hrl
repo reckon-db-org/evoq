@@ -17,6 +17,22 @@
 -define(DEFAULT_IDEMPOTENCY_TTL, 3600000).  %% 1 hour
 
 %%====================================================================
+%% Reserved lineage metadata keys (EIP correlation/causation)
+%%====================================================================
+%%
+%% Canonical metadata keys for the Enterprise Integration Patterns
+%% correlation/causation identifiers. These atom keys are placed in an
+%% event's metadata map by evoq (see evoq_aggregate:append_events/5) and
+%% serialize to the JSON string keys "causation_id" / "correlation_id" /
+%% "conversation_id" — the wire-level contract documented authoritatively
+%% in reckon-proto (reckon_shared.proto "Reserved metadata keys"). Define
+%% them ONCE here so producers and the evoq_lineage accessors/queries can
+%% never drift (cf. Axon's v4->v5 rename of these very keys).
+-define(EVOQ_META_CAUSATION_ID, causation_id).
+-define(EVOQ_META_CORRELATION_ID, correlation_id).
+-define(EVOQ_META_CONVERSATION_ID, conversation_id).
+
+%%====================================================================
 %% Command Record
 %%====================================================================
 

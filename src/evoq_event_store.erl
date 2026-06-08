@@ -26,7 +26,7 @@
 -export([list_streams/1, read_all/3, read_all/4]).
 -export([read_all_events/2, read_events_by_types/3]).
 -export([read_all_global/3]).
--export([read_by_tags/4, append_if_no_tag_matches/4]).
+-export([read_by_tags/4, read_by_metadata/3, append_if_no_tag_matches/4]).
 
 %% Event conversion
 -export([event_to_map/1]).
@@ -70,6 +70,18 @@ append(StoreId, StreamId, ExpectedVersion, Events) ->
 read_by_tags(StoreId, Tags, Match, BatchSize) ->
     Adapter = get_adapter(),
     case Adapter:read_by_tags(StoreId, Tags, Match, BatchSize) of
+        {ok, Events} -> {ok, [event_to_map(E) || E <- Events]};
+        {error, _} = Error -> Error
+    end.
+
+%% @doc Read events across streams whose metadata Key equals Value.
+%% The cross-cutting lineage primitive (causation_id / correlation_id /
+%% conversation_id). Backed by reckon-db's {meta, Key} index when declared.
+-spec read_by_metadata(atom(), binary(), binary()) ->
+    {ok, [map()]} | {error, term()}.
+read_by_metadata(StoreId, Key, Value) ->
+    Adapter = get_adapter(),
+    case Adapter:read_by_metadata(StoreId, Key, Value) of
         {ok, Events} -> {ok, [event_to_map(E) || E <- Events]};
         {error, _} = Error -> Error
     end.

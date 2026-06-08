@@ -530,9 +530,12 @@ append_events(StoreId, StreamId, Version, Events, Command) ->
     %% Cross-stream tags live in command metadata under 'tags' key
     Tags = maps:get(tags, CmdMeta, undefined),
     CleanMeta = maps:without([tags], CmdMeta),
+    %% Lineage propagation (EIP): the event's causation is the command that
+    %% produced it; the correlation is copied forward unchanged. Keys are the
+    %% canonical reserved names (see evoq.hrl / reckon_shared.proto).
     BaseMeta = CleanMeta#{
-        causation_id => Command#evoq_command.command_id,
-        correlation_id => Command#evoq_command.correlation_id
+        ?EVOQ_META_CAUSATION_ID => Command#evoq_command.command_id,
+        ?EVOQ_META_CORRELATION_ID => Command#evoq_command.correlation_id
     },
 
     %% Wrap each event into nested #{event_type, data, metadata} structure.

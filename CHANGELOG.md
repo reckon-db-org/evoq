@@ -5,6 +5,32 @@ All notable changes to evoq will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.20.0] - 2026-06-08
+
+### Added — `evoq_lineage`: first-class correlation/causation API
+
+The Enterprise Integration Patterns correlation/causation identifiers are now
+a named, intent-revealing capability rather than raw metadata-map digging.
+
+- New `evoq_lineage` module:
+  - accessors `causation_id/1`, `correlation_id/1`, `conversation_id/1` over an
+    event's metadata map (tolerant of atom keys in-process and binary keys after
+    JSON round-trip);
+  - canonical key binaries `causation_key/0` etc. (single source of truth for
+    the names, matching reckon_shared.proto);
+  - lineage queries `get_effects/2` (events directly caused by a message),
+    `get_correlated/2` (the conversation), `get_conversation/2` — thin wrappers
+    over `read_by_metadata` with the blessed keys.
+- `evoq_event_store:read_by_metadata/3` delegates to the adapter (paired with
+  reckon-evoq 2.4.0 / reckon_gater 3.2.0 / reckon-db 5.0.0).
+- Reserved lineage key macros in `evoq.hrl` (`?EVOQ_META_CAUSATION_ID` etc.);
+  `evoq_aggregate` now propagates via these instead of bare literals.
+
+Design stance: evoq owns the intent-revealing API and auto-propagation; the
+store stays generic with only `read_by_metadata` (no server-side
+get_effects/graph verb). Multi-hop chain/graph assembly is composed by the
+application over `get_effects` / `get_correlated`, never in the store.
+
 ## [1.19.0] - 2026-05-27
 
 ### Added — compound filters in `evoq_decision`
