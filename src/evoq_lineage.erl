@@ -1,7 +1,7 @@
 %% @doc Lineage capability — the EIP correlation/causation identifiers as a
 %% first-class, intent-revealing API for evoq applications.
 %%
-%% These are canonical Enterprise Integration Patterns (Hohpe & Woolf, 2004):
+%% These are canonical Enterprise Integration Patterns (Hohpe and Woolf, 2004):
 %% every event carries a `correlation_id' (shared across one conversation,
 %% copied forward) and a `causation_id' (the id of the message that directly
 %% caused it). evoq sets them automatically on dispatch (see
