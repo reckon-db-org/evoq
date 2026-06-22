@@ -27,7 +27,7 @@
 
 %% Internal API — exposed for property-based testing. Subject to
 %% change without semver guarantees.
--export([match_filter/2, collect_tags/1]).
+-export([match_filter/2, collect_tags/1, collect_event_types/1]).
 
 %% Default knobs. Override via application env or per-call options
 %% (options API is a v2 concern).
@@ -101,24 +101,35 @@ read_context(StoreId, {any_of, Tags}) when is_list(Tags) ->
     read_filtered_to_dcb(StoreId, Tags, any);
 read_context(StoreId, {all_of, Tags}) when is_list(Tags) ->
     read_filtered_to_dcb(StoreId, Tags, all);
+read_context(StoreId, {event_type, EventType}) when is_binary(EventType) ->
+    %% Hit the [by_event_type] index directly (reckon-db 5.2.0+).
+    case evoq_event_store:read_events_by_types(
+           StoreId, [EventType], ?DEFAULT_BATCH_SIZE) of
+        {ok, Events} ->
+            DcbOnly = [E || E <- Events, is_dcb_event(E)],
+            {ok, DcbOnly};
+        {error, _} = Error ->
+            Error
+    end;
 read_context(StoreId, Filter) when is_tuple(Filter) ->
-    %% Compound filter: pull a superset and refine client-side.
-    case collect_tags(Filter) of
-        [] ->
-            %% Vacuous compound filter (e.g., {or_, []}). No tags to
-            %% read, no events to consider.
+    %% Compound filter: pull a superset via tag + event-type index
+    %% reads, union the results, then refine client-side.
+    AllTags = collect_tags(Filter),
+    AllEventTypes = collect_event_types(Filter),
+    case {AllTags, AllEventTypes} of
+        {[], []} ->
             {ok, []};
-        AllTags ->
-            case evoq_event_store:read_by_tags(
-                   StoreId, AllTags, any, ?DEFAULT_BATCH_SIZE) of
-                {ok, Events} ->
-                    DcbOnly = [E || E <- Events, is_dcb_event(E)],
-                    Matching = [E || E <- DcbOnly,
-                                     event_matches_filter(E, Filter)],
-                    {ok, Matching};
-                {error, _} = Error ->
-                    Error
-            end
+        _ ->
+            TagEvents = read_by_tags_or_empty(StoreId, AllTags),
+            TypeEvents = read_by_event_types_or_empty(StoreId, AllEventTypes),
+            %% Union by event_id, keep DCB-only, filter client-side.
+            Seen = lists:foldl(
+                fun(E, Acc) ->
+                    maps:put(event_id(E), E, Acc)
+                end, #{}, TagEvents ++ TypeEvents),
+            DcbOnly = [E || E <- maps:values(Seen), is_dcb_event(E)],
+            Matching = [E || E <- DcbOnly, event_matches_filter(E, Filter)],
+            {ok, Matching}
     end.
 
 read_filtered_to_dcb(StoreId, Tags, Match) ->
@@ -130,14 +141,39 @@ read_filtered_to_dcb(StoreId, Tags, Match) ->
             Error
     end.
 
+read_by_tags_or_empty(_StoreId, []) -> [];
+read_by_tags_or_empty(StoreId, Tags) ->
+    case evoq_event_store:read_by_tags(StoreId, Tags, any, ?DEFAULT_BATCH_SIZE) of
+        {ok, Events} -> Events;
+        {error, _}   -> []
+    end.
+
+read_by_event_types_or_empty(_StoreId, []) -> [];
+read_by_event_types_or_empty(StoreId, EventTypes) ->
+    case evoq_event_store:read_events_by_types(StoreId, EventTypes, ?DEFAULT_BATCH_SIZE) of
+        {ok, Events} -> Events;
+        {error, _}   -> []
+    end.
+
 %% Walk a filter, returning the set (as a deduped list) of every tag
 %% it references at any depth.
 collect_tags({any_of, Tags}) when is_list(Tags) -> Tags;
 collect_tags({all_of, Tags}) when is_list(Tags) -> Tags;
+collect_tags({event_type, _}) -> [];
 collect_tags({and_, Filters}) when is_list(Filters) ->
     lists:usort(lists:flatmap(fun collect_tags/1, Filters));
 collect_tags({or_, Filters}) when is_list(Filters) ->
     lists:usort(lists:flatmap(fun collect_tags/1, Filters)).
+
+%% Walk a filter, returning the set (as a deduped list) of every
+%% event_type it references at any depth.
+collect_event_types({any_of, _}) -> [];
+collect_event_types({all_of, _}) -> [];
+collect_event_types({event_type, T}) when is_binary(T) -> [T];
+collect_event_types({and_, Filters}) when is_list(Filters) ->
+    lists:usort(lists:flatmap(fun collect_event_types/1, Filters));
+collect_event_types({or_, Filters}) when is_list(Filters) ->
+    lists:usort(lists:flatmap(fun collect_event_types/1, Filters)).
 
 %% Does an event's tag-set satisfy the filter? Per-event semantics
 %% matches the backend's reckon_db_dcb_filter:match_seqs/2.
@@ -150,11 +186,17 @@ event_matches_filter(Event, Filter) ->
 %% full event maps. Subject to change without semver guarantees.
 -spec match_filter(Event | Tags, evoq_decision:context_filter()) -> boolean()
     when Event :: map(), Tags :: [binary()].
+%% Event map: event_type filter must read from the map, not the tag list.
+match_filter(Event, {event_type, T}) when is_map(Event), is_binary(T) ->
+    maps:get(event_type, Event,
+        maps:get(<<"event_type">>, Event, undefined)) =:= T;
 match_filter(Tags, {any_of, Wanted}) when is_list(Tags), is_list(Wanted) ->
     lists:any(fun(T) -> lists:member(T, Tags) end, Wanted);
 match_filter(Tags, {all_of, Wanted}) when is_list(Tags), is_list(Wanted) ->
     Wanted =/= [] andalso
         lists:all(fun(T) -> lists:member(T, Tags) end, Wanted);
+%% Tag list: event_type is not derivable from tags alone.
+match_filter(_Tags, {event_type, _}) -> false;
 match_filter(Tags, {and_, Filters}) when is_list(Tags), is_list(Filters) ->
     Filters =/= [] andalso
         lists:all(fun(F) -> match_filter(Tags, F) end, Filters);
@@ -166,6 +208,10 @@ match_filter(Event, Filter) when is_map(Event) ->
 event_tags(#{tags := T}) when is_list(T) -> T;
 event_tags(#{<<"tags">> := T}) when is_list(T) -> T;
 event_tags(_) -> [].
+
+event_id(#{event_id := Id}) -> Id;
+event_id(#{<<"event_id">> := Id}) -> Id;
+event_id(E) when is_map(E) -> erlang:phash2(E).
 
 %% v1: only DCB-stream events count toward the consistency boundary.
 %% The reckon-db backend's tag index is forward-only (per

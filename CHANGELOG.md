@@ -5,6 +5,33 @@ All notable changes to evoq will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.21.0] - 2026-06-22
+
+### Added — `{event_type, binary()}` in `evoq_decision:context_filter()`
+
+DCB decisions can now scope their consistency context by event type, mirroring
+the `{event_type, binary()}` leaf added to `reckon_gater_types:tag_filter()` in
+reckon-gater 3.4.0 / reckon-db 5.2.0.
+
+- `evoq_decision:context_filter()` gains the `{event_type, binary()}` variant.
+- `evoq_decision_runtime:read_context/2`: new top-level clause hits the
+  `[by_event_type]` Khepri index directly via
+  `evoq_event_store:read_events_by_types/3`.
+- Compound filters (`and_`/`or_`) that reference `{event_type, T}` are now
+  handled by unioning tag-index and event-type-index reads before client-side
+  refinement, so `{and_, [{event_type, T}, {any_of, Tags}]}` is fully correct.
+- `match_filter/2` (public testing API): new `{event_type, T}` clause reads
+  `event_type` from the event map rather than the tag list.
+- `collect_event_types/1` added to the internal test-API export.
+
+**Requires reckon-db 5.2.0+** for the `[by_event_type]` index. Events written
+before 5.2.0 have no index entries and will not match `{event_type, T}` filters
+(same caveat as the backend guide documents).
+
+**v1 compound-filter limitation:** `{or_, [{event_type, T}, {any_of, Tags}]}`
+may miss events that match only the `{event_type}` branch but carry none of the
+tags referenced by sibling branches. See `context_filter()` type docs.
+
 ## [1.20.0] - 2026-06-08
 
 ### Added — `evoq_lineage`: first-class correlation/causation API
