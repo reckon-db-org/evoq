@@ -50,8 +50,10 @@
     %% Unique identifier for this event
     event_id :: binary(),
 
-    %% Type of event (e.g., <<"user_created">>)
-    event_type :: binary(),
+    %% Type of event (e.g., <<"user_created">>). May be `undefined` when an
+    %% adapter stored the event with binary keys and did not extract it into
+    %% the record field; event_to_map/1 then resolves it from the data map.
+    event_type :: binary() | undefined,
 
     %% Stream this event belongs to
     stream_id :: binary(),

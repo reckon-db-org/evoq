@@ -298,14 +298,11 @@ read_all_global(StoreId, Offset, BatchSize) ->
 %% @private Resolve event_type: prefer the record field, fall back to the
 %% value inside data (atom key first, then binary) when it's undefined.
 coalesce_event_type(undefined, Data) when is_map(Data) ->
-    event_type_from_data(maps:find(event_type, Data), Data);
+    maps:get(event_type, Data, maps:get(<<"event_type">>, Data, undefined));
 coalesce_event_type(undefined, _Data) ->
     undefined;
 coalesce_event_type(Type, _Data) ->
     Type.
-
-event_type_from_data({ok, T}, _Data) -> T;
-event_type_from_data(error, Data) -> maps:get(<<"event_type">>, Data, undefined).
 
 -spec event_to_map(evoq_event() | map()) -> map().
 event_to_map(#evoq_event{} = Event) ->

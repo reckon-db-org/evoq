@@ -159,53 +159,14 @@ handle_call({execute, Command}, _From, State) ->
     %% Execute the command
     case Module:execute(AggState, Command#evoq_command.payload) of
         {ok, Events} when is_list(Events) ->
-            %% Apply events to get new state
-            NewAggState = lists:foldl(fun(Event, AccState) ->
-                Module:apply(AccState, Event)
-            end, AggState, Events),
-
-            %% Append events to reckon-db using stored store_id
-            case append_events(StoreId, StreamId, Version, Events, Command) of
-                {ok, NewVersion} ->
-                    %% Update state
-                    NewState = State#evoq_aggregate_state{
-                        state = NewAggState,
-                        version = NewVersion,
-                        last_activity = erlang:system_time(millisecond),
-                        snapshot_count = State#evoq_aggregate_state.snapshot_count + length(Events)
-                    },
-
-                    %% Check if snapshot is needed
-                    NewState2 = maybe_snapshot(NewState),
-
-                    %% Emit stop telemetry
-                    Duration = erlang:system_time(microsecond) - StartTime,
-                    telemetry:execute(?TELEMETRY_AGGREGATE_EXECUTE_STOP, #{
-                        duration => Duration,
-                        event_count => length(Events)
-                    }, #{
-                        aggregate_id => StreamId,
-                        new_version => NewVersion
-                    }),
-
-                    Timeout = LifespanModule:after_event(hd(Events)),
-                    {reply, {ok, NewVersion, Events}, NewState2, Timeout};
-
-                AppendError ->
-                    reply_after_append_error(AppendError, State, Module, StoreId,
-                                             StreamId, LifespanModule)
-            end;
+            %% Apply events to get new state, then append
+            NewAggState = apply_events(Module, AggState, Events),
+            reply_after_append(append_events(StoreId, StreamId, Version, Events, Command),
+                               Events, NewAggState, State, StartTime);
 
         {error, Reason} = Error ->
             %% Emit exception telemetry
-            Duration = erlang:system_time(microsecond) - StartTime,
-            telemetry:execute(?TELEMETRY_AGGREGATE_EXECUTE_EXCEPTION, #{
-                duration => Duration
-            }, #{
-                aggregate_id => StreamId,
-                error => Reason
-            }),
-
+            emit_execute_exception(StreamId, Reason, StartTime),
             Timeout = LifespanModule:after_error(Reason),
             {reply, Error, State, Timeout}
     end;
@@ -233,47 +194,13 @@ handle_call({execute_with_state, Command}, _From, State) ->
 
     case Module:execute(AggState, Command#evoq_command.payload) of
         {ok, Events} when is_list(Events) ->
-            NewAggState = lists:foldl(fun(Event, AccState) ->
-                Module:apply(AccState, Event)
-            end, AggState, Events),
-
-            case append_events(StoreId, StreamId, Version, Events, Command) of
-                {ok, NewVersion} ->
-                    NewState = State#evoq_aggregate_state{
-                        state = NewAggState,
-                        version = NewVersion,
-                        last_activity = erlang:system_time(millisecond),
-                        snapshot_count = State#evoq_aggregate_state.snapshot_count + length(Events)
-                    },
-
-                    NewState2 = maybe_snapshot(NewState),
-
-                    Duration = erlang:system_time(microsecond) - StartTime,
-                    telemetry:execute(?TELEMETRY_AGGREGATE_EXECUTE_STOP, #{
-                        duration => Duration,
-                        event_count => length(Events)
-                    }, #{
-                        aggregate_id => StreamId,
-                        new_version => NewVersion
-                    }),
-
-                    Timeout = LifespanModule:after_event(hd(Events)),
-                    {reply, {ok, NewVersion, Events, NewAggState}, NewState2, Timeout};
-
-                AppendError ->
-                    reply_after_append_error(AppendError, State, Module, StoreId,
-                                             StreamId, LifespanModule)
-            end;
+            NewAggState = apply_events(Module, AggState, Events),
+            reply_after_append_with_state(
+                append_events(StoreId, StreamId, Version, Events, Command),
+                Events, NewAggState, State, StartTime);
 
         {error, Reason} = Error ->
-            Duration = erlang:system_time(microsecond) - StartTime,
-            telemetry:execute(?TELEMETRY_AGGREGATE_EXECUTE_EXCEPTION, #{
-                duration => Duration
-            }, #{
-                aggregate_id => StreamId,
-                error => Reason
-            }),
-
+            emit_execute_exception(StreamId, Reason, StartTime),
             Timeout = LifespanModule:after_error(Reason),
             {reply, Error, State, Timeout}
     end;
@@ -286,6 +213,63 @@ handle_call(get_version, _From, State) ->
 
 handle_call(_Request, _From, State) ->
     {reply, {error, unknown_request}, State, get_remaining_timeout(State)}.
+
+%% @private Fold new events onto the aggregate state.
+apply_events(Module, State, Events) ->
+    lists:foldl(fun(Event, Acc) -> Module:apply(Acc, Event) end, State, Events).
+
+%% @private Reply after a conditional append (execute variant).
+reply_after_append({ok, NewVersion}, Events, NewAggState, State, StartTime) ->
+    NewState2 = commit_new_state(State, NewAggState, NewVersion, Events),
+    emit_execute_stop(stream_id(State), NewVersion, Events, StartTime),
+    Timeout = (State#evoq_aggregate_state.lifespan_module):after_event(hd(Events)),
+    {reply, {ok, NewVersion, Events}, NewState2, Timeout};
+reply_after_append(AppendError, _Events, _NewAggState, State, _StartTime) ->
+    reply_after_append_error(AppendError, State,
+                             State#evoq_aggregate_state.aggregate_module,
+                             State#evoq_aggregate_state.store_id,
+                             stream_id(State),
+                             State#evoq_aggregate_state.lifespan_module).
+
+%% @private Reply after a conditional append (execute_with_state variant).
+reply_after_append_with_state({ok, NewVersion}, Events, NewAggState, State, StartTime) ->
+    NewState2 = commit_new_state(State, NewAggState, NewVersion, Events),
+    emit_execute_stop(stream_id(State), NewVersion, Events, StartTime),
+    Timeout = (State#evoq_aggregate_state.lifespan_module):after_event(hd(Events)),
+    {reply, {ok, NewVersion, Events, NewAggState}, NewState2, Timeout};
+reply_after_append_with_state(AppendError, Events, NewAggState, State, StartTime) ->
+    reply_after_append(AppendError, Events, NewAggState, State, StartTime).
+
+%% @private Build + maybe-snapshot the post-append aggregate state.
+commit_new_state(State, NewAggState, NewVersion, Events) ->
+    NewState = State#evoq_aggregate_state{
+        state = NewAggState,
+        version = NewVersion,
+        last_activity = erlang:system_time(millisecond),
+        snapshot_count = State#evoq_aggregate_state.snapshot_count + length(Events)
+    },
+    maybe_snapshot(NewState).
+
+stream_id(State) -> State#evoq_aggregate_state.stream_id.
+
+emit_execute_stop(StreamId, NewVersion, Events, StartTime) ->
+    Duration = erlang:system_time(microsecond) - StartTime,
+    telemetry:execute(?TELEMETRY_AGGREGATE_EXECUTE_STOP, #{
+        duration => Duration,
+        event_count => length(Events)
+    }, #{
+        aggregate_id => StreamId,
+        new_version => NewVersion
+    }).
+
+emit_execute_exception(StreamId, Reason, StartTime) ->
+    Duration = erlang:system_time(microsecond) - StartTime,
+    telemetry:execute(?TELEMETRY_AGGREGATE_EXECUTE_EXCEPTION, #{
+        duration => Duration
+    }, #{
+        aggregate_id => StreamId,
+        error => Reason
+    }).
 
 %% @private
 handle_cast(_Msg, State) ->
@@ -336,23 +320,29 @@ get_lifespan_module() ->
 %% @private
 load_or_init(Module, AggregateId, StoreId) ->
     %% Try to load snapshot first
-    case try_load_snapshot(Module, StoreId, AggregateId) of
-        {ok, SnapshotState, SnapshotVersion} ->
-            %% Replay events after snapshot
-            case replay_events(Module, StoreId, AggregateId, SnapshotVersion, SnapshotState) of
-                {ok, State, Version} -> {State, Version};
-                {error, _} -> init_fresh(Module, AggregateId)
-            end;
-        {error, not_found} ->
-            %% No snapshot, replay all events or init fresh.
-            %% Note: first event in a stream is version 0, so we check
-            %% State =/= undefined (set by replay_events when events exist)
-            %% instead of Version > 0.
-            case replay_events(Module, StoreId, AggregateId, 0, undefined) of
-                {ok, State, Version} when State =/= undefined -> {State, Version};
-                _ -> init_fresh(Module, AggregateId)
-            end
-    end.
+    from_snapshot_or_replay(try_load_snapshot(Module, StoreId, AggregateId),
+                            Module, StoreId, AggregateId).
+
+from_snapshot_or_replay({ok, SnapshotState, SnapshotVersion}, Module, StoreId, AggregateId) ->
+    %% Replay events after snapshot
+    replayed_or_fresh(
+        replay_events(Module, StoreId, AggregateId, SnapshotVersion, SnapshotState),
+        Module, AggregateId);
+from_snapshot_or_replay({error, not_found}, Module, StoreId, AggregateId) ->
+    %% No snapshot, replay all events or init fresh. First event in a
+    %% stream is version 0, so check State =/= undefined (set by
+    %% replay_events when events exist) instead of Version > 0.
+    replayed_from_zero(
+        replay_events(Module, StoreId, AggregateId, 0, undefined),
+        Module, AggregateId).
+
+replayed_or_fresh({ok, State, Version}, _Module, _AggregateId) -> {State, Version};
+replayed_or_fresh({error, _}, Module, AggregateId) -> init_fresh(Module, AggregateId).
+
+replayed_from_zero({ok, State, Version}, _Module, _AggregateId) when State =/= undefined ->
+    {State, Version};
+replayed_from_zero(_, Module, AggregateId) ->
+    init_fresh(Module, AggregateId).
 
 %% @private
 init_fresh(Module, AggregateId) ->
@@ -363,18 +353,18 @@ init_fresh(Module, AggregateId) ->
 
 %% @private
 try_load_snapshot(Module, StoreId, AggregateId) ->
-    case erlang:function_exported(Module, from_snapshot, 1) of
-        true ->
-            case evoq_snapshot_store:load(StoreId, AggregateId) of
-                {ok, #{data := Data, version := Version}} ->
-                    State = Module:from_snapshot(Data),
-                    {ok, State, Version};
-                {error, not_found} ->
-                    {error, not_found}
-            end;
-        false ->
-            {error, not_found}
-    end.
+    load_snapshot_if_exported(erlang:function_exported(Module, from_snapshot, 1),
+                              Module, StoreId, AggregateId).
+
+load_snapshot_if_exported(true, Module, StoreId, AggregateId) ->
+    snapshot_result(evoq_snapshot_store:load(StoreId, AggregateId), Module);
+load_snapshot_if_exported(false, _Module, _StoreId, _AggregateId) ->
+    {error, not_found}.
+
+snapshot_result({ok, #{data := Data, version := Version}}, Module) ->
+    {ok, Module:from_snapshot(Data), Version};
+snapshot_result({error, not_found}, _Module) ->
+    {error, not_found}.
 
 %% @private Classify an append failure so we know whether to rebuild.
 %%
@@ -437,14 +427,15 @@ reply_after_append_error(Error, State, Module, StoreId, StreamId, LifespanModule
 %% would not distinguish it; the dispatcher must see the original
 %% error tuple, not a normalised wrong_expected_version.
 classify_append_error(Error) ->
-    case is_integrity_violation(Error) of
-        true -> integrity_violation;
-        false ->
-            case is_wrong_version_error(Error) of
-                true  -> wrong_version;
-                false -> other
-            end
-    end.
+    classify_append_error(is_integrity_violation(Error), Error).
+
+classify_append_error(true, _Error) ->
+    integrity_violation;
+classify_append_error(false, Error) ->
+    wrong_version_or_other(is_wrong_version_error(Error)).
+
+wrong_version_or_other(true) -> wrong_version;
+wrong_version_or_other(false) -> other.
 
 emit_integrity_telemetry(StoreId, StreamId, Error, Stage) ->
     telemetry:execute(
@@ -459,27 +450,26 @@ emit_integrity_telemetry(StoreId, StreamId, Error, Stage) ->
 -spec rebuild_and_reply_conflict(#evoq_aggregate_state{}, module(),
                                  atom(), binary()) -> term().
 rebuild_and_reply_conflict(State, Module, StoreId, StreamId) ->
-    case rebuild_from_events(Module, StoreId, StreamId) of
-        {ok, NewAggState, NewVersion} ->
-            {reply, {error, wrong_expected_version},
-             State#evoq_aggregate_state{state = NewAggState,
-                                        version = NewVersion}};
-        {error, _} = RebuildErr ->
-            %% Rebuild itself failed. Distinguish integrity from
-            %% other rebuild failures: integrity_violation must
-            %% surface verbatim so the dispatcher does NOT retry.
-            %% Without this, the dispatcher would see
-            %% wrong_expected_version, retry, rebuild would fail
-            %% again with the same integrity_violation, and the
-            %% loop would only stop at the retry cap.
-            case is_integrity_violation(RebuildErr) of
-                true ->
-                    emit_integrity_telemetry(StoreId, StreamId, RebuildErr, rebuild),
-                    {reply, RebuildErr, State};
-                false ->
-                    {reply, {error, wrong_expected_version}, State}
-            end
-    end.
+    rebuilt_reply(rebuild_from_events(Module, StoreId, StreamId),
+                  State, StoreId, StreamId).
+
+rebuilt_reply({ok, NewAggState, NewVersion}, State, _StoreId, _StreamId) ->
+    {reply, {error, wrong_expected_version},
+     State#evoq_aggregate_state{state = NewAggState, version = NewVersion}};
+rebuilt_reply({error, _} = RebuildErr, State, StoreId, StreamId) ->
+    %% Rebuild itself failed. Distinguish integrity from other rebuild
+    %% failures: integrity_violation must surface verbatim so the
+    %% dispatcher does NOT retry. Without this, the dispatcher would see
+    %% wrong_expected_version, retry, rebuild would fail again with the
+    %% same integrity_violation, and the loop would only stop at the cap.
+    rebuild_failure_reply(is_integrity_violation(RebuildErr),
+                          RebuildErr, State, StoreId, StreamId).
+
+rebuild_failure_reply(true, RebuildErr, State, StoreId, StreamId) ->
+    emit_integrity_telemetry(StoreId, StreamId, RebuildErr, rebuild),
+    {reply, RebuildErr, State};
+rebuild_failure_reply(false, _RebuildErr, State, _StoreId, _StreamId) ->
+    {reply, {error, wrong_expected_version}, State}.
 
 %% @private Rebuild aggregate state from the event store (full replay).
 %% Used on wrong_expected_version to re-sync with the actual stream.
@@ -499,27 +489,32 @@ rebuild_from_events(Module, StoreId, AggregateId) ->
     end.
 
 replay_events(Module, StoreId, AggregateId, FromVersion, InitState) ->
-    case evoq_event_store:read(StoreId, AggregateId, FromVersion, 1000, forward) of
-        {ok, Events} when length(Events) > 0 ->
-            BaseState = case InitState of
-                undefined ->
-                    case Module:init(AggregateId) of
-                        {ok, S} -> S;
-                        _ -> #{}
-                    end;
-                S -> S
-            end,
-            {FinalState, LastVersion} = lists:foldl(fun(Event, {AccState, _Ver}) ->
-                NewState = Module:apply(AccState, Event),
-                EventVer = maps:get(version, Event, 0),
-                {NewState, EventVer}
-            end, {BaseState, FromVersion}, Events),
-            {ok, FinalState, LastVersion};
-        {ok, []} ->
-            {ok, InitState, FromVersion};
-        {error, _} = Error ->
-            Error
-    end.
+    replay_read(evoq_event_store:read(StoreId, AggregateId, FromVersion, 1000, forward),
+                Module, AggregateId, FromVersion, InitState).
+
+replay_read({ok, Events}, Module, AggregateId, FromVersion, InitState)
+        when length(Events) > 0 ->
+    BaseState = base_state(InitState, Module, AggregateId),
+    {FinalState, LastVersion} =
+        lists:foldl(fun(Event, Acc) -> apply_replayed(Module, Event, Acc) end,
+                    {BaseState, FromVersion}, Events),
+    {ok, FinalState, LastVersion};
+replay_read({ok, []}, _Module, _AggregateId, FromVersion, InitState) ->
+    {ok, InitState, FromVersion};
+replay_read({error, _} = Error, _Module, _AggregateId, _FromVersion, _InitState) ->
+    Error.
+
+%% @private Initial fold state: the provided snapshot, or a fresh init.
+base_state(undefined, Module, AggregateId) ->
+    init_state_or_empty(Module:init(AggregateId));
+base_state(S, _Module, _AggregateId) ->
+    S.
+
+init_state_or_empty({ok, S}) -> S;
+init_state_or_empty(_) -> #{}.
+
+apply_replayed(Module, Event, {AccState, _Ver}) ->
+    {Module:apply(AccState, Event), maps:get(version, Event, 0)}.
 
 %% @private
 append_events(_StoreId, _StreamId, _Version, [], _Command) ->
@@ -541,22 +536,21 @@ append_events(StoreId, StreamId, Version, Events, Command) ->
     %% Wrap each event into nested #{event_type, data, metadata} structure.
     %% This eliminates guesswork in the adapter — we KNOW which keys are
     %% infrastructure (we put them there) and which are business data.
-    EventsNested = lists:map(fun(Event) ->
-        EventType = resolve_event_type(Event),
-        Data = maps:without([event_type], Event),
-        Wrapped = #{
-            event_type => EventType,
-            data => Data,
-            metadata => BaseMeta
-        },
-        case Tags of
-            undefined -> Wrapped;
-            [] -> Wrapped;
-            L when is_list(L) -> Wrapped#{tags => L};
-            _ -> Wrapped
-        end
-    end, Events),
+    EventsNested = lists:map(fun(Event) -> wrap_event(Event, BaseMeta, Tags) end, Events),
     evoq_event_store:append(StoreId, StreamId, Version, EventsNested).
+
+%% @private Wrap one event into a nested #{event_type, data, metadata} map,
+%% attaching tags only when a non-empty list was supplied.
+wrap_event(Event, BaseMeta, Tags) ->
+    Wrapped = #{
+        event_type => resolve_event_type(Event),
+        data => maps:without([event_type], Event),
+        metadata => BaseMeta
+    },
+    with_tags(Tags, Wrapped).
+
+with_tags(L, Wrapped) when is_list(L), L =/= [] -> Wrapped#{tags => L};
+with_tags(_Tags, Wrapped) -> Wrapped.
 
 %% @private
 maybe_snapshot(#evoq_aggregate_state{snapshot_count = Count} = State) ->
