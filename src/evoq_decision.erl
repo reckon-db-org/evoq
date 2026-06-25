@@ -101,4 +101,29 @@
 
 %% Maximum retries on context_changed conflicts. Default 3.
 -callback retry_budget() -> non_neg_integer().
--optional_callbacks([retry_budget/0]).
+
+%% == Stateful actor mode (optional, Part B) ==
+%%
+%% Opt a decision into the per-node stateful actor by returning a stable
+%% partition key for the command's consistency boundary. `undefined' (or
+%% the callback being absent) keeps the stateless optimistic runtime —
+%% today's behaviour, verbatim.
+%%
+%% Invariant: for a given boundary_key, context/1 MUST resolve to the
+%% same filter regardless of which command produced that key. The actor
+%% caches one context per key; a key whose context varies per command
+%% would cache a wrong boundary. (Keep the key and the context derived
+%% from the same boundary identity — one seat, one account, one SKU.)
+-callback boundary_key(Command :: map()) -> binary() | undefined.
+
+%% Optional folded decision model. When BOTH are present, the actor folds
+%% the context into Model and decide/2 receives that Model instead of the
+%% raw ContextEvents list. Mirrors evoq_aggregate's init/apply. When
+%% absent, the actor passes the raw context events (same shape the
+%% stateless runtime gives decide/2).
+-callback init_decision_model() -> Model :: term().
+-callback apply_context_event(Model :: term(), Event :: map()) ->
+    Model :: term().
+
+-optional_callbacks([retry_budget/0, boundary_key/1,
+                     init_decision_model/0, apply_context_event/2]).

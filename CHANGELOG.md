@@ -5,6 +5,38 @@ All notable changes to evoq will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.23.0] - 2026-06-25
+
+### Added — stateful Decision/Context actor (CCC Part B)
+
+Opt-in per-node `gen_server` mode for `evoq_decision`, keyed on a decision-declared
+boundary key. For a keyed, hot boundary (one seat, one account, one SKU) it
+serialises commands at one process and caches the folded decision model, so the
+store's append condition passes first try instead of N−1 `context_changed`
+retries. It is a per-node cache + serialiser, **never** the correctness
+authority — reckon-db's `append_if_no_tag_matches/4` stays the sole source of
+truth; on `context_changed` the actor invalidates, re-reads, and retries.
+
+- `evoq_decision` gains three **optional** callbacks: `boundary_key/1` (the
+  opt-in switch; `undefined`/absent ⇒ today's stateless path verbatim),
+  `init_decision_model/0` + `apply_context_event/2` (optional folded model;
+  when both present, `decide/2` receives the folded model instead of the raw
+  context-events list).
+- New modules: `evoq_decision_actor`, `evoq_decision_registry` (own
+  `evoq_decision_pg` scope, group `{decision, Module, Key}`, node-local lookup),
+  `evoq_decision_partition_sup`, `evoq_decisions_sup` (4 partitions by
+  `phash2({Module, Key})`). Wired under `evoq_sup`. A **parallel** tree — no
+  aggregate module changed (see `proposals/SPIKE_EVOQ_DECISION_ACTOR.md`, Path 1).
+- `evoq_decision_runtime:dispatch/3` is now a facade: `boundary_key` present ⇒
+  route to the actor; absent ⇒ stateless loop. Shared `load_context/2` keeps one
+  context-read + cutoff rule across both paths.
+- Lifespan/TTL reuses `evoq_aggregate_lifespan` as-is; idle actors passivate
+  (v1: stop + rebuild on next spawn). Decision-model snapshotting (proposal OQ3)
+  is left as a documented extension point in `evoq_decision_actor`.
+
+Backwards-compatible: all new callbacks optional; no existing decision changes
+behaviour. Minor bump (no aggregate API broke — 2.0 not required).
+
 ## [1.22.0] - 2026-06-25
 
 ### Added — CCC payload conditions in `evoq_decision:context_filter()` (Part A)

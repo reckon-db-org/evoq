@@ -25,6 +25,11 @@
 
 -export([dispatch/3]).
 
+%% Shared with evoq_decision_actor (Part B): one context-read
+%% implementation, one cutoff rule. Returns the DCB-scoped context
+%% events plus the seq cutoff (max version, or -1 for empty).
+-export([load_context/2]).
+
 %% Internal API — exposed for property-based testing. Subject to
 %% change without semver guarantees.
 -export([match_filter/2, collect_tags/1, collect_event_types/1]).
@@ -50,25 +55,56 @@
     | {error, retry_budget_exhausted}
     | {error, term()}.
 dispatch(Mod, StoreId, Command) ->
-    Budget = retry_budget(Mod),
-    dispatch_loop(Mod, StoreId, Command, Budget).
+    %% Facade: a decision that returns a boundary_key opts into the
+    %% per-node stateful actor (Part B); everything else runs the
+    %% stateless optimistic loop (today's path, verbatim).
+    case boundary_key(Mod, Command) of
+        undefined ->
+            Budget = retry_budget(Mod),
+            dispatch_loop(Mod, StoreId, Command, Budget);
+        Key when is_binary(Key) ->
+            dispatch_stateful(Mod, StoreId, Command, Key)
+    end.
+
+%% @doc Read the DCB-scoped context for Filter and its seq cutoff.
+%% Shared by the stateless loop and the stateful actor.
+-spec load_context(atom(), evoq_decision:context_filter()) ->
+    {ok, [map()], integer()} | {error, term()}.
+load_context(StoreId, Filter) ->
+    case read_context(StoreId, Filter) of
+        {ok, Events} -> {ok, Events, compute_cutoff(Events)};
+        {error, _} = Error -> Error
+    end.
 
 %%====================================================================
 %% Internal
 %%====================================================================
 
+boundary_key(Mod, Command) ->
+    case erlang:function_exported(Mod, boundary_key, 1) of
+        true  -> Mod:boundary_key(Command);
+        false -> undefined
+    end.
+
+dispatch_stateful(Mod, StoreId, Command, Key) ->
+    case evoq_decision_registry:get_or_start(Mod, Key, StoreId) of
+        {ok, Pid} ->
+            gen_server:call(Pid, {decide, Command}, infinity);
+        {error, _} = Error ->
+            Error
+    end.
+
 dispatch_loop(_Mod, _StoreId, _Command, 0) ->
     {error, retry_budget_exhausted};
 dispatch_loop(Mod, StoreId, Command, Retries) ->
     Filter = Mod:context(Command),
-    case read_context(StoreId, Filter) of
+    case load_context(StoreId, Filter) of
         {error, _} = ReadError ->
             %% Surface read failures (e.g. an undeclared payload index)
             %% loudly rather than letting a bad decision through on an
             %% empty context. See graceful-degradation contract.
             ReadError;
-        {ok, ContextEvents} ->
-            Cutoff = compute_cutoff(ContextEvents),
+        {ok, ContextEvents, Cutoff} ->
             case Mod:decide(ContextEvents, Command) of
                 {error, _} = DecideError ->
                     DecideError;

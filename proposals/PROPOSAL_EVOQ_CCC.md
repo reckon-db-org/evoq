@@ -1,6 +1,7 @@
 # PROPOSAL: CCC payload conditions + the stateful Decision/Context actor
 
-**Status:** Part A implemented (evoq 1.22.0, 2026-06-25). Part B Draft.
+**Status:** Part A implemented (evoq 1.22.0). Part B v1 implemented (evoq 1.23.0,
+Path 1 — see `SPIKE_EVOQ_DECISION_ACTOR.md`). Both 2026-06-25.
 **Author:** Raf Lefever
 **Date:** 2026-06-24
 **Related:**

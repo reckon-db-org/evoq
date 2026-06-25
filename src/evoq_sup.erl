@@ -77,6 +77,15 @@ init([]) ->
             type => supervisor,
             modules => [evoq_aggregates_sup]
         },
+        %% Stateful decision-actor supervision tree (Part B)
+        #{
+            id => evoq_decisions_sup,
+            start => {evoq_decisions_sup, start_link, []},
+            restart => permanent,
+            shutdown => infinity,
+            type => supervisor,
+            modules => [evoq_decisions_sup]
+        },
         %% Event handler supervision tree
         #{
             id => evoq_event_handler_sup,
