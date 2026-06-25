@@ -121,22 +121,77 @@ heavy contention.
 
 ## Filter algebra
 
-`context_filter()` is a recursive predicate over an event's tag set:
+`context_filter()` is a recursive predicate over an event's tags,
+type, and (with CCC) payload fields:
 
 | Shape | Meaning | Example |
 |-------|---------|---------|
 | `{any_of, [Tag]}` | Match if event carries any of these tags | `{any_of, [<<"slot:42">>]}` |
 | `{all_of, [Tag]}` | Match if event carries all of these tags | `{all_of, [<<"slot:42">>, <<"tenant:acme">>]}` |
+| `{event_type, T}` | Match if event has this type *(1.21.0+)* | `{event_type, <<"slot_reserved_v1">>}` |
+| `{payload_match, K, V}` | Match if payload field `K` equals `V` *(CCC, 1.22.0+)* | `{payload_match, <<"license_key">>, <<"LK-1">>}` |
+| `{payload_hash_match, Ks, Vs}` | Match if payload fields `Ks` equal `Vs` *(CCC, 1.22.0+)* | `{payload_hash_match, [<<"realm">>,<<"email">>], [<<"acme">>,<<"a@x">>]}` |
 | `{and_, [Filter]}` | Match if all sub-filters match | `{and_, [F1, F2]}` |
 | `{or_, [Filter]}` | Match if any sub-filter matches | `{or_, [F1, F2]}` |
 
-The compound `{and_, _}` and `{or_, _}` shapes compose to arbitrary
-depth. The runtime walks the tree, collects the tag-set superset,
-reads broadly, and refines client-side using
-`reckon_db_dcb_filter`'s per-event semantics.
+Flat filters hit their own index directly: `any_of`/`all_of` via the
+tag index, `event_type` via `[by_event_type]`, the payload leaves via
+the CCC payload indexes (see below).
 
-For flat filters (`any_of` / `all_of`), the runtime issues a direct
-tagged read with the appropriate match mode — no superset fan-out.
+Compound `{and_, _}` / `{or_, _}` shapes compose to arbitrary depth.
+The runtime reads **every leaf fully** through its own index, unions
+the results, and refines client-side with `reckon_db_dcb_filter`'s
+per-event semantics. Because each branch is pulled by its own index
+(not inferred from a sibling), an `{or_, [...]}` mixing tag,
+`event_type`, and payload leaves is correct.
+
+---
+
+## CCC: payload conditions
+
+*Available in evoq 1.22.0+ (requires reckon-gater 3.7+ / reckon-db 5.3+).*
+
+Tags and types are explicit labels the producer attaches at write
+time. **CCC** (Consistency Context Conditions) lets a Decision's
+boundary instead query **opaque event-data fields** — values already
+inside the event payload, with no tagging ceremony. This is an
+extension *beyond* the DCB spec, made possible by reckon-db's payload
+indexes.
+
+```erlang
+%% Uniqueness on a payload field rather than a tag.
+context(#{license_key := Key}) ->
+    {payload_match, <<"license_key">>, Key}.
+
+%% Composite: this (realm, email) pair must be unique.
+context(#{realm := R, email := E}) ->
+    {payload_hash_match, [<<"realm">>, <<"email">>], [R, E]}.
+```
+
+The write/condition side needs nothing new — reckon-db evaluates
+payload filters inside the same atomic append check. Only the context
+**read** uses the payload index.
+
+### Declare the index, or fail loud
+
+A payload leaf requires the store to declare the matching index
+(`{payload, Key}` for `payload_match`, `{payload_hash, Keys}` for
+`payload_hash_match`). A Decision that references an **undeclared**
+index fails **loudly and early**:
+
+```erlang
+{error, {payload_index_unavailable, {payload_match, <<"license_key">>, <<"LK-1">>}}}
+```
+
+It never silently returns an empty context and lets a bad decision
+through. The runtime checks the declared indexes (via
+`evoq_event_store:payload_indexes/1`) before reading; an old adapter
+without introspection is treated the same as an undeclared index.
+
+When to reach for CCC over tags: when the value you must constrain is
+already a first-class field of the event (a license key, an external
+id, a (realm, email) pair) and tagging it would just duplicate data
+the payload already carries.
 
 ---
 
@@ -151,12 +206,93 @@ tagged read with the appropriate match mode — no superset fan-out.
 | Good for | "Has this account been overdrawn?" | "Has this email been claimed?" |
 | Bad for | "Is this email unique?" | "What's the current balance of account 42?" |
 
-A Decision is **stateless across dispatches**. Each invocation reads
-fresh context. There's no decision actor, no rehydration, no
-passivation. The trade-off: every dispatch pays a read.
+By default a Decision is **stateless across dispatches**: each
+invocation reads fresh context, and the trade-off is that every
+dispatch pays a read. For a *keyed, hot* boundary you can opt into a
+stateful actor that caches the context — see the next section.
 
 Use `evoq_decision` only for invariants you can't model as a
 per-aggregate state machine. When in doubt, default to aggregates.
+
+---
+
+## Stateful decision actor (opt-in)
+
+*Available in evoq 1.23.0+.*
+
+For a boundary that is **keyed and hot** — one seat, one account, one
+SKU taking many concurrent commands — the stateless path thrashes:
+N concurrent commands each read, decide, and race to append, so N−1
+hit `context_changed` and retry. The **stateful actor** is the cure,
+and it reuses the aggregate's process machinery wholesale.
+
+Opt in by implementing `boundary_key/1`. Return a stable key for the
+command's boundary, and the runtime routes the command to a per-node
+`gen_server` keyed on it; return `undefined` (or omit the callback)
+and you get today's stateless path, verbatim.
+
+```erlang
+-module(reserve_seat).
+-behaviour(evoq_decision).
+
+-export([context/1, decide/2, boundary_key/1,
+         init_decision_model/0, apply_context_event/2]).
+
+%% Opt into the actor: one process per seat.
+boundary_key(#{seat := SeatId}) -> SeatId.
+
+context(#{seat := SeatId}) ->
+    {any_of, [<<"seat:", SeatId/binary>>]}.
+
+%% Optional folded model. When init/apply are present, decide/2
+%% receives the folded Model instead of the raw context-events list
+%% (mirrors evoq_aggregate's init/apply).
+init_decision_model() -> false.                     % seat not yet taken
+apply_context_event(_Model, #{event_type := <<"seat_reserved_v1">>}) -> true;
+apply_context_event(Model, _Event) -> Model.
+
+decide(Taken, #{seat := SeatId, who := Who}) ->
+    case Taken of
+        true  -> {error, seat_taken};
+        false -> {ok, [#{event_type => <<"seat_reserved_v1">>,
+                         data => #{seat => SeatId, who => Who},
+                         tags => [<<"seat:", SeatId/binary>>]}]}
+    end.
+```
+
+Dispatch is unchanged — `evoq_decision_runtime:dispatch/3` is a facade
+that routes to the actor when `boundary_key/1` yields a key.
+
+### What the actor does
+
+- **First command** lazily loads context once, folds it into the
+  cached model, records the cutoff.
+- **Each command** serialises at the one process (mailbox ordering →
+  no thrash), runs `decide/2` against the cached model, appends, and
+  on success folds the new events in and advances the cutoff — **no
+  re-read**.
+- **On `context_changed`** (a second node, or another writer) it
+  invalidates, re-reads context, and retries within `retry_budget`.
+- **When idle** it passivates and is rebuilt on next use.
+
+The store's `append_if_no_tag_matches` stays the **sole** correctness
+authority. The actor is a per-node cache + serialiser, never the
+source of truth — a second node may hold its own actor for the same
+boundary, and the store backstops the cross-node race.
+
+### When to use which
+
+| Boundary shape | Mode |
+|---|---|
+| keyed + hot + (near-)disjoint (seat, account, SKU) | **stateful actor** (`boundary_key/1`) |
+| keyed but cold / one-shot (email uniqueness at signup) | stateless (default) |
+| compound / no natural partition key | stateless (default) |
+| per-entity lifecycle | it's an **aggregate**, not a decision |
+
+> **Contract:** for a given `boundary_key`, `context/1` must resolve to
+> the same filter for every command — the actor caches one context per
+> key. Keep the key and the context derived from the same boundary
+> identity.
 
 ---
 
@@ -223,12 +359,12 @@ happen in this filter?", not "is the domain rule satisfied?"
 
 ## v1 limitations
 
-- **Flat filters only** are translated by the runtime's read path
-  via `read_by_tags`. Compound `{and_, _}` / `{or_, _}` filters
-  work end-to-end (the backend supports them), but the runtime
-  read currently pulls the broader tag superset and refines
-  client-side. For very high-cardinality compound filters,
-  consider denormalising to a single composite tag.
+- **Compound filters read every leaf.** `{and_, _}` / `{or_, _}` are
+  correct for any mix of tag, `event_type`, and payload leaves (each
+  branch is pulled by its own index, then refined client-side). The
+  cost is one indexed read per leaf; for very high-cardinality
+  compound filters, consider denormalising to a single composite tag
+  or payload field.
 - **DCB pseudo-stream only**. The runtime considers only events
   written to the `_dcb` pseudo-stream when computing context.
   Mixed-mode (aggregate streams + DCB sharing tags) is not
