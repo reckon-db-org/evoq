@@ -27,11 +27,17 @@
 %%%   retry_budget() -> non_neg_integer()
 %%%     Maximum retries on context_changed conflicts. Default 3.
 %%%
-%%% == v1 limitations ==
+%%% == CCC payload conditions ==
 %%%
-%%%   - {or_, [...]} compound filters that mix event_type with tag
-%%%     branches may miss events matching only the event_type branch.
-%%%     See context_filter() type docs for details.
+%%%   The context query can scope on opaque event-data fields, not just
+%%%   tags/types: {payload_match, Key, Value} and
+%%%   {payload_hash_match, Keys, Values}. The store must declare the
+%%%   matching payload index; otherwise the decision fails loudly with
+%%%   {error, {payload_index_unavailable, Filter}}. See the
+%%%   context_filter() type docs.
+%%%
+%%% == limitations ==
+%%%
 %%%   - The runtime considers only events from the DCB pseudo-stream
 %%%     (the binary "_dcb"). Mixed-mode use cases (aggregate streams +
 %%%     DCB sharing tags) are not supported; use evoq_aggregate if
@@ -44,25 +50,43 @@
 -export_type([context_filter/0]).
 
 %% Tag-filter for the consistency context. Per-event semantics:
-%%   any_of(Tags)         - event has ANY of the given tags
-%%   all_of(Tags)         - event has ALL of the given tags
-%%   event_type(T)        - event has this event_type (added 1.21.0)
-%%   and_(Filters)        - event satisfies ALL sub-filters
-%%   or_(Filters)         - event satisfies AT LEAST ONE sub-filter
+%%   any_of(Tags)            - event has ANY of the given tags
+%%   all_of(Tags)            - event has ALL of the given tags
+%%   event_type(T)           - event has this event_type (added 1.21.0)
+%%   payload_match(K, V)     - event payload field K equals V (CCC, 1.22.0)
+%%   payload_hash_match(Ks, Vs) - event payload fields Ks equal Vs (CCC, 1.22.0)
+%%   and_(Filters)           - event satisfies ALL sub-filters
+%%   or_(Filters)            - event satisfies AT LEAST ONE sub-filter
 %%
-%% Mirrors reckon_gater_types:tag_filter() exactly. The runtime
-%% read path supports compound filters (see evoq_decision_runtime).
+%% Mirrors reckon_gater_types:tag_filter() exactly, plus the CCC
+%% payload-condition leaves. The runtime read path supports compound
+%% filters (see evoq_decision_runtime).
 %%
-%% v1 compound-filter limitation: for {or_, [...]}, the runtime reads
-%% a superset via tag + event-type index reads and refines client-side.
-%% A pure-event-type branch inside an or_ will match correctly only
-%% for events that were already pulled by a sibling tag branch.
-%% Use {event_type, T} at the top level or inside {and_, [...]} for
-%% fully correct semantics.
+%% == CCC payload conditions (added 1.22.0) ==
+%%
+%% {payload_match, Key, Value} and {payload_hash_match, Keys, Values}
+%% query opaque event-data fields rather than tags. The store must
+%% declare the matching payload index (`{payload, Key}` /
+%% `{payload_hash, Keys}`) — see the reckon-gater CCC guide. A decision
+%% using a payload leaf against a store that does not declare the index
+%% fails loudly with {error, {payload_index_unavailable, Filter}}; it
+%% never silently returns an empty context.
+%%
+%% Requires reckon-gater >= 3.7 (payload-index introspection;
+%% ccc_read_by_payload* reads from 3.6) / reckon-db >= 5.3 for the
+%% payload indexes. Tag/type-only decisions have no new requirement.
+%%
+%% Compound-filter semantics: the runtime reads every leaf of a
+%% compound filter fully (via the leaf's own index read), unions the
+%% results, and refines client-side. This means {or_, [...]} mixing
+%% tag, event_type and payload leaves is correct — each branch is
+%% pulled by its own index, not inferred from a sibling.
 -type context_filter() ::
       {any_of, [binary()]}
     | {all_of, [binary()]}
     | {event_type, binary()}
+    | {payload_match, Key :: binary(), Value :: binary()}
+    | {payload_hash_match, Keys :: [binary()], Values :: [binary()]}
     | {and_, [context_filter()]}
     | {or_,  [context_filter()]}.
 

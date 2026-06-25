@@ -5,6 +5,53 @@ All notable changes to evoq will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.22.0] - 2026-06-25
+
+### Added — CCC payload conditions in `evoq_decision:context_filter()` (Part A)
+
+DCB decisions can now scope their consistency context on **opaque event-data
+fields**, not just tags/types. This is the CCC (Consistency Context Condition)
+dimension reckon-db exposes via payload indexes, lifted into evoq's Decision
+behaviour. Tag/type-only decisions are unchanged.
+
+- `evoq_decision:context_filter()` gains two leaves:
+  - `{payload_match, Key :: binary(), Value :: binary()}` — payload field equals.
+  - `{payload_hash_match, Keys :: [binary()], Values :: [binary()]}` — composite.
+- `evoq_event_store`: new `ccc_read_by_payload/4` and `ccc_read_by_payload_hash/4`
+  reads, plus `payload_indexes/1` / `payload_hash_indexes/1` introspection
+  (the latter degrade to `{error, introspection_unavailable}` on adapters that
+  predate them).
+- `evoq_adapter`: four new **optional** callbacks for the above.
+- `evoq_decision_runtime`: payload read branches; `match_filter/2` gains
+  `payload_match` / `payload_hash_match` clauses that read flattened data fields.
+
+### Fixed — compound-filter (`or_`) superset bug
+
+The runtime now reads **every leaf of a compound filter fully** via its own
+index, unions the results, and refines client-side — replacing the
+collect-tags-then-single-union-read path. `{or_, [...]}` mixing tag,
+`event_type`, and payload leaves is now correct: no branch is inferred from a
+sibling. `match_filter/2` recurses over the event map (not its tag list) inside
+`and_`/`or_`, so `event_type`/payload leaves nested in a compound evaluate
+correctly.
+
+### Graceful degradation (required by the proposal)
+
+A decision using a payload leaf against a store that does not declare the
+matching index fails **loudly and early** with
+`{error, {payload_index_unavailable, Filter}}` — it never silently returns an
+empty context and lets a bad decision through. The decision runtime also no
+longer crashes on a context read error; it propagates it to the caller.
+
+**Requires reckon-gater >= 3.7 / reckon-db >= 5.3** for the payload indexes,
+*only* for decisions that use payload leaves. (gater 3.7 adds the
+`get_payload_indexes/1` / `get_payload_hash_indexes/1` introspection the
+runtime needs to fail loud; the `ccc_read_by_payload*` reads landed in 3.6.)
+Pair with a `reckon_evoq` release implementing the four adapter callbacks
+(delegating to `reckon_gater_api:ccc_read_by_payload/4`,
+`ccc_read_by_payload_hash/4`, `get_payload_indexes/1`,
+`get_payload_hash_indexes/1`) — shipped in reckon-evoq 2.7.0.
+
 ## [1.21.0] - 2026-06-22
 
 ### Added — `{event_type, binary()}` in `evoq_decision:context_filter()`

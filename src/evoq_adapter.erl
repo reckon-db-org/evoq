@@ -109,4 +109,35 @@
                           BatchSize :: pos_integer()) ->
     {ok, [evoq_event()]} | {error, term()}.
 
--optional_callbacks([read_all_global/3]).
+%% CCC payload-condition reads (added 1.22.0). Optional: adapters
+%% backed by a store with payload indexes implement them; evoq's
+%% decision runtime fails loudly when they are absent or the index is
+%% undeclared, so a payload-conditioned decision never runs blind.
+
+%% Read DCB events whose payload field Key equals Value.
+%% Requires the store to declare the {payload, Key} index.
+-callback ccc_read_by_payload(StoreId :: atom(),
+                              Key :: binary(),
+                              Value :: binary(),
+                              BatchSize :: pos_integer()) ->
+    {ok, [evoq_event()]} | {error, term()}.
+
+%% Read DCB events matching a composite payload field set.
+%% Requires the store to declare the {payload_hash, Keys} index.
+-callback ccc_read_by_payload_hash(StoreId :: atom(),
+                                   Keys :: [binary()],
+                                   Values :: [binary()],
+                                   BatchSize :: pos_integer()) ->
+    {ok, [evoq_event()]} | {error, term()}.
+
+%% Introspection: which payload keys / key-sets the store indexes.
+%% Used to fail early on a decision that references an undeclared index.
+-callback payload_indexes(StoreId :: atom()) ->
+    {ok, [binary()]} | {error, term()}.
+
+-callback payload_hash_indexes(StoreId :: atom()) ->
+    {ok, [[binary()]]} | {error, term()}.
+
+-optional_callbacks([read_all_global/3,
+                     ccc_read_by_payload/4, ccc_read_by_payload_hash/4,
+                     payload_indexes/1, payload_hash_indexes/1]).

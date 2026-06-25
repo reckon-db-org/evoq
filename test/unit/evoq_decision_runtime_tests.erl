@@ -75,6 +75,9 @@ cleanup(_) ->
     catch meck:unload(test_decision_nested),
     catch meck:unload(test_decision_empty_or),
     catch meck:unload(test_decision_empty_and),
+    catch meck:unload(test_decision_payload),
+    catch meck:unload(test_decision_payload_hash),
+    catch meck:unload(test_decision_payload_compound),
     ok.
 
 %%====================================================================
@@ -97,7 +100,13 @@ all_test_() ->
         fun and_filter_intersects_subfilter_matches/0,
         fun nested_compound_filter/0,
         fun empty_or_filter_yields_empty_context/0,
-        fun empty_and_filter_yields_empty_context/0
+        fun empty_and_filter_yields_empty_context/0,
+        fun payload_match_reads_payload_index/0,
+        fun payload_hash_match_reads_payload_hash_index/0,
+        fun payload_match_undeclared_index_fails_loud/0,
+        fun payload_hash_match_undeclared_index_fails_loud/0,
+        fun payload_index_unavailable_skips_append/0,
+        fun compound_mixing_payload_and_tag/0
     ]}.
 
 %%====================================================================
@@ -325,10 +334,11 @@ or_filter_unions_subfilter_matches() ->
     EvB  = dcb_event_with(2, [<<"b">>]),
     EvAB = dcb_event_with(3, [<<"a">>, <<"b">>]),
     EvC  = dcb_event_with(4, [<<"c">>]),  %% should NOT match
+    %% Each leaf of the or_ is read fully via its own index (per-leaf
+    %% reads, not one union read), so the runtime issues a read_by_tags
+    %% per branch. The mock returns the full candidate set regardless.
     meck:expect(evoq_event_store, read_by_tags,
-        fun(_Store, Tags, any, _Batch) ->
-            %% Verify runtime asked for the UNION of tags.
-            ?assertEqual(lists:usort([<<"a">>, <<"b">>]), lists:usort(Tags)),
+        fun(_Store, _Tags, any, _Batch) ->
             {ok, [EvA, EvB, EvAB, EvC]}
         end),
     %% decide returns no events to keep the test focused on read-path
@@ -397,6 +407,121 @@ empty_and_filter_yields_empty_context() ->
     ?assertEqual([], Passed).
 
 %%====================================================================
+%% CCC payload conditions
+%%====================================================================
+
+%% Uniqueness via a payload field (e.g. license_key) rather than a tag.
+test_decision_payload_setup() ->
+    meck:new(test_decision_payload, [non_strict]),
+    meck:expect(test_decision_payload, context,
+        fun(#{key := K, value := V}) -> {payload_match, K, V} end),
+    meck:expect(test_decision_payload, decide,
+        fun(_Ctx, _Cmd) -> {ok, []} end).
+
+test_decision_payload_hash_setup() ->
+    meck:new(test_decision_payload_hash, [non_strict]),
+    meck:expect(test_decision_payload_hash, context,
+        fun(#{keys := Ks, values := Vs}) -> {payload_hash_match, Ks, Vs} end),
+    meck:expect(test_decision_payload_hash, decide,
+        fun(_Ctx, _Cmd) -> {ok, []} end).
+
+%% (payload license_key=K) OR (tag t) — exercises a mixed compound leaf read.
+test_decision_payload_compound_setup() ->
+    meck:new(test_decision_payload_compound, [non_strict]),
+    meck:expect(test_decision_payload_compound, context,
+        fun(_) -> {or_, [{payload_match, <<"license_key">>, <<"LK-1">>},
+                         {any_of, [<<"t">>]}]} end),
+    meck:expect(test_decision_payload_compound, decide,
+        fun(_Ctx, _Cmd) -> {ok, []} end).
+
+payload_match_reads_payload_index() ->
+    test_decision_payload_setup(),
+    meck:expect(evoq_event_store, payload_indexes,
+        fun(_S) -> {ok, [<<"license_key">>]} end),
+    Ev = dcb_event_payload(7, #{<<"license_key">> => <<"LK-1">>}),
+    meck:expect(evoq_event_store, ccc_read_by_payload,
+        fun(_S, <<"license_key">>, <<"LK-1">>, _Batch) -> {ok, [Ev]} end),
+    CutoffRef = make_ref(),
+    meck:expect(evoq_event_store, append_if_no_tag_matches,
+        fun(_S, _F, Cutoff, _E) -> put(CutoffRef, Cutoff), {error, no_events} end),
+    _ = evoq_decision_runtime:dispatch(test_decision_payload, ?STORE,
+            #{key => <<"license_key">>, value => <<"LK-1">>}),
+    %% Read hit the payload index; cutoff came from the returned event.
+    ?assertEqual(1, meck:num_calls(evoq_event_store, ccc_read_by_payload, '_')),
+    ?assertEqual(7, get(CutoffRef)),
+    catch meck:unload(test_decision_payload).
+
+payload_hash_match_reads_payload_hash_index() ->
+    test_decision_payload_hash_setup(),
+    meck:expect(evoq_event_store, payload_hash_indexes,
+        fun(_S) -> {ok, [[<<"realm">>, <<"email">>]]} end),
+    Ev = dcb_event_payload(3, #{<<"realm">> => <<"r1">>, <<"email">> => <<"a@x">>}),
+    meck:expect(evoq_event_store, ccc_read_by_payload_hash,
+        fun(_S, [<<"realm">>, <<"email">>], [<<"r1">>, <<"a@x">>], _B) -> {ok, [Ev]} end),
+    meck:expect(evoq_event_store, append_if_no_tag_matches,
+        fun(_,_,_,_) -> {error, no_events} end),
+    _ = evoq_decision_runtime:dispatch(test_decision_payload_hash, ?STORE,
+            #{keys => [<<"realm">>, <<"email">>], values => [<<"r1">>, <<"a@x">>]}),
+    ?assertEqual(1, meck:num_calls(evoq_event_store, ccc_read_by_payload_hash, '_')),
+    catch meck:unload(test_decision_payload_hash).
+
+payload_match_undeclared_index_fails_loud() ->
+    test_decision_payload_setup(),
+    %% Store declares no payload indexes → fail loudly, never read.
+    meck:expect(evoq_event_store, payload_indexes, fun(_S) -> {ok, []} end),
+    meck:expect(evoq_event_store, ccc_read_by_payload,
+        fun(_,_,_,_) -> ct:fail(read_should_not_be_called) end),
+    Result = evoq_decision_runtime:dispatch(test_decision_payload, ?STORE,
+                #{key => <<"license_key">>, value => <<"LK-1">>}),
+    ?assertEqual({error, {payload_index_unavailable,
+                          {payload_match, <<"license_key">>, <<"LK-1">>}}}, Result),
+    ?assertEqual(0, meck:num_calls(evoq_event_store, ccc_read_by_payload, '_')),
+    catch meck:unload(test_decision_payload).
+
+payload_hash_match_undeclared_index_fails_loud() ->
+    test_decision_payload_hash_setup(),
+    %% Introspection unavailable (old adapter) is treated as undeclared.
+    meck:expect(evoq_event_store, payload_hash_indexes,
+        fun(_S) -> {error, introspection_unavailable} end),
+    Result = evoq_decision_runtime:dispatch(test_decision_payload_hash, ?STORE,
+                #{keys => [<<"realm">>, <<"email">>], values => [<<"r1">>, <<"a@x">>]}),
+    ?assertEqual({error, {payload_index_unavailable,
+                          {payload_hash_match, [<<"realm">>, <<"email">>],
+                           [<<"r1">>, <<"a@x">>]}}}, Result),
+    catch meck:unload(test_decision_payload_hash).
+
+payload_index_unavailable_skips_append() ->
+    test_decision_payload_setup(),
+    meck:expect(evoq_event_store, payload_indexes, fun(_S) -> {ok, []} end),
+    meck:expect(evoq_event_store, append_if_no_tag_matches,
+        fun(_,_,_,_) -> ct:fail(append_should_not_be_called) end),
+    _ = evoq_decision_runtime:dispatch(test_decision_payload, ?STORE,
+            #{key => <<"k">>, value => <<"v">>}),
+    ?assertEqual(0, meck:num_calls(evoq_event_store, append_if_no_tag_matches, '_')),
+    catch meck:unload(test_decision_payload).
+
+compound_mixing_payload_and_tag() ->
+    test_decision_payload_compound_setup(),
+    meck:expect(evoq_event_store, payload_indexes,
+        fun(_S) -> {ok, [<<"license_key">>]} end),
+    %% Leaf 1 (payload) returns the LK-1 event; leaf 2 (tag t) returns
+    %% a tagged event. Both must reach decide; an event matching only the
+    %% payload branch must NOT be dropped (the closed or_-superset bug).
+    EvPay = dcb_event_payload(1, #{<<"license_key">> => <<"LK-1">>}),
+    EvTag = dcb_event_with(2, [<<"t">>]),
+    EvOther = dcb_event_with(3, [<<"z">>]),  %% matches neither branch
+    meck:expect(evoq_event_store, ccc_read_by_payload,
+        fun(_,_,_,_) -> {ok, [EvPay]} end),
+    meck:expect(evoq_event_store, read_by_tags,
+        fun(_,_,_,_) -> {ok, [EvTag, EvOther]} end),
+    meck:expect(evoq_event_store, append_if_no_tag_matches,
+        fun(_,_,_,_) -> {error, no_events} end),
+    _ = evoq_decision_runtime:dispatch(test_decision_payload_compound, ?STORE, #{}),
+    [[Passed, _]] = captured_decide_context(test_decision_payload_compound),
+    ?assertEqual([1, 2], lists:sort([V || #{version := V} <- Passed])),
+    catch meck:unload(test_decision_payload_compound).
+
+%%====================================================================
 %% Helpers
 %%====================================================================
 
@@ -409,6 +534,16 @@ dcb_event_with(Version, Tags) ->
       version => Version,
       data => #{},
       tags => Tags}.
+
+%% A DCB event whose payload fields are flattened to the top level
+%% (as evoq_event_store:event_to_map/1 produces).
+dcb_event_payload(Version, Payload) when is_map(Payload) ->
+    Base = #{event_type => <<"some_event">>,
+             stream_id => <<"_dcb">>,
+             version => Version,
+             data => Payload,
+             tags => []},
+    maps:merge(Payload, Base).
 
 non_dcb_event(StreamId, Version) ->
     #{event_type => <<"agg_event">>,

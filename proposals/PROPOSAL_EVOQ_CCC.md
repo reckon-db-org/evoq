@@ -1,9 +1,10 @@
 # PROPOSAL: CCC payload conditions + the stateful Decision/Context actor
 
-**Status:** Draft
+**Status:** Part A implemented (evoq 1.22.0, 2026-06-25). Part B Draft.
 **Author:** Raf Lefever
 **Date:** 2026-06-24
 **Related:**
+
 - `evoq_decision` / `evoq_decision_runtime` (existing DCB Decision behaviour)
 - reckon-db CCC payload indexes (reckon_db 5.5.1+, reckon-gater 3.7.0+)
 - [reckon-gater CCC guide](https://codeberg.org/reckon-db-org/reckon-gater/src/branch/main/guides/ccc.md)
@@ -39,19 +40,19 @@ Both are backwards-compatible. No existing decision changes behaviour.
 `evoq_decision` is a faithful **Dynamic Consistency Boundary** implementation, matching
 the dcb.events spec and Axon Framework 5's model:
 
-| DCB spec | `evoq_decision` |
-|----------|-----------------|
-| `query` (types + tags) | `context/1 -> context_filter()` |
-| Decision Model (project events) | `decide(ContextEvents, Command)` |
-| `AppendCondition{failIfEventsMatch, after}` | `append_if_no_tag_matches(Filter, SeqCutoff, Events)` |
-| conflict → rebuild → retry | `{error, {context_changed, _}}` retry loop in `evoq_decision_runtime` |
+| DCB spec                                    | `evoq_decision`                                                       |
+| ------------------------------------------- | --------------------------------------------------------------------- |
+| `query` (types + tags)                      | `context/1 -> context_filter()`                                       |
+| Decision Model (project events)             | `decide(ContextEvents, Command)`                                      |
+| `AppendCondition{failIfEventsMatch, after}` | `append_if_no_tag_matches(Filter, SeqCutoff, Events)`                 |
+| conflict → rebuild → retry                  | `{error, {context_changed, _}}` retry loop in `evoq_decision_runtime` |
 
 Two facts about the current implementation drive this proposal:
 
 1. **No payload conditions.** `context_filter()` is `any_of | all_of | event_type | and_ | or_`
    — tag/type only. The DCB spec, Axon, Marten, and every reference event store are the
    same: event data is opaque to the query. reckon-db's CCC payload indexes
-   (`payload_match` / `payload_hash_match`) are an extension *beyond* the spec, and evoq
+   (`payload_match` / `payload_hash_match`) are an extension _beyond_ the spec, and evoq
    can't express them yet.
 
 2. **The aggregate process is a per-node cache, not a cluster singleton.**
@@ -61,7 +62,7 @@ Two facts about the current implementation drive this proposal:
    The process exists to (a) cache folded state and (b) serialise same-node commands so
    the optimistic check usually passes first try.
 
-Fact 2 is the unlock for Part B: a Decision/Context actor can use the *identical* model —
+Fact 2 is the unlock for Part B: a Decision/Context actor can use the _identical_ model —
 a per-node cache+serialiser whose correctness backstop is the store's append condition.
 
 ---
@@ -110,7 +111,7 @@ client-side) gains payload branches:
 - compound `and_`/`or_` mixing tag/type/payload → read each dimension, combine
   (intersect for `and_`, union for `or_`), then pass to `decide/2`. The append uses the
   composed filter verbatim; the store's atomic check is the authority, so client-side
-  combination only has to be a correct *superset* for the read.
+  combination only has to be a correct _superset_ for the read.
 
 ### Graceful degradation (required)
 
@@ -133,18 +134,18 @@ undeclared index and surface it.
 
 > Could/should a `{Dcb,Ccc}Context` be a long-lived gen_server like the aggregate?
 
-**Yes — as an opt-in mode for boundaries that are *keyed and hot*, reusing the aggregate
+**Yes — as an opt-in mode for boundaries that are _keyed and hot_, reusing the aggregate
 machinery. No — as a blanket replacement of the stateless runtime.**
 
 ### The unifying frame: aggregate = the static special case of a boundary
 
 The DCB spec states aggregates are a special case of DCB. evoq can make that literal:
 
-| | boundary | key | append condition | writer |
-|---|---|---|---|---|
-| `evoq_aggregate` | one stream | stream id | stream version | sole, by construction |
-| `evoq_decision` (stateless) | ad-hoc query | — | `failIfEventsMatch(query, after)` | many |
-| `evoq_decision` (**stateful, Part B**) | resolved query value | declared `boundary_key` | `failIfEventsMatch(query, after)` | many; one *cached* per node |
+|                                        | boundary             | key                     | append condition                  | writer                      |
+| -------------------------------------- | -------------------- | ----------------------- | --------------------------------- | --------------------------- |
+| `evoq_aggregate`                       | one stream           | stream id               | stream version                    | sole, by construction       |
+| `evoq_decision` (stateless)            | ad-hoc query         | —                       | `failIfEventsMatch(query, after)` | many                        |
+| `evoq_decision` (**stateful, Part B**) | resolved query value | declared `boundary_key` | `failIfEventsMatch(query, after)` | many; one _cached_ per node |
 
 A stateful decision is "a transient aggregate for a dynamic boundary": materialise the
 boundary as an actor on demand, fold its context once, serialise commands against it,
@@ -219,9 +220,9 @@ The actor (`evoq_decision_actor`, a `gen_server` started under the **existing**
   position).
 - **{decide, Cmd}** — `decide(Model, Cmd)` → Events →
   `append_if_no_tag_matches(Filter, Cutoff, Events)`:
-  - `ok` → fold Events into `Model`, bump `Cutoff`, reset idle timer, reply. *(no re-read)*
+  - `ok` → fold Events into `Model`, bump `Cutoff`, reset idle timer, reply. _(no re-read)_
   - `{context_changed, _}` → re-read context, refresh `Model` + `Cutoff`, retry up to
-    `retry_budget`. *(cache self-heals)*
+    `retry_budget`. _(cache self-heals)_
 - **timeout** — passivate/evict via lifespan (cold boundary leaves no footprint).
 
 Reuse, not reinvention: partition sup, pg registry, lifespan, snapshot — all already
@@ -229,19 +230,19 @@ exist for the aggregate and are boundary-agnostic. The actor is ~one module.
 
 ### When to use which (guidance to ship in the docs)
 
-| Boundary shape | Mode |
-|---|---|
-| keyed + hot + (near-)disjoint (seat, account, SKU) | **stateful actor** |
-| keyed but cold / one-shot (email uniqueness at signup) | stateless |
-| compound / no natural partition key (ad-hoc multi-tag) | stateless |
-| per-entity lifecycle | it's an **aggregate**, not a decision |
+| Boundary shape                                         | Mode                                  |
+| ------------------------------------------------------ | ------------------------------------- |
+| keyed + hot + (near-)disjoint (seat, account, SKU)     | **stateful actor**                    |
+| keyed but cold / one-shot (email uniqueness at signup) | stateless                             |
+| compound / no natural partition key (ad-hoc multi-tag) | stateless                             |
+| per-entity lifecycle                                   | it's an **aggregate**, not a decision |
 
 ---
 
 ## Compatibility & migration
 
 - Part A: additive type variants + two adapter callbacks + runtime branches. Existing
-  tag/type decisions unchanged. Requires reckon-gater ≥ 3.7, reckon-db ≥ 5.3 *only* for
+  tag/type decisions unchanged. Requires reckon-gater ≥ 3.7, reckon-db ≥ 5.3 _only_ for
   decisions that use payload filters.
 - Part B: all new callbacks optional; absent `boundary_key/1` ⇒ today's stateless path
   verbatim. Opt-in per decision module.
@@ -254,16 +255,49 @@ exist for the aggregate and are boundary-agnostic. The actor is ~one module.
 
 1. **Registry group collision.** Reuse `{decision, Module, Key}` in the same pg scope as
    `{aggregate, Id}` — fine (distinct tuples), or a separate scope for clarity?
+   => Answer: separate.
+
 2. **Cross-node hot boundaries.** Per-node actors are correct (store backstops) but a
    genuinely globally-contended boundary still pays cross-node retries. Optional future:
-   a `global`/`via` singleton mode for the rare boundary that needs it — explicitly *not*
+   a `global`/`via` singleton mode for the rare boundary that needs it — explicitly _not_
    v1 (it reintroduces the singleton failure modes the aggregate deliberately avoids).
+
+   => **ELI5.** The actor is a helper that holds the current state of one
+   boundary (say "seat 12A") and lines up booking attempts so they don't fight.
+   But there is **one helper per node**, not one per cluster. 3 nodes ⇒ 3
+   "seat 12A" helpers that don't know about each other.
+
+   - **Same node:** every attempt for seat 12A funnels through that node's
+     helper → they queue → execute one at a time → first append wins, no fight.
+     This is the whole win, and it kicks in whenever a given key tends to land
+     on the same node (sticky/consistent-hash routing — the common case).
+   - **Across nodes:** node-1's helper and node-2's helper both think seat 12A
+     is free and both append. The **store** is the referee: reckon-db's append
+     condition lets exactly one win, the other gets `context_changed` and
+     retries. Still **correct** — but you pay the fight-and-retry the helper was
+     meant to remove. The helper only removes fighting *within* a node.
+
+   So per-node is "good enough" because correctness never depends on it, and in
+   practice contention for a key is mostly same-node. The retry cost only bites
+   a boundary that is hot on **every** node at once.
+
+   The `global`/`via` singleton mode would make **one** helper for the whole
+   cluster (all nodes route to it) → zero thrash even cross-node. The catch is
+   it's a single point of failure and a bottleneck: the holding node dies ⇒
+   failover gap; every request network-hops to that one process; a netsplit ⇒
+   two singletons. Those are exactly the failure modes the per-node aggregate
+   design avoids — so singleton mode stays out of v1, reserved for the rare
+   boundary that is both globally hot *and* cannot tolerate any retry.
+
 3. **Decision-model snapshotting.** Worth caching a folded decision model to the store for
    very large/expensive contexts, or always rebuild on spawn? Default: rebuild (contexts
    for keyed boundaries are bounded). Reuse the aggregate snapshot hooks if needed.
+   => VERY INTERESTING IDEA (since DCB/CCC event sets might be A LOT LARGER than 'classic' aggregates)
+
 4. **Should `boundary_key/1` validation cross-check the declared store indexes** at boot
    (warn if a payload filter references an undeclared index), reusing the gateway's
    discovery endpoint?
+   => I'd lean to 'yes'
 
 ---
 

@@ -27,6 +27,8 @@
 -export([read_all_events/2, read_events_by_types/3]).
 -export([read_all_global/3]).
 -export([read_by_tags/4, read_by_metadata/3, append_if_no_tag_matches/4]).
+-export([ccc_read_by_payload/4, ccc_read_by_payload_hash/4]).
+-export([payload_indexes/1, payload_hash_indexes/1]).
 
 %% Event conversion
 -export([event_to_map/1]).
@@ -103,6 +105,57 @@ read_by_metadata(StoreId, Key, Value) ->
 append_if_no_tag_matches(StoreId, TagFilter, SeqCutoff, Events) ->
     Adapter = get_adapter(),
     Adapter:append_if_no_tag_matches(StoreId, TagFilter, SeqCutoff, Events).
+
+%% @doc Read DCB events whose payload field Key equals Value (CCC).
+%%
+%% Backed by reckon-db's {payload, Key} index, evaluated server-side.
+%% The consistency-boundary read counterpart to the payload condition
+%% that append_if_no_tag_matches/4 already evaluates atomically at
+%% append. Requires the store to declare the {payload, Key} index;
+%% an undeclared index surfaces as a backend error here, which the
+%% decision runtime maps to {payload_index_unavailable, Filter}.
+-spec ccc_read_by_payload(atom(), binary(), binary(), pos_integer()) ->
+    {ok, [map()]} | {error, term()}.
+ccc_read_by_payload(StoreId, Key, Value, BatchSize) ->
+    Adapter = get_adapter(),
+    case Adapter:ccc_read_by_payload(StoreId, Key, Value, BatchSize) of
+        {ok, Events} -> {ok, [event_to_map(E) || E <- Events]};
+        {error, _} = Error -> Error
+    end.
+
+%% @doc Read DCB events matching a composite payload field combination (CCC).
+%%
+%% Backed by reckon-db's {payload_hash, Keys} index. All Keys must
+%% match their corresponding Values; field order is ignored.
+-spec ccc_read_by_payload_hash(atom(), [binary()], [binary()], pos_integer()) ->
+    {ok, [map()]} | {error, term()}.
+ccc_read_by_payload_hash(StoreId, Keys, Values, BatchSize) ->
+    Adapter = get_adapter(),
+    case Adapter:ccc_read_by_payload_hash(StoreId, Keys, Values, BatchSize) of
+        {ok, Events} -> {ok, [event_to_map(E) || E <- Events]};
+        {error, _} = Error -> Error
+    end.
+
+%% @doc Payload field keys individually indexed in a store ({payload, Key}).
+%%
+%% Used by the decision runtime to fail early when a payload filter
+%% references an undeclared index. Returns {ok, [Key]}.
+-spec payload_indexes(atom()) -> {ok, [binary()]} | {error, term()}.
+payload_indexes(StoreId) ->
+    Adapter = get_adapter(),
+    case erlang:function_exported(Adapter, payload_indexes, 1) of
+        true -> Adapter:payload_indexes(StoreId);
+        false -> {error, introspection_unavailable}
+    end.
+
+%% @doc Payload field key-sets hash-indexed in a store ({payload_hash, Keys}).
+-spec payload_hash_indexes(atom()) -> {ok, [[binary()]]} | {error, term()}.
+payload_hash_indexes(StoreId) ->
+    Adapter = get_adapter(),
+    case erlang:function_exported(Adapter, payload_hash_indexes, 1) of
+        true -> Adapter:payload_hash_indexes(StoreId);
+        false -> {error, introspection_unavailable}
+    end.
 
 %% @doc Read events from a stream.
 -spec read(atom(), binary(), non_neg_integer(), pos_integer(), forward | backward) ->
