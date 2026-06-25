@@ -72,14 +72,14 @@ register_instance(EventType, ProcessId, Pid) ->
 -spec unregister_instance(binary(), binary()) -> ok.
 unregister_instance(EventType, ProcessId) ->
     Group = instance_group(EventType, ProcessId),
-    case pg:get_members(?PG_SCOPE, Group) of
-        [] -> ok;
-        Members ->
-            lists:foreach(fun(Pid) ->
-                _ = pg:leave(?PG_SCOPE, Group, Pid)
-            end, Members)
-    end,
+    leave_all(pg:get_members(?PG_SCOPE, Group), Group),
     ok.
+
+%% @private
+leave_all([], _Group) ->
+    ok;
+leave_all(Members, Group) ->
+    lists:foreach(fun(Pid) -> _ = pg:leave(?PG_SCOPE, Group, Pid) end, Members).
 
 %% @doc Get a PM instance by event type and process ID.
 -spec get_instance(binary(), binary()) -> {ok, pid()} | {error, not_found}.
@@ -114,18 +114,20 @@ handle_call({register_pm, PMModule}, _From, #state{pm_by_event_type = Map} = Sta
 
 handle_call({unregister_pm, PMModule}, _From, #state{pm_by_event_type = Map} = State) ->
     EventTypes = PMModule:interested_in(),
-    NewMap = lists:foldl(fun(EventType, Acc) ->
-        PMs = maps:get(EventType, Acc, []),
-        NewPMs = lists:delete(PMModule, PMs),
-        case NewPMs of
-            [] -> maps:remove(EventType, Acc);
-            _ -> Acc#{EventType => NewPMs}
-        end
-    end, Map, EventTypes),
+    NewMap = lists:foldl(fun(EventType, Acc) -> remove_pm(PMModule, EventType, Acc) end,
+                         Map, EventTypes),
     {reply, ok, State#state{pm_by_event_type = NewMap}};
 
 handle_call(_Request, _From, State) ->
     {reply, {error, unknown_request}, State}.
+
+%% @private Drop PMModule from EventType's list, pruning empty entries.
+remove_pm(PMModule, EventType, Acc) ->
+    NewPMs = lists:delete(PMModule, maps:get(EventType, Acc, [])),
+    update_pm_map(NewPMs, EventType, Acc).
+
+update_pm_map([], EventType, Acc) -> maps:remove(EventType, Acc);
+update_pm_map(NewPMs, EventType, Acc) -> Acc#{EventType => NewPMs}.
 
 %% @private
 handle_cast({route, Event, Metadata}, #state{pm_by_event_type = Map} = State) ->
@@ -134,18 +136,17 @@ handle_cast({route, Event, Metadata}, #state{pm_by_event_type = Map} = State) ->
         undefined ->
             ok;
         Type ->
-            %% Get all PM modules interested in this event type
-            PMModules = maps:get(Type, Map, []),
-
-            %% Route to each PM
-            lists:foreach(fun(PMModule) ->
-                route_to_pm(PMModule, Event, Metadata)
-            end, PMModules)
+            %% Route to each PM interested in this event type
+            route_to_pms(maps:get(Type, Map, []), Event, Metadata)
     end,
     {noreply, State};
 
 handle_cast(_Msg, State) ->
     {noreply, State}.
+
+%% @private
+route_to_pms(PMModules, Event, Metadata) ->
+    lists:foreach(fun(PMModule) -> route_to_pm(PMModule, Event, Metadata) end, PMModules).
 
 %% @private
 handle_info(_Info, State) ->

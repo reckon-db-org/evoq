@@ -107,41 +107,34 @@ route_event_internal(Event, Metadata, _Opts) ->
             Handlers = evoq_event_type_registry:get_handlers(UpcastedType),
 
             %% Route to each handler
-            lists:foreach(fun(Handler) ->
-                notify_handler(Handler, UpcastedType, UpcastedEvent, Metadata)
-            end, Handlers)
+            route_to_handlers(Handlers, UpcastedType, UpcastedEvent, Metadata)
     end.
 
 %% @private
+route_to_handlers(Handlers, Type, Event, Metadata) ->
+    lists:foreach(fun(Handler) -> notify_handler(Handler, Type, Event, Metadata) end,
+                  Handlers).
+
+%% @private
 upcast_event(Event, EventType, Metadata) ->
-    case evoq_type_provider:get_upcaster(EventType) of
-        {ok, UpcasterModule} ->
-            case UpcasterModule:upcast(Event, Metadata) of
-                {ok, UpcastedEvent} ->
-                    {UpcastedEvent, EventType};
-                {ok, UpcastedEvent, NewEventType} ->
-                    {UpcastedEvent, NewEventType};
-                skip ->
-                    {Event, EventType}
-            end;
-        {error, not_found} ->
-            {Event, EventType}
-    end.
+    upcast_with(evoq_type_provider:get_upcaster(EventType), Event, EventType, Metadata).
+
+upcast_with({ok, UpcasterModule}, Event, EventType, Metadata) ->
+    apply_upcast(UpcasterModule:upcast(Event, Metadata), Event, EventType);
+upcast_with({error, not_found}, Event, EventType, _Metadata) ->
+    {Event, EventType}.
+
+apply_upcast({ok, UpcastedEvent}, _Event, EventType) ->
+    {UpcastedEvent, EventType};
+apply_upcast({ok, UpcastedEvent, NewEventType}, _Event, _EventType) ->
+    {UpcastedEvent, NewEventType};
+apply_upcast(skip, Event, EventType) ->
+    {Event, EventType}.
 
 %% @private
 notify_handler(Handler, EventType, Event, Metadata) when is_pid(Handler), node(Handler) =:= node() ->
     %% Local handler pid - check alive before notifying
-    case is_process_alive(Handler) of
-        true ->
-            try
-                evoq_event_handler:notify(Handler, EventType, Event, Metadata)
-            catch
-                _:Reason ->
-                    logger:warning("Failed to notify handler ~p: ~p", [Handler, Reason])
-            end;
-        false ->
-            ok
-    end;
+    notify_if_alive(is_process_alive(Handler), Handler, EventType, Event, Metadata);
 notify_handler(Handler, _EventType, _Event, _Metadata) when is_pid(Handler) ->
     %% Remote handler pid — skip (belongs to another node)
     ok;
@@ -153,3 +146,14 @@ notify_handler(Handler, EventType, Event, Metadata) when is_atom(Handler) ->
         _:Reason ->
             logger:warning("Failed to call handler ~p: ~p", [Handler, Reason])
     end.
+
+%% @private Notify a local handler pid only if still alive.
+notify_if_alive(true, Handler, EventType, Event, Metadata) ->
+    try
+        evoq_event_handler:notify(Handler, EventType, Event, Metadata)
+    catch
+        _:Reason ->
+            logger:warning("Failed to notify handler ~p: ~p", [Handler, Reason])
+    end;
+notify_if_alive(false, _Handler, _EventType, _Event, _Metadata) ->
+    ok.

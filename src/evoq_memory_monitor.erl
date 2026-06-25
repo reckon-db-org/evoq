@@ -212,23 +212,21 @@ get_memory_usage() ->
 %% Try to get system memory limit
 get_system_memory_limit() ->
     try
-        case os:type() of
-            {unix, linux} ->
-                %% Try to read from /proc/meminfo
-                case file:read_file("/proc/meminfo") of
-                    {ok, Content} ->
-                        parse_meminfo(Content);
-                    _ ->
-                        {error, not_available}
-                end;
-            _ ->
-                %% For other systems, use a reasonable default
-                {ok, 8 * 1024 * 1024 * 1024}  %% 8GB default
-        end
+        read_memory_limit(os:type())
     catch
         _:_ ->
             {error, not_available}
     end.
+
+read_memory_limit({unix, linux}) ->
+    %% Try to read from /proc/meminfo
+    parse_meminfo_result(file:read_file("/proc/meminfo"));
+read_memory_limit(_) ->
+    %% For other systems, use a reasonable default (8GB)
+    {ok, 8 * 1024 * 1024 * 1024}.
+
+parse_meminfo_result({ok, Content}) -> parse_meminfo(Content);
+parse_meminfo_result(_) -> {error, not_available}.
 
 %% @private
 parse_meminfo(Content) ->
@@ -238,17 +236,16 @@ parse_meminfo(Content) ->
 parse_meminfo_lines([]) ->
     {error, not_found};
 parse_meminfo_lines([Line | Rest]) ->
-    case binary:match(Line, <<"MemTotal:">>) of
-        {0, _} ->
-            %% Found MemTotal line
-            case re:run(Line, <<"([0-9]+)">>, [{capture, [1], binary}]) of
-                {match, [ValueBin]} ->
-                    %% Value is in kB
-                    Value = binary_to_integer(ValueBin) * 1024,
-                    {ok, Value};
-                _ ->
-                    parse_meminfo_lines(Rest)
-            end;
-        _ ->
-            parse_meminfo_lines(Rest)
-    end.
+    match_memtotal(binary:match(Line, <<"MemTotal:">>), Line, Rest).
+
+%% @private Found the MemTotal line — pull the kB value.
+match_memtotal({0, _}, Line, Rest) ->
+    extract_memtotal(re:run(Line, <<"([0-9]+)">>, [{capture, [1], binary}]), Rest);
+match_memtotal(_, _Line, Rest) ->
+    parse_meminfo_lines(Rest).
+
+extract_memtotal({match, [ValueBin]}, _Rest) ->
+    %% Value is in kB
+    {ok, binary_to_integer(ValueBin) * 1024};
+extract_memtotal(_, Rest) ->
+    parse_meminfo_lines(Rest).
