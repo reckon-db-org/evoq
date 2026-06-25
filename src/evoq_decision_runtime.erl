@@ -98,20 +98,21 @@ dispatch_loop(_Mod, _StoreId, _Command, 0) ->
     {error, retry_budget_exhausted};
 dispatch_loop(Mod, StoreId, Command, Retries) ->
     Filter = Mod:context(Command),
-    case load_context(StoreId, Filter) of
-        {error, _} = ReadError ->
-            %% Surface read failures (e.g. an undeclared payload index)
-            %% loudly rather than letting a bad decision through on an
-            %% empty context. See graceful-degradation contract.
-            ReadError;
-        {ok, ContextEvents, Cutoff} ->
-            case Mod:decide(ContextEvents, Command) of
-                {error, _} = DecideError ->
-                    DecideError;
-                {ok, NewEvents} when is_list(NewEvents) ->
-                    attempt_append(Mod, StoreId, Command, Filter, Cutoff, NewEvents, Retries)
-            end
-    end.
+    on_context(load_context(StoreId, Filter), Mod, StoreId, Command, Filter, Retries).
+
+%% Surface read failures (e.g. an undeclared payload index) loudly rather
+%% than letting a bad decision through on an empty context.
+on_context({error, _} = ReadError, _Mod, _StoreId, _Command, _Filter, _Retries) ->
+    ReadError;
+on_context({ok, ContextEvents, Cutoff}, Mod, StoreId, Command, Filter, Retries) ->
+    on_decision(Mod:decide(ContextEvents, Command),
+                Mod, StoreId, Command, Filter, Cutoff, Retries).
+
+on_decision({error, _} = DecideError, _Mod, _StoreId, _Command, _Filter, _Cutoff, _Retries) ->
+    DecideError;
+on_decision({ok, NewEvents}, Mod, StoreId, Command, Filter, Cutoff, Retries)
+        when is_list(NewEvents) ->
+    attempt_append(Mod, StoreId, Command, Filter, Cutoff, NewEvents, Retries).
 
 attempt_append(Mod, StoreId, Command, Filter, Cutoff, NewEvents, Retries) ->
     case evoq_event_store:append_if_no_tag_matches(
@@ -162,17 +163,16 @@ read_context(StoreId, Filter) when is_tuple(Filter) ->
     %% leaf (rather than collecting tags and doing one union tag-read)
     %% is what makes {or_, [...]} mixing tag/event_type/payload leaves
     %% correct — no branch is inferred from a sibling.
-    case read_all_leaf_events(StoreId, Filter) of
-        {error, _} = Error ->
-            Error;
-        {ok, Events} ->
-            Seen = lists:foldl(
-                fun(E, Acc) -> maps:put(event_id(E), E, Acc) end,
-                #{}, Events),
-            DcbOnly = [E || E <- maps:values(Seen), is_dcb_event(E)],
-            Matching = [E || E <- DcbOnly, event_matches_filter(E, Filter)],
-            {ok, Matching}
-    end.
+    dedupe_and_match(read_all_leaf_events(StoreId, Filter), Filter).
+
+dedupe_and_match({error, _} = Error, _Filter) ->
+    Error;
+dedupe_and_match({ok, Events}, Filter) ->
+    Seen = lists:foldl(fun dedupe_by_id/2, #{}, Events),
+    DcbOnly = [E || E <- maps:values(Seen), is_dcb_event(E)],
+    {ok, [E || E <- DcbOnly, event_matches_filter(E, Filter)]}.
+
+dedupe_by_id(E, Acc) -> maps:put(event_id(E), E, Acc).
 
 read_filtered_to_dcb(StoreId, Tags, Match) ->
     dcb_filter(evoq_event_store:read_by_tags(StoreId, Tags, Match, ?DEFAULT_BATCH_SIZE)).
@@ -206,12 +206,12 @@ payload_index_declared(StoreId, Key) ->
 
 payload_hash_index_declared(StoreId, Keys) ->
     Wanted = lists:usort(Keys),
-    case evoq_event_store:payload_hash_indexes(StoreId) of
-        {ok, KeySets} ->
-            lists:any(fun(Ks) -> lists:usort(Ks) =:= Wanted end, KeySets);
-        {error, _} ->
-            false
-    end.
+    declared_hash(evoq_event_store:payload_hash_indexes(StoreId), Wanted).
+
+declared_hash({ok, KeySets}, Wanted) ->
+    lists:any(fun(Ks) -> lists:usort(Ks) =:= Wanted end, KeySets);
+declared_hash({error, _}, _Wanted) ->
+    false.
 
 %% Keep only DCB-stream events from a read result, propagating errors.
 dcb_filter({ok, Events}) ->
@@ -236,14 +236,15 @@ read_all_leaf_events(StoreId, Leaf) ->
     end.
 
 read_leaves(StoreId, Filters) ->
-    lists:foldl(
-        fun(_F, {error, _} = Err) -> Err;
-           (F, {ok, Acc}) ->
-               case read_all_leaf_events(StoreId, F) of
-                   {ok, Events} -> {ok, Acc ++ Events};
-                   {error, _} = Err -> Err
-               end
-        end, {ok, []}, Filters).
+    lists:foldl(fun(F, Acc) -> read_leaf_acc(StoreId, F, Acc) end, {ok, []}, Filters).
+
+read_leaf_acc(_StoreId, _F, {error, _} = Err) ->
+    Err;
+read_leaf_acc(StoreId, F, {ok, Acc}) ->
+    merge_leaf(read_all_leaf_events(StoreId, F), Acc).
+
+merge_leaf({ok, Events}, Acc) -> {ok, Acc ++ Events};
+merge_leaf({error, _} = Err, _Acc) -> Err.
 
 %% Walk a filter, returning the set (as a deduped list) of every tag
 %% it references at any depth. Retained for property tests.
