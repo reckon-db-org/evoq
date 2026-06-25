@@ -295,15 +295,6 @@ read_all_global(StoreId, Offset, BatchSize) ->
 %% Envelope fields (event_id, version, metadata, etc.) are preserved
 %% at the top level.  If a data field collides with an envelope field
 %% the envelope value wins (atom keys take precedence).
-%% @private Resolve event_type: prefer the record field, fall back to the
-%% value inside data (atom key first, then binary) when it's undefined.
-coalesce_event_type(undefined, Data) when is_map(Data) ->
-    maps:get(event_type, Data, maps:get(<<"event_type">>, Data, undefined));
-coalesce_event_type(undefined, _Data) ->
-    undefined;
-coalesce_event_type(Type, _Data) ->
-    Type.
-
 -spec event_to_map(evoq_event() | map()) -> map().
 event_to_map(#evoq_event{} = Event) ->
     %% Resolve event_type: prefer the record field, but fall back to the
@@ -333,3 +324,12 @@ event_to_map(#evoq_event{} = Event) ->
     end;
 event_to_map(EventMap) when is_map(EventMap) ->
     EventMap.
+
+%% @private Resolve event_type: prefer the record field, fall back to the
+%% value inside data (atom key first, then binary) when it's undefined.
+coalesce_event_type(undefined, Data) when is_map(Data) ->
+    maps:get(event_type, Data, maps:get(<<"event_type">>, Data, undefined));
+coalesce_event_type(undefined, _Data) ->
+    undefined;
+coalesce_event_type(Type, _Data) ->
+    Type.
