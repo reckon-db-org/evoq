@@ -167,29 +167,36 @@ catch_up_loop(StoreId, Offset, BatchSize, Seq) ->
             Seq;
         {ok, Events} ->
             %% Log event types and handler status for diagnostics
-            lists:foreach(fun(E) ->
-                ET = case E of
-                    #evoq_event{event_type = T} -> T;
-                    _ -> unknown
-                end,
-                Handlers = evoq_event_type_registry:get_handlers(ET),
-                logger:info("[evoq] Catch-up ~s: event_type=~p handlers=~b",
-                            [StoreId, ET, length(Handlers)])
-            end, Events),
+            log_catch_up_events(StoreId, Events),
             Seq1 = route_events_with_seq(Events, Seq),
             logger:info("[evoq] Catch-up ~s: routed ~b events (seq ~b -> ~b)",
                         [StoreId, length(Events), Seq, Seq1]),
-            case length(Events) < BatchSize of
-                true ->
-                    Seq1;
-                false ->
-                    catch_up_loop(StoreId, Offset + length(Events), BatchSize, Seq1)
-            end;
+            continue_catch_up(length(Events) < BatchSize,
+                              StoreId, Offset, Events, BatchSize, Seq1);
         {error, Reason} ->
             logger:warning("[evoq] Catch-up failed for ~s at offset ~b: ~p",
                            [StoreId, Offset, Reason]),
             Seq
     end.
+
+%% @private
+log_catch_up_events(StoreId, Events) ->
+    lists:foreach(fun(E) -> log_catch_up_event(StoreId, E) end, Events).
+
+log_catch_up_event(StoreId, E) ->
+    ET = event_type_or_unknown(E),
+    Handlers = evoq_event_type_registry:get_handlers(ET),
+    logger:info("[evoq] Catch-up ~s: event_type=~p handlers=~b",
+                [StoreId, ET, length(Handlers)]).
+
+event_type_or_unknown(#evoq_event{event_type = T}) -> T;
+event_type_or_unknown(_) -> unknown.
+
+%% @private Recurse for another batch unless this was the last one.
+continue_catch_up(true, _StoreId, _Offset, _Events, _BatchSize, Seq1) ->
+    Seq1;
+continue_catch_up(false, StoreId, Offset, Events, BatchSize, Seq1) ->
+    catch_up_loop(StoreId, Offset + length(Events), BatchSize, Seq1).
 
 %% @private Subscribe to the $all stream on the store.
 %% Uses by_stream subscription type with <<"$all">> selector,

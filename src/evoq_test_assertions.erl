@@ -108,14 +108,12 @@ assert_events_produced(ExpectedTypes, Events) ->
 %% @doc Assert that a specific event type was produced.
 -spec assert_event_produced(binary(), [map()]) -> map().
 assert_event_produced(EventType, Events) ->
-    case lists:filter(fun(E) ->
-        maps:get(event_type, E, undefined) =:= EventType
-    end, Events) of
-        [Event | _] ->
-            Event;
-        [] ->
-            error({event_not_produced, EventType, Events})
-    end.
+    Matching = lists:filter(
+                 fun(E) -> maps:get(event_type, E, undefined) =:= EventType end, Events),
+    first_produced(Matching, EventType, Events).
+
+first_produced([Event | _], _EventType, _Events) -> Event;
+first_produced([], EventType, Events) -> error({event_not_produced, EventType, Events}).
 
 %% @doc Assert that no events were produced.
 -spec assert_no_events_produced([map()]) -> ok.
@@ -131,17 +129,15 @@ assert_no_events_produced(Events) ->
 %% @doc Assert aggregate state matches expected.
 -spec assert_aggregate_state(atom(), binary(), fun((term()) -> boolean())) -> ok.
 assert_aggregate_state(AggregateType, AggregateId, Predicate) ->
-    case get_aggregate_state(AggregateType, AggregateId) of
-        {ok, State} ->
-            case Predicate(State) of
-                true ->
-                    ok;
-                false ->
-                    error({state_predicate_failed, State})
-            end;
-        {error, Reason} ->
-            error({could_not_get_state, Reason})
-    end.
+    check_aggregate_state(get_aggregate_state(AggregateType, AggregateId), Predicate).
+
+check_aggregate_state({ok, State}, Predicate) ->
+    assert_predicate(Predicate(State), State);
+check_aggregate_state({error, Reason}, _Predicate) ->
+    error({could_not_get_state, Reason}).
+
+assert_predicate(true, _State) -> ok;
+assert_predicate(false, State) -> error({state_predicate_failed, State}).
 
 %% @doc Get aggregate state for testing.
 -spec get_aggregate_state(atom(), binary()) -> {ok, term()} | {error, term()}.
@@ -201,15 +197,16 @@ assert_commands_dispatched(ExpectedTypes, DispatchedCommands) ->
 %% @doc Assert compensation was triggered.
 -spec assert_compensation_triggered(atom(), [#evoq_command{}]) -> ok.
 assert_compensation_triggered(ExpectedType, CompensatingCommands) ->
-    case lists:any(fun(C) ->
-        C#evoq_command.command_type =:= ExpectedType
-    end, CompensatingCommands) of
-        true ->
-            ok;
-        false ->
-            Types = [C#evoq_command.command_type || C <- CompensatingCommands],
-            error({compensation_not_found, ExpectedType, got, Types})
-    end.
+    Found = lists:any(
+              fun(C) -> C#evoq_command.command_type =:= ExpectedType end,
+              CompensatingCommands),
+    assert_compensation(Found, ExpectedType, CompensatingCommands).
+
+assert_compensation(true, _ExpectedType, _Cmds) ->
+    ok;
+assert_compensation(false, ExpectedType, Cmds) ->
+    Types = [C#evoq_command.command_type || C <- Cmds],
+    error({compensation_not_found, ExpectedType, got, Types}).
 
 %%====================================================================
 %% Telemetry Assertions
@@ -241,14 +238,13 @@ collect_telemetry(EventName, Fun) ->
 %% @doc Assert that a telemetry event was emitted.
 -spec assert_telemetry_emitted([atom()], [map()]) -> ok.
 assert_telemetry_emitted(EventName, CollectedEvents) ->
-    case lists:any(fun(#{name := Name}) ->
-        Name =:= EventName
-    end, CollectedEvents) of
-        true ->
-            ok;
-        false ->
-            error({telemetry_not_emitted, EventName, CollectedEvents})
-    end.
+    Found = lists:any(fun(#{name := Name}) -> Name =:= EventName end, CollectedEvents),
+    assert_emitted(Found, EventName, CollectedEvents).
+
+assert_emitted(true, _EventName, _Collected) ->
+    ok;
+assert_emitted(false, EventName, Collected) ->
+    error({telemetry_not_emitted, EventName, Collected}).
 
 %%====================================================================
 %% Internal functions
