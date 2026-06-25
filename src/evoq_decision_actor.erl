@@ -126,28 +126,30 @@ terminate(_Reason, #st{module = Module, key = Key}) ->
 decide_loop(_Command, State, 0) ->
     {{error, retry_budget_exhausted}, State};
 decide_loop(Command, State, Retries) ->
-    #st{module = Mod, store_id = StoreId, model = Model, cutoff = Cutoff} = State,
+    #st{module = Mod, model = Model} = State,
+    decide_result(Mod:decide(Model, Command), Command, State, Retries).
+
+decide_result({error, _} = DecideError, _Command, State, _Retries) ->
+    {DecideError, State};
+decide_result({ok, Events}, Command, State, Retries) when is_list(Events) ->
+    #st{module = Mod, store_id = StoreId, cutoff = Cutoff} = State,
     Filter = Mod:context(Command),
-    case Mod:decide(Model, Command) of
-        {error, _} = DecideError ->
-            {DecideError, State};
-        {ok, Events} when is_list(Events) ->
-            case evoq_event_store:append_if_no_tag_matches(
-                   StoreId, Filter, Cutoff, Events) of
-                {ok, LastSeq} ->
-                    {{ok, Events}, absorb(State, Events, LastSeq)};
-                {error, {context_changed, _}} ->
-                    %% Cache went stale: re-read context, refresh model +
-                    %% cutoff, re-decide (the decision may now differ or
-                    %% become an error), bounded by retry budget.
-                    case reload(Command, State) of
-                        {ok, State2} -> decide_loop(Command, State2, Retries - 1);
-                        {error, _} = ReloadError -> {ReloadError, State}
-                    end;
-                {error, _} = BackendError ->
-                    {BackendError, State}
-            end
-    end.
+    Append = evoq_event_store:append_if_no_tag_matches(StoreId, Filter, Cutoff, Events),
+    append_result(Append, Command, State, Retries, Events).
+
+append_result({ok, LastSeq}, _Command, State, _Retries, Events) ->
+    {{ok, Events}, absorb(State, Events, LastSeq)};
+append_result({error, {context_changed, _}}, Command, State, Retries, _Events) ->
+    %% Cache went stale: re-read context, refresh model + cutoff, re-decide
+    %% (the decision may now differ or become an error), bounded by budget.
+    reload_result(reload(Command, State), Command, State, Retries);
+append_result({error, _} = BackendError, _Command, State, _Retries, _Events) ->
+    {BackendError, State}.
+
+reload_result({ok, State2}, Command, _State, Retries) ->
+    decide_loop(Command, State2, Retries - 1);
+reload_result({error, _} = ReloadError, _Command, State, _Retries) ->
+    {ReloadError, State}.
 
 %% Fold just-appended events into the cache and advance the cutoff to the
 %% store's reported high-water — no re-read.
