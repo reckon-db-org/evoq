@@ -67,26 +67,29 @@ execute_compensation(PMPid, FailedCommand, Opts) ->
 %% Returns commands in reverse order (last executed = first compensated).
 -spec build_compensation_chain(atom(), term()) -> [#evoq_command{}].
 build_compensation_chain(PMModule, PMState) ->
-    case get_executed_commands(PMState) of
-        [] ->
-            [];
-        ExecutedCommands ->
-            %% Reverse order for compensation
-            ReversedCommands = lists:reverse(ExecutedCommands),
+    compensate_all(get_executed_commands(PMState), PMModule, PMState).
 
-            %% Generate compensation for each
-            lists:filtermap(fun(Cmd) ->
-                case erlang:function_exported(PMModule, compensate, 2) of
-                    true ->
-                        case PMModule:compensate(PMState, Cmd) of
-                            {ok, CompCmds} -> {true, CompCmds};
-                            skip -> false
-                        end;
-                    false ->
-                        false
-                end
-            end, ReversedCommands)
-    end.
+%% @private
+compensate_all([], _PMModule, _PMState) ->
+    [];
+compensate_all(ExecutedCommands, PMModule, PMState) ->
+    %% Reverse order: last executed = first compensated.
+    ReversedCommands = lists:reverse(ExecutedCommands),
+    lists:filtermap(fun(Cmd) -> compensation_for(PMModule, PMState, Cmd) end,
+                    ReversedCommands).
+
+%% @private
+compensation_for(PMModule, PMState, Cmd) ->
+    compensate_cmd(erlang:function_exported(PMModule, compensate, 2),
+                   PMModule, PMState, Cmd).
+
+compensate_cmd(true, PMModule, PMState, Cmd) ->
+    comp_result(PMModule:compensate(PMState, Cmd));
+compensate_cmd(false, _PMModule, _PMState, _Cmd) ->
+    false.
+
+comp_result({ok, CompCmds}) -> {true, CompCmds};
+comp_result(skip) -> false.
 
 %% @doc Record an executed command in the saga state.
 %% Used for tracking commands for compensation.
@@ -111,19 +114,19 @@ get_executed_commands(_State) ->
 %% @private
 dispatch_compensations(Commands, Opts) ->
     Timeout = maps:get(timeout, Opts, 5000),
+    lists:map(fun(Command) -> dispatch_compensation(Command, Timeout) end, Commands).
 
-    lists:map(fun(Command) ->
-        %% Emit compensation telemetry
-        telemetry:execute(?TELEMETRY_PM_COMPENSATE, #{}, #{
-            command_type => Command#evoq_command.command_type
-        }),
+%% @private
+dispatch_compensation(Command, Timeout) ->
+    %% Emit compensation telemetry
+    telemetry:execute(?TELEMETRY_PM_COMPENSATE, #{}, #{
+        command_type => Command#evoq_command.command_type
+    }),
+    %% Dispatch with timeout
+    comp_dispatch_result(evoq_router:dispatch(Command, #{timeout => Timeout})).
 
-        %% Dispatch with timeout
-        case evoq_router:dispatch(Command, #{timeout => Timeout}) of
-            {ok, Version, Events} ->
-                {ok, Version, Events};
-            {error, Reason} ->
-                logger:error("Compensation command failed: ~p", [Reason]),
-                {error, Reason}
-        end
-    end, Commands).
+comp_dispatch_result({ok, Version, Events}) ->
+    {ok, Version, Events};
+comp_dispatch_result({error, Reason}) ->
+    logger:error("Compensation command failed: ~p", [Reason]),
+    {error, Reason}.
