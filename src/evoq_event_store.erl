@@ -186,14 +186,15 @@ exists(StoreId, StreamId) ->
 -spec has_events(atom()) -> boolean().
 has_events(StoreId) ->
     Adapter = get_adapter(),
-    case erlang:function_exported(Adapter, has_events, 1) of
-        true -> Adapter:has_events(StoreId);
-        false ->
-            case read_all_global(StoreId, 0, 1) of
-                {ok, [_ | _]} -> true;
-                _ -> false
-            end
-    end.
+    has_events(erlang:function_exported(Adapter, has_events, 1), Adapter, StoreId).
+
+has_events(true, Adapter, StoreId) ->
+    Adapter:has_events(StoreId);
+has_events(false, _Adapter, StoreId) ->
+    has_any_event(read_all_global(StoreId, 0, 1)).
+
+has_any_event({ok, [_ | _]}) -> true;
+has_any_event(_) -> false.
 
 %% @doc List all streams in the store.
 -spec list_streams(atom()) -> {ok, [binary()]} | {error, term()}.
@@ -222,27 +223,30 @@ read_all(StoreId, StreamId, _BatchSize, Direction) ->
 %% This is useful for projection rebuild.
 -spec read_all_events(atom(), pos_integer()) -> {ok, [map()]} | {error, term()}.
 read_all_events(StoreId, BatchSize) ->
-    case list_streams(StoreId) of
-        {ok, StreamIds} ->
-            AllEvents = lists:flatmap(fun(StreamId) ->
-                case read_all(StoreId, StreamId, BatchSize, forward) of
-                    {ok, Events} ->
-                        %% Add stream_id to metadata for each event
-                        [E#{stream_id => StreamId} || E <- Events];
-                    {error, _} ->
-                        []
-                end
-            end, StreamIds),
-            %% Sort by global position if available, or version
-            SortedEvents = lists:sort(fun(E1, E2) ->
-                P1 = maps:get(global_position, E1, maps:get(version, E1, 0)),
-                P2 = maps:get(global_position, E2, maps:get(version, E2, 0)),
-                P1 =< P2
-            end, AllEvents),
-            {ok, SortedEvents};
-        {error, Reason} ->
-            {error, Reason}
-    end.
+    read_all_events(list_streams(StoreId), StoreId, BatchSize).
+
+read_all_events({ok, StreamIds}, StoreId, BatchSize) ->
+    AllEvents = lists:flatmap(fun(Sid) -> stream_events(StoreId, BatchSize, Sid) end,
+                             StreamIds),
+    %% Sort by global position if available, or version
+    {ok, lists:sort(fun by_global_position/2, AllEvents)};
+read_all_events({error, Reason}, _StoreId, _BatchSize) ->
+    {error, Reason}.
+
+%% @private Read one stream's events, tagging each with its stream_id.
+stream_events(StoreId, BatchSize, StreamId) ->
+    tag_stream(read_all(StoreId, StreamId, BatchSize, forward), StreamId).
+
+tag_stream({ok, Events}, StreamId) ->
+    [E#{stream_id => StreamId} || E <- Events];
+tag_stream({error, _}, _StreamId) ->
+    [].
+
+by_global_position(E1, E2) ->
+    global_pos(E1) =< global_pos(E2).
+
+global_pos(E) ->
+    maps:get(global_position, E, maps:get(version, E, 0)).
 
 %% @doc Read all events of specific types from all streams.
 %%
@@ -291,25 +295,24 @@ read_all_global(StoreId, Offset, BatchSize) ->
 %% Envelope fields (event_id, version, metadata, etc.) are preserved
 %% at the top level.  If a data field collides with an envelope field
 %% the envelope value wins (atom keys take precedence).
+%% @private Resolve event_type: prefer the record field, fall back to the
+%% value inside data (atom key first, then binary) when it's undefined.
+coalesce_event_type(undefined, Data) when is_map(Data) ->
+    event_type_from_data(maps:find(event_type, Data), Data);
+coalesce_event_type(undefined, _Data) ->
+    undefined;
+coalesce_event_type(Type, _Data) ->
+    Type.
+
+event_type_from_data({ok, T}, _Data) -> T;
+event_type_from_data(error, Data) -> maps:get(<<"event_type">>, Data, undefined).
+
 -spec event_to_map(evoq_event() | map()) -> map().
 event_to_map(#evoq_event{} = Event) ->
     %% Resolve event_type: prefer the record field, but fall back to the
     %% value inside data when the record field is undefined (happens when
     %% the event was stored with binary keys that the adapter didn't extract).
-    RawType = Event#evoq_event.event_type,
-    EventType = case RawType of
-        undefined ->
-            Data0 = Event#evoq_event.data,
-            case is_map(Data0) of
-                true ->
-                    case maps:find(event_type, Data0) of
-                        {ok, T} -> T;
-                        error -> maps:get(<<"event_type">>, Data0, undefined)
-                    end;
-                false -> undefined
-            end;
-        T -> T
-    end,
+    EventType = coalesce_event_type(Event#evoq_event.event_type, Event#evoq_event.data),
     Envelope = #{
         event_id => Event#evoq_event.event_id,
         event_type => EventType,
