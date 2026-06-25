@@ -56,15 +56,8 @@ compensate(Pid, FailedCommand) ->
 %% @private
 init({PMModule, ProcessId, _Config}) ->
     %% Initialize PM state
-    PMState = case erlang:function_exported(PMModule, init, 1) of
-        true ->
-            case PMModule:init(ProcessId) of
-                {ok, S} -> S;
-                _ -> #{}
-            end;
-        false ->
-            #{}
-    end,
+    PMState = init_pm_state(erlang:function_exported(PMModule, init, 1),
+                            PMModule, ProcessId),
 
     %% Register with PM router
     EventTypes = PMModule:interested_in(),
@@ -165,27 +158,35 @@ handle_event_internal(Event, Metadata, #evoq_pm_state{
             {error, Reason}
     end.
 
+%% @private Initialise PM state from the optional init/1 callback.
+init_pm_state(true, PMModule, ProcessId) ->
+    pm_init_result(PMModule:init(ProcessId));
+init_pm_state(false, _PMModule, _ProcessId) ->
+    #{}.
+
+pm_init_result({ok, S}) -> S;
+pm_init_result(_) -> #{}.
+
 %% @private
 dispatch_commands(Commands, #evoq_pm_state{pm_module = PMModule, process_id = ProcessId}) ->
-    lists:map(fun(Command) ->
-        %% Emit command telemetry
-        telemetry:execute(?TELEMETRY_PM_COMMAND, #{}, #{
-            pm_module => PMModule,
-            process_id => ProcessId,
-            command_type => Command#evoq_command.command_type
-        }),
+    lists:map(fun(Command) -> dispatch_pm_command(Command, PMModule, ProcessId) end,
+              Commands).
 
-        %% Dispatch via router
-        case evoq_router:dispatch(Command) of
-            {ok, Version, Events} ->
-                {ok, Version, Events};
-            {error, Reason} ->
-                %% Command failed - might need compensation
-                logger:warning("PM ~p:~p command failed: ~p",
-                    [PMModule, ProcessId, Reason]),
-                {error, Reason}
-        end
-    end, Commands).
+dispatch_pm_command(Command, PMModule, ProcessId) ->
+    %% Emit command telemetry
+    telemetry:execute(?TELEMETRY_PM_COMMAND, #{}, #{
+        pm_module => PMModule,
+        process_id => ProcessId,
+        command_type => Command#evoq_command.command_type
+    }),
+    pm_dispatch_result(evoq_router:dispatch(Command), PMModule, ProcessId).
+
+pm_dispatch_result({ok, Version, Events}, _PMModule, _ProcessId) ->
+    {ok, Version, Events};
+pm_dispatch_result({error, Reason}, PMModule, ProcessId) ->
+    %% Command failed - might need compensation
+    logger:warning("PM ~p:~p command failed: ~p", [PMModule, ProcessId, Reason]),
+    {error, Reason}.
 
 %% @private
 handle_compensation(FailedCommand, #evoq_pm_state{
@@ -193,21 +194,21 @@ handle_compensation(FailedCommand, #evoq_pm_state{
     process_id = ProcessId,
     state = PMState
 }) ->
-    case erlang:function_exported(PMModule, compensate, 2) of
-        true ->
-            case PMModule:compensate(PMState, FailedCommand) of
-                {ok, CompensatingCommands} ->
-                    %% Emit compensation telemetry
-                    telemetry:execute(?TELEMETRY_PM_COMPENSATE, #{
-                        command_count => length(CompensatingCommands)
-                    }, #{
-                        pm_module => PMModule,
-                        process_id => ProcessId
-                    }),
-                    {ok, CompensatingCommands};
-                skip ->
-                    skip
-            end;
-        false ->
-            skip
-    end.
+    compensate_if_exported(erlang:function_exported(PMModule, compensate, 2),
+                           PMModule, ProcessId, PMState, FailedCommand).
+
+compensate_if_exported(true, PMModule, ProcessId, PMState, FailedCommand) ->
+    compensation_result(PMModule:compensate(PMState, FailedCommand), PMModule, ProcessId);
+compensate_if_exported(false, _PMModule, _ProcessId, _PMState, _FailedCommand) ->
+    skip.
+
+compensation_result({ok, CompensatingCommands}, PMModule, ProcessId) ->
+    telemetry:execute(?TELEMETRY_PM_COMPENSATE, #{
+        command_count => length(CompensatingCommands)
+    }, #{
+        pm_module => PMModule,
+        process_id => ProcessId
+    }),
+    {ok, CompensatingCommands};
+compensation_result(skip, _PMModule, _ProcessId) ->
+    skip.

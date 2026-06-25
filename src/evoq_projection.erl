@@ -162,9 +162,7 @@ init({ProjectionModule, Config, Opts}) ->
             Checkpoint = load_checkpoint(ProjectionModule, CheckpointStore),
 
             %% Register with event type registry
-            lists:foreach(fun(EventType) ->
-                evoq_event_type_registry:register(EventType, self())
-            end, EventTypes),
+            lists:foreach(fun register_self/1, EventTypes),
 
             %% Emit start telemetry
             telemetry:execute(?TELEMETRY_PROJECTION_START, #{}, #{
@@ -331,23 +329,25 @@ do_project(EventType, Event, Metadata, EventVersion,
             }),
 
             %% Check for error callback
-            case erlang:function_exported(ProjectionModule, on_error, 4) of
-                true ->
-                    FailureContext = #evoq_failure_context{
-                        handler_module = ProjectionModule,
-                        event = Event,
-                        error = Reason,
-                        attempt_number = 1,
-                        first_failure_at = erlang:system_time(millisecond),
-                        last_failure_at = erlang:system_time(millisecond),
-                        stacktrace = []
-                    },
-                    _Action = ProjectionModule:on_error(Reason, Event, FailureContext, ProjectionState),
-                    Error;
-                false ->
-                    Error
-            end
+            notify_on_error(erlang:function_exported(ProjectionModule, on_error, 4),
+                            ProjectionModule, Event, Reason, ProjectionState, Error)
     end.
+
+%% @private Invoke the projection's on_error/4 callback when present.
+notify_on_error(true, ProjectionModule, Event, Reason, ProjectionState, Error) ->
+    FailureContext = #evoq_failure_context{
+        handler_module = ProjectionModule,
+        event = Event,
+        error = Reason,
+        attempt_number = 1,
+        first_failure_at = erlang:system_time(millisecond),
+        last_failure_at = erlang:system_time(millisecond),
+        stacktrace = []
+    },
+    _Action = ProjectionModule:on_error(Reason, Event, FailureContext, ProjectionState),
+    Error;
+notify_on_error(false, _ProjectionModule, _Event, _Reason, _ProjectionState, Error) ->
+    Error.
 
 %% @private
 do_rebuild(#state{
@@ -451,15 +451,20 @@ replay_events_list([Event | Rest], State) ->
 load_checkpoint(_ProjectionModule, undefined) ->
     -1;
 load_checkpoint(ProjectionModule, CheckpointStore) ->
-    case erlang:function_exported(CheckpointStore, load, 1) of
-        true ->
-            case CheckpointStore:load(ProjectionModule) of
-                {ok, Checkpoint} -> Checkpoint;
-                {error, _} -> 0
-            end;
-        false ->
-            0
-    end.
+    load_checkpoint(erlang:function_exported(CheckpointStore, load, 1),
+                    ProjectionModule, CheckpointStore).
+
+load_checkpoint(true, ProjectionModule, CheckpointStore) ->
+    checkpoint_value(CheckpointStore:load(ProjectionModule));
+load_checkpoint(false, _ProjectionModule, _CheckpointStore) ->
+    0.
+
+checkpoint_value({ok, Checkpoint}) -> Checkpoint;
+checkpoint_value({error, _}) -> 0.
+
+%% @private
+register_self(EventType) ->
+    evoq_event_type_registry:register(EventType, self()).
 
 %% @private
 save_checkpoint(_ProjectionModule, undefined, _Position) ->
