@@ -33,7 +33,7 @@ dispatch(Command, Opts) ->
     %% Validate the command first
     case evoq_command:validate(Command) of
         ok ->
-            evoq_dispatcher:dispatch(Command, Opts);
+            evoq_command_router:dispatch(Command, Opts);
         {error, _Reason} = Error ->
             Error
     end.

@@ -6,7 +6,7 @@
 %% - idempotency_key deduplicates across different command_ids
 %% - No idempotency_key → auto-generated command_ids are unique → no collision
 %% - Cache key selection: idempotency_key takes precedence over command_id
--module(evoq_dispatcher_tests).
+-module(evoq_command_router_tests).
 
 -include_lib("eunit/include/eunit.hrl").
 -include("evoq.hrl").

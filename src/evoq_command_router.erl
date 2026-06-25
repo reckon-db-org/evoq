@@ -15,7 +15,7 @@
 %% 8. Cache result for idempotency
 %%
 %% @author rgfaber
--module(evoq_dispatcher).
+-module(evoq_command_router).
 
 -include("evoq.hrl").
 -include("evoq_telemetry.hrl").
@@ -178,10 +178,7 @@ execute_on_aggregate_with_state(Pipeline, Pid, Middleware, StartTime, Context) -
             Pipeline5 = evoq_middleware:chain(Pipeline4, after_dispatch, Middleware),
 
             ConsistencyResult = handle_consistency(Pipeline5, Context),
-            FinalResult = case ConsistencyResult of
-                {ok, V, E} -> {ok, V, E, AggState};
-                Other -> Other
-            end,
+            FinalResult = with_agg_state(ConsistencyResult, AggState),
             emit_stop_telemetry(StartTime, Command, ConsistencyResult),
             FinalResult;
 
@@ -191,6 +188,10 @@ execute_on_aggregate_with_state(Pipeline, Pid, Middleware, StartTime, Context) -
         {error, _Reason} = Error ->
             handle_failure(Pipeline, Error, Middleware, StartTime)
     end.
+
+%% @private Carry the post-command aggregate state into a successful result.
+with_agg_state({ok, V, E}, AggState) -> {ok, V, E, AggState};
+with_agg_state(Other, _AggState) -> Other.
 
 %% @private
 run_before_dispatch(Pipeline, Middleware) ->
@@ -249,16 +250,19 @@ maybe_retry(Pipeline, Error, Middleware, StartTime, Context) ->
             AggregateId = Command#evoq_command.aggregate_id,
             StoreId = NewContext#evoq_execution_context.store_id,
 
-            case evoq_aggregate_registry:get_or_start(AggregateType, AggregateId, StoreId) of
-                {ok, Pid} ->
-                    execute_on_aggregate(NewPipeline, Pid, Middleware, StartTime, NewContext);
-                {error, Reason} ->
-                    handle_failure(Pipeline, {error, Reason}, Middleware, StartTime)
-            end;
+            retry_on_aggregate(
+                evoq_aggregate_registry:get_or_start(AggregateType, AggregateId, StoreId),
+                NewPipeline, Pipeline, Middleware, StartTime, NewContext);
 
         {error, too_many_attempts} ->
             handle_failure(Pipeline, Error, Middleware, StartTime)
     end.
+
+%% @private
+retry_on_aggregate({ok, Pid}, NewPipeline, _Pipeline, Middleware, StartTime, NewContext) ->
+    execute_on_aggregate(NewPipeline, Pid, Middleware, StartTime, NewContext);
+retry_on_aggregate({error, Reason}, _NewPipeline, Pipeline, Middleware, StartTime, _NewContext) ->
+    handle_failure(Pipeline, {error, Reason}, Middleware, StartTime).
 
 %% @private
 handle_failure(Pipeline, Error, Middleware, StartTime) ->
@@ -292,19 +296,20 @@ handle_consistency(Pipeline, Context) ->
             Response;
         {strong, {ok, Version, _Events}} ->
             AggregateId = Context#evoq_execution_context.aggregate_id,
-            case evoq_consistency:wait_for(StoreId, AggregateId, Version, #{}) of
-                ok -> Response;
-                {error, timeout} -> {error, consistency_timeout}
-            end;
+            consistency_outcome(
+                evoq_consistency:wait_for(StoreId, AggregateId, Version, #{}), Response);
         {{handlers, Handlers}, {ok, Version, _Events}} ->
             AggregateId = Context#evoq_execution_context.aggregate_id,
-            case evoq_consistency:wait_for(StoreId, AggregateId, Version, #{handlers => Handlers}) of
-                ok -> Response;
-                {error, timeout} -> {error, consistency_timeout}
-            end;
+            consistency_outcome(
+                evoq_consistency:wait_for(StoreId, AggregateId, Version, #{handlers => Handlers}),
+                Response);
         _ ->
             Response
     end.
+
+%% @private Map a consistency wait outcome onto the response.
+consistency_outcome(ok, Response) -> Response;
+consistency_outcome({error, timeout}, _Response) -> {error, consistency_timeout}.
 
 %% @private
 emit_stop_telemetry(StartTime, Command, Response) ->
