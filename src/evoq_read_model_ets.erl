@@ -43,14 +43,15 @@ init(Config) ->
             {ok, #state{table = Table}};
         Name when is_atom(Name) ->
             %% Named table — shared across projections
-            Table = case ets:whereis(Name) of
-                undefined ->
-                    ets:new(Name, [Type, Access, named_table, {read_concurrency, true}]);
-                Tid ->
-                    Tid
-            end,
+            Table = ensure_named_table(ets:whereis(Name), Name, Type, Access),
             {ok, #state{table = Table}}
     end.
+
+%% @private Reuse an existing named table or create it.
+ensure_named_table(undefined, Name, Type, Access) ->
+    ets:new(Name, [Type, Access, named_table, {read_concurrency, true}]);
+ensure_named_table(Tid, _Name, _Type, _Access) ->
+    Tid.
 
 %% @doc Get a value by key.
 -spec get(term(), #state{}) -> {ok, term()} | {error, not_found}.

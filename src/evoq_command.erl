@@ -90,15 +90,16 @@ validate_required_fields(_Command) ->
 %% @private
 validate_with_module(#evoq_command{command_type = CommandType, payload = Payload}) ->
     %% Try to find a command module with validate/1
-    case code:ensure_loaded(CommandType) of
-        {module, CommandType} ->
-            case erlang:function_exported(CommandType, validate, 1) of
-                true -> CommandType:validate(Payload);
-                false -> ok
-            end;
-        _ ->
-            ok
-    end.
+    validate_loaded(code:ensure_loaded(CommandType), CommandType, Payload).
+
+validate_loaded({module, CommandType}, CommandType, Payload) ->
+    validate_exported(erlang:function_exported(CommandType, validate, 1),
+                      CommandType, Payload);
+validate_loaded(_, _CommandType, _Payload) ->
+    ok.
+
+validate_exported(true, CommandType, Payload) -> CommandType:validate(Payload);
+validate_exported(false, _CommandType, _Payload) -> ok.
 
 %% @doc Get the command ID.
 -spec get_id(#evoq_command{}) -> binary().

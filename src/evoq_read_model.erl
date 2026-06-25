@@ -112,17 +112,17 @@ list(Prefix, #read_model{module = Module, state = State}) ->
 %% @doc Clear all data from the read model.
 -spec clear(read_model()) -> {ok, read_model()} | {error, term()}.
 clear(#read_model{module = Module, state = State} = RM) ->
-    case erlang:function_exported(Module, clear, 1) of
-        true ->
-            case Module:clear(State) of
-                {ok, NewState} ->
-                    {ok, RM#read_model{state = NewState, checkpoint = 0}};
-                {error, Reason} ->
-                    {error, Reason}
-            end;
-        false ->
-            {error, not_implemented}
-    end.
+    clear_dispatch(erlang:function_exported(Module, clear, 1), Module, State, RM).
+
+clear_dispatch(true, Module, State, RM) ->
+    clear_result(Module:clear(State), RM);
+clear_dispatch(false, _Module, _State, _RM) ->
+    {error, not_implemented}.
+
+clear_result({ok, NewState}, RM) ->
+    {ok, RM#read_model{state = NewState, checkpoint = 0}};
+clear_result({error, Reason}, _RM) ->
+    {error, Reason}.
 
 %% @doc Get the current checkpoint position.
 -spec get_checkpoint(read_model()) -> non_neg_integer().

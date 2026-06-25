@@ -99,17 +99,17 @@ wait_loop(_WaiterKey, [], _Acked, _Timeout) ->
 
 wait_loop(WaiterKey, Required, Acked, Timeout) ->
     %% Check if all required handlers have acked
-    case all_acked(Required, Acked) of
-        true ->
-            ok;
-        false ->
-            receive
-                {handler_ack, HandlerModule, _StoreId, _AggregateId, _Version} ->
-                    NewAcked = Acked#{HandlerModule => true},
-                    wait_loop(WaiterKey, Required, NewAcked, Timeout)
-            after Timeout ->
-                {error, timeout}
-            end
+    wait_acked(all_acked(Required, Acked), WaiterKey, Required, Acked, Timeout).
+
+wait_acked(true, _WaiterKey, _Required, _Acked, _Timeout) ->
+    ok;
+wait_acked(false, WaiterKey, Required, Acked, Timeout) ->
+    receive
+        {handler_ack, HandlerModule, _StoreId, _AggregateId, _Version} ->
+            NewAcked = Acked#{HandlerModule => true},
+            wait_loop(WaiterKey, Required, NewAcked, Timeout)
+    after Timeout ->
+        {error, timeout}
     end.
 
 %% @private

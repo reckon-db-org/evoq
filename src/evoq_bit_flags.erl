@@ -196,17 +196,14 @@ to_list(0, FlagMap) ->
     end;
 to_list(N, FlagMap) when N > 0 ->
     Keys = lists:sort(maps:keys(FlagMap)),
-    Flags = lists:foldl(
-        fun(Key, Acc) ->
-            case Key > 0 andalso (N band Key) =/= 0 of
-                true -> [maps:get(Key, FlagMap) | Acc];
-                false -> Acc
-            end
-        end,
-        [],
-        Keys
-    ),
+    Flags = lists:foldl(fun(Key, Acc) -> add_set_flag(N, FlagMap, Key, Acc) end,
+                        [], Keys),
     lists:reverse(Flags).
+
+add_set_flag(N, FlagMap, Key, Acc) when Key > 0, (N band Key) =/= 0 ->
+    [maps:get(Key, FlagMap) | Acc];
+add_set_flag(_N, _FlagMap, _Key, Acc) ->
+    Acc.
 
 %% @doc Returns a comma-separated string of flag descriptions.
 %%

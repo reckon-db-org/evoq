@@ -183,14 +183,17 @@ span(EventPrefix, Metadata, Fun) ->
 
 %% @private
 attach_events(HandlerIdPrefix, Events, HandlerFun) ->
-    lists:foreach(fun(Event) ->
-        HandlerId = make_handler_id(HandlerIdPrefix, Event),
-        case telemetry:attach(HandlerId, Event, HandlerFun, #{}) of
-            ok -> ok;
-            {error, already_exists} -> ok
-        end
-    end, Events),
+    lists:foreach(fun(Event) -> attach_one(HandlerIdPrefix, Event, HandlerFun) end,
+                  Events),
     ok.
+
+%% @private
+attach_one(Prefix, Event, HandlerFun) ->
+    HandlerId = make_handler_id(Prefix, Event),
+    attached(telemetry:attach(HandlerId, Event, HandlerFun, #{})).
+
+attached(ok) -> ok;
+attached({error, already_exists}) -> ok.
 
 %% @private
 make_handler_id(Prefix, Event) ->

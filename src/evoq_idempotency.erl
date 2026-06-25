@@ -82,14 +82,15 @@ check_and_store(CommandId, ExecuteFun, TTL) ->
             }),
             Result = ExecuteFun(),
             %% Only cache successful results
-            case Result of
-                {ok, _, _} -> store(CommandId, Result, TTL);
-                {ok, _} -> store(CommandId, Result, TTL);
-                ok -> store(CommandId, Result, TTL);
-                _ -> ok
-            end,
+            maybe_cache(Result, CommandId, TTL),
             Result
     end.
+
+%% @private Cache only successful results.
+maybe_cache({ok, _, _} = Result, CommandId, TTL) -> store(CommandId, Result, TTL);
+maybe_cache({ok, _} = Result, CommandId, TTL) -> store(CommandId, Result, TTL);
+maybe_cache(ok = Result, CommandId, TTL) -> store(CommandId, Result, TTL);
+maybe_cache(_Result, _CommandId, _TTL) -> ok.
 
 %%====================================================================
 %% gen_server callbacks

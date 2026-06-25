@@ -91,27 +91,27 @@ init({HandlerModule, Config, Opts}) ->
     EventTypes = HandlerModule:interested_in(),
 
     %% Initialize the handler
-    case HandlerModule:init(Config) of
-        {ok, HandlerState} ->
-            Consistency = maps:get(consistency, Opts, eventual),
+    handle_init(HandlerModule:init(Config), HandlerModule, EventTypes, Opts).
 
-            %% Register with event type registry
-            lists:foreach(fun(EventType) ->
-                evoq_event_type_registry:register(EventType, self())
-            end, EventTypes),
+%% @private
+handle_init({ok, HandlerState}, HandlerModule, EventTypes, Opts) ->
+    Consistency = maps:get(consistency, Opts, eventual),
+    %% Register with event type registry
+    lists:foreach(fun register_self/1, EventTypes),
+    State = #state{
+        handler_module = HandlerModule,
+        handler_state = HandlerState,
+        event_types = EventTypes,
+        consistency = Consistency,
+        checkpoint = 0
+    },
+    {ok, State};
+handle_init({error, Reason}, _HandlerModule, _EventTypes, _Opts) ->
+    {stop, Reason}.
 
-            State = #state{
-                handler_module = HandlerModule,
-                handler_state = HandlerState,
-                event_types = EventTypes,
-                consistency = Consistency,
-                checkpoint = 0
-            },
-            {ok, State};
-
-        {error, Reason} ->
-            {stop, Reason}
-    end.
+%% @private
+register_self(EventType) ->
+    evoq_event_type_registry:register(EventType, self()).
 
 %% @private
 handle_call(get_event_types, _From, #state{event_types = Types} = State) ->
