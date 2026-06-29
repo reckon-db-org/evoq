@@ -152,7 +152,7 @@ per-event semantics. Because each branch is pulled by its own index
 *Available in evoq 1.22.0+ (requires reckon-gater 3.7+ / reckon-db 5.3+).*
 
 Tags and types are explicit labels the producer attaches at write
-time. **CCC** (Consistency Context Conditions) lets a Decision's
+time. **CCC** (Command Context Consistency) lets a Decision's
 boundary instead query **opaque event-data fields** — values already
 inside the event payload, with no tagging ceremony. This is an
 extension *beyond* the DCB spec, made possible by reckon-db's payload

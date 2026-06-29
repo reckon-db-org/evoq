@@ -416,4 +416,4 @@ See `assets/event-envelope-diagram.svg` for a visual representation of the event
 
 - [Aggregates Guide](aggregates.md) - How aggregates produce events
 - [Projections Guide](projections.md) - How projections consume events
-- [Event Sourcing Guide](/reckon-db/guides/event_sourcing.md) - Event sourcing patterns with ReckonDB
+- [Event Sourcing Guide](https://codeberg.org/reckon-db-org/reckon-db/src/branch/main/guides/event_sourcing.md) - Event sourcing patterns with ReckonDB

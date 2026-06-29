@@ -8,7 +8,11 @@ Erlang CQRS/Event Sourcing framework built on reckon-db.
 ## Features
 
 - Aggregate lifecycle with configurable TTL and passivation
-- **Decisions** — `evoq_decision` behaviour for cross-cutting consistency boundaries (uniqueness, allocation, rate limits) via reckon-db DCB. See [guides/decisions.md](guides/decisions.md).
+- **Decisions (DCB)**: `evoq_decision` behaviour for cross-cutting consistency boundaries (uniqueness, allocation, rate limits) that lock on the absence of events matching a tag-filter rather than a single stream's version. See [guides/decisions.md](guides/decisions.md).
+- **Decision context filters**: tag, `event_type`, and compound (`and_` / `or_`) leaves; each leaf reads its own index and is refined client-side. See [guides/decisions.md](guides/decisions.md#the-evoq_decision-behaviour).
+- **CCC (Command Context Consistency)**: scope a Decision's boundary on opaque event-data fields (`payload_match` / `payload_hash_match`), not just tags, backed by reckon-db payload indexes. Fails loud when the index is undeclared. See [guides/decisions.md](guides/decisions.md#ccc-payload-conditions).
+- **Stateful decision actor**: opt-in per-node `gen_server` (`boundary_key/1`) that serialises commands and caches the folded decision model for a keyed, hot boundary (one seat, one account, one SKU), avoiding `context_changed` retry thrash. The store stays the sole correctness authority. See [guides/decisions.md](guides/decisions.md#stateful-decision-actor-opt-in).
+- **Lineage**: first-class correlation/causation/conversation API (`evoq_lineage`) over event metadata, with auto-propagation, mirroring the Enterprise Integration Patterns identifiers.
 - Per-event-type subscriptions (not per-stream)
 - Command idempotency
 - Middleware pipeline for command dispatch
@@ -25,9 +29,25 @@ Add to your `rebar.config`:
 
 ```erlang
 {deps, [
-    {evoq, "1.15.0"}
+    {evoq, "~> 1.23"}
 ]}.
 ```
+
+### Versions
+
+| Component | Version |
+|---|---|
+| `evoq` (this repo) | 1.23.0 |
+| `telemetry` (dep) | 1.3.0 |
+| Erlang/OTP | 27+ |
+
+evoq is a standalone framework: it has **no** Reckon dependencies. `telemetry`
+is its only runtime dependency. Pair it with any event store through an adapter
+(see [guides/adapters.md](guides/adapters.md)); the [reckon-evoq](https://codeberg.org/reckon-db-org/reckon-evoq)
+adapter wires it to a Reckon store. The CCC payload-condition features require a
+store and adapter that expose payload indexes (reckon-gater >= 3.7 /
+reckon-db >= 5.3 via reckon-evoq >= 2.7), and *only* for decisions that use
+payload leaves.
 
 ## Quick Start
 
@@ -395,14 +415,30 @@ Aggregates are distributed across 4 partition supervisors using consistent hashi
 
 ## Documentation
 
-Comprehensive guides are available:
+The full, grouped guide index with suggested reading orders lives in
+[guides/README.md](guides/README.md). Highlights:
 
 - [Architecture Overview](guides/architecture.md) - How the components work together
 - [Aggregates](guides/aggregates.md) - Building domain models with event sourcing
 - [Event Handlers](guides/event_handlers.md) - Reacting to events with side effects
 - [Process Managers](guides/process_managers.md) - Coordinating long-running workflows
 - [Projections](guides/projections.md) - Building optimized read models
+- [Decisions (DCB/CCC)](guides/decisions.md) - Cross-cutting consistency boundaries and the stateful decision actor
 - [Adapters](guides/adapters.md) - Integrating with different event stores
+
+## Reckon stack
+
+evoq is one library in the Reckon event-sourcing ecosystem. In dependency order (a library only knows about the ones above it):
+
+- **[reckon-proto](https://codeberg.org/reckon-db-org/reckon-proto)**: the wire-contract protobufs; source of truth for the gateway surface.
+- **[reckon-gater](https://codeberg.org/reckon-db-org/reckon-gater)**: shared types and protocols; no Reckon dependencies.
+- **[reckon-db](https://codeberg.org/reckon-db-org/reckon-db)**: BEAM-native event store. Depends on reckon_gater, khepri, ra.
+- **[reckon-nifs](https://codeberg.org/reckon-db-org/reckon-nifs)**: standalone Rust NIF helpers with pure-Erlang fallbacks.
+- **evoq (this repo)**: standalone CQRS/event-sourcing framework (aggregates, projections, process managers, middleware pipeline, decisions/DCB/CCC). No Reckon dependencies; pairs with any store via an adapter.
+- **[reckon-evoq](https://codeberg.org/reckon-db-org/reckon-evoq)**: adapter wiring evoq to a Reckon store. Depends on evoq and reckon_gater; not on reckon_db (reaches the store through the gater API).
+- **[reckon-gateway](https://codeberg.org/reckon-db-org/reckon-gateway)**: gRPC + HTTP/JSON ingress. Consumes reckon_gater; can embed reckon_db or federate remote clusters.
+- **[reckon-go](https://codeberg.org/reckon-db-org/reckon-go)**: the Go client; talks to reckon-gateway.
+- **reckon-portal**: docs and landing site ([reckon-internal/reckon-portal](https://codeberg.org/reckon-internal/reckon-portal)).
 
 ## License
 
