@@ -18,3 +18,5 @@ _checkouts/
 
 # Generated documentation
 doc/
+mix.lock
+rebar.lock
