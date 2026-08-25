@@ -1,0 +1,104 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 480">
+  <defs>
+    <marker id="arrowProj" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#4b5563"/>
+    </marker>
+    <linearGradient id="projGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" style="stop-color:#f59e0b;stop-opacity:1"/>
+      <stop offset="100%" style="stop-color:#d97706;stop-opacity:1"/>
+    </linearGradient>
+    <linearGradient id="readModelGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" style="stop-color:#06b6d4;stop-opacity:1"/>
+      <stop offset="100%" style="stop-color:#0891b2;stop-opacity:1"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Title -->
+  <text x="400" y="30" font-family="system-ui, sans-serif" font-size="20" font-weight="bold" text-anchor="middle" fill="#1f2937">Projection Flow</text>
+  <text x="400" y="50" font-family="system-ui, sans-serif" font-size="12" text-anchor="middle" fill="#6b7280">Build optimized read models from events with checkpointing</text>
+
+  <!-- Event Store -->
+  <rect x="50" y="80" width="120" height="70" rx="5" fill="#8b5cf6" stroke="#7c3aed" stroke-width="2"/>
+  <text x="110" y="110" font-family="system-ui, sans-serif" font-size="11" font-weight="bold" text-anchor="middle" fill="white">Event Store</text>
+  <text x="110" y="130" font-family="system-ui, sans-serif" font-size="8" text-anchor="middle" fill="#ddd6fe">Append-only log</text>
+
+  <!-- Events stream -->
+  <rect x="200" y="85" width="80" height="25" rx="3" fill="#dcfce7" stroke="#10b981"/>
+  <text x="240" y="103" font-family="system-ui, sans-serif" font-size="8" text-anchor="middle" fill="#166534">Event @0</text>
+
+  <rect x="290" y="85" width="80" height="25" rx="3" fill="#dcfce7" stroke="#10b981"/>
+  <text x="330" y="103" font-family="system-ui, sans-serif" font-size="8" text-anchor="middle" fill="#166534">Event @1</text>
+
+  <rect x="380" y="85" width="80" height="25" rx="3" fill="#dcfce7" stroke="#10b981"/>
+  <text x="420" y="103" font-family="system-ui, sans-serif" font-size="8" text-anchor="middle" fill="#166534">Event @2</text>
+
+  <rect x="470" y="85" width="80" height="25" rx="3" fill="#fef3c7" stroke="#f59e0b"/>
+  <text x="510" y="103" font-family="system-ui, sans-serif" font-size="8" text-anchor="middle" fill="#92400e">Event @3</text>
+
+  <text x="560" y="100" font-family="system-ui, sans-serif" font-size="16" fill="#6b7280">...</text>
+
+  <line x1="170" y1="98" x2="200" y2="98" stroke="#10b981" stroke-width="1.5" marker-end="url(#arrowProj)"/>
+
+  <!-- Checkpoint indicator -->
+  <line x1="465" y1="120" x2="465" y2="140" stroke="#f59e0b" stroke-width="2"/>
+  <rect x="430" y="140" width="70" height="20" rx="3" fill="#fef3c7" stroke="#f59e0b"/>
+  <text x="465" y="155" font-family="system-ui, sans-serif" font-size="7" text-anchor="middle" fill="#92400e">Checkpoint @2</text>
+
+  <!-- Projection -->
+  <rect x="280" y="180" width="240" height="100" rx="8" fill="url(#projGrad)"/>
+  <text x="400" y="210" font-family="system-ui, sans-serif" font-size="12" font-weight="bold" text-anchor="middle" fill="white">evoq_projection</text>
+  <text x="400" y="232" font-family="system-ui, sans-serif" font-size="9" text-anchor="middle" fill="#fef3c7">interested_in() -> [EventType]</text>
+  <text x="400" y="250" font-family="system-ui, sans-serif" font-size="9" text-anchor="middle" fill="#fef3c7">project(Event, Meta, State, RM)</text>
+  <text x="400" y="268" font-family="system-ui, sans-serif" font-size="9" text-anchor="middle" fill="#fef3c7">-> {ok, NewState, NewRM}</text>
+
+  <line x1="400" y1="130" x2="400" y2="180" stroke="#4b5563" stroke-width="2" marker-end="url(#arrowProj)"/>
+
+  <!-- Read Model Abstraction -->
+  <rect x="280" y="300" width="240" height="60" rx="5" fill="url(#readModelGrad)"/>
+  <text x="400" y="328" font-family="system-ui, sans-serif" font-size="11" font-weight="bold" text-anchor="middle" fill="white">evoq_read_model</text>
+  <text x="400" y="348" font-family="system-ui, sans-serif" font-size="8" text-anchor="middle" fill="#cffafe">get/2, put/3, delete/2, list/1</text>
+
+  <line x1="400" y1="280" x2="400" y2="300" stroke="#4b5563" stroke-width="2" marker-end="url(#arrowProj)"/>
+
+  <!-- Storage backends -->
+  <rect x="150" y="385" width="100" height="50" rx="5" fill="#e5e7eb" stroke="#6b7280"/>
+  <text x="200" y="408" font-family="system-ui, sans-serif" font-size="10" font-weight="bold" text-anchor="middle" fill="#374151">ETS</text>
+  <text x="200" y="425" font-family="system-ui, sans-serif" font-size="7" text-anchor="middle" fill="#6b7280">In-memory</text>
+
+  <rect x="275" y="385" width="100" height="50" rx="5" fill="#e5e7eb" stroke="#6b7280"/>
+  <text x="325" y="408" font-family="system-ui, sans-serif" font-size="10" font-weight="bold" text-anchor="middle" fill="#374151">PostgreSQL</text>
+  <text x="325" y="425" font-family="system-ui, sans-serif" font-size="7" text-anchor="middle" fill="#6b7280">Persistent</text>
+
+  <rect x="400" y="385" width="100" height="50" rx="5" fill="#e5e7eb" stroke="#6b7280"/>
+  <text x="450" y="408" font-family="system-ui, sans-serif" font-size="10" font-weight="bold" text-anchor="middle" fill="#374151">SQLite</text>
+  <text x="450" y="425" font-family="system-ui, sans-serif" font-size="7" text-anchor="middle" fill="#6b7280">Embedded</text>
+
+  <rect x="525" y="385" width="100" height="50" rx="5" fill="#e5e7eb" stroke="#6b7280"/>
+  <text x="575" y="408" font-family="system-ui, sans-serif" font-size="10" font-weight="bold" text-anchor="middle" fill="#374151">Custom</text>
+  <text x="575" y="425" font-family="system-ui, sans-serif" font-size="7" text-anchor="middle" fill="#6b7280">Any backend</text>
+
+  <line x1="300" y1="360" x2="200" y2="385" stroke="#6b7280" stroke-width="1.5"/>
+  <line x1="350" y1="360" x2="325" y2="385" stroke="#6b7280" stroke-width="1.5"/>
+  <line x1="450" y1="360" x2="450" y2="385" stroke="#6b7280" stroke-width="1.5"/>
+  <line x1="500" y1="360" x2="575" y2="385" stroke="#6b7280" stroke-width="1.5"/>
+
+  <!-- Query API -->
+  <rect x="620" y="300" width="130" height="60" rx="5" fill="#dbeafe" stroke="#3b82f6"/>
+  <text x="685" y="325" font-family="system-ui, sans-serif" font-size="10" font-weight="bold" text-anchor="middle" fill="#1e40af">Query API</text>
+  <text x="685" y="345" font-family="system-ui, sans-serif" font-size="8" text-anchor="middle" fill="#3b82f6">Fast reads, no joins</text>
+
+  <line x1="520" y1="330" x2="620" y2="330" stroke="#3b82f6" stroke-width="2" marker-end="url(#arrowProj)"/>
+
+  <!-- Key concepts -->
+  <rect x="600" y="85" width="170" height="100" rx="5" fill="#fef3c7" stroke="#f59e0b"/>
+  <text x="685" y="108" font-family="system-ui, sans-serif" font-size="10" font-weight="bold" text-anchor="middle" fill="#92400e">Key Concepts</text>
+  <text x="615" y="130" font-family="system-ui, sans-serif" font-size="8" fill="#78350f">Idempotent: replay safe</text>
+  <text x="615" y="148" font-family="system-ui, sans-serif" font-size="8" fill="#78350f">Checkpointed: resume</text>
+  <text x="615" y="166" font-family="system-ui, sans-serif" font-size="8" fill="#78350f">Denormalized: fast reads</text>
+
+  <!-- Rebuild note -->
+  <rect x="50" y="200" width="180" height="70" rx="5" fill="#f0fdf4" stroke="#10b981"/>
+  <text x="140" y="225" font-family="system-ui, sans-serif" font-size="10" font-weight="bold" text-anchor="middle" fill="#166534">Rebuild Capability</text>
+  <text x="140" y="245" font-family="system-ui, sans-serif" font-size="8" text-anchor="middle" fill="#166534">Delete read model</text>
+  <text x="140" y="260" font-family="system-ui, sans-serif" font-size="8" text-anchor="middle" fill="#166534">Replay all events</text>
+</svg>
