@@ -139,6 +139,36 @@ route_events_with_seq_continues_from_previous_test() ->
     drain_notifications().
 
 %%====================================================================
+%% Backfill filtering tests
+%%
+%% backfill_loop/5 itself needs a live store (evoq_event_store:
+%% read_all_global/3) that this unit suite doesn't stand up -- see
+%% test/integration/evoq_event_handler_SUITE.erl, which doesn't either;
+%% no existing evoq test boots a real store. filter_by_type/2 is the one
+%% genuinely new piece of logic that's pure, so it's what's tested here.
+%% The mechanism itself is live-verified in hecate-whiteboard against a
+%% real reckon-db store and a real umbrella boot-order race.
+%%====================================================================
+
+filter_by_type_keeps_only_matching_type_test() ->
+    A1 = make_event(<<"type_a">>, <<"s-1">>, 0),
+    B1 = make_event(<<"type_b">>, <<"s-1">>, 1),
+    A2 = make_event(<<"type_a">>, <<"s-2">>, 0),
+    ?assertEqual([A1, A2], evoq_store_subscription:filter_by_type([A1, B1, A2], <<"type_a">>)).
+
+filter_by_type_preserves_order_test() ->
+    Events = [make_event(<<"t">>, <<"s-1">>, N) || N <- lists:seq(0, 4)],
+    ?assertEqual(Events, evoq_store_subscription:filter_by_type(Events, <<"t">>)).
+
+filter_by_type_empty_when_nothing_matches_test() ->
+    Events = [make_event(<<"type_a">>, <<"s-1">>, 0)],
+    ?assertEqual([], evoq_store_subscription:filter_by_type(Events, <<"type_z">>)).
+
+filter_by_type_skips_non_evoq_event_terms_test() ->
+    A1 = make_event(<<"type_a">>, <<"s-1">>, 0),
+    ?assertEqual([A1], evoq_store_subscription:filter_by_type([A1, not_an_event, {}], <<"type_a">>)).
+
+%%====================================================================
 %% Test Helpers
 %%====================================================================
 

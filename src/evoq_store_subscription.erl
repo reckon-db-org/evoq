@@ -41,7 +41,8 @@
 -export([start_link/1, start_link/2]).
 
 %% Internal (exported for testing)
--export([evoq_event_to_routable/1, route_event/1, route_events_with_seq/2]).
+-export([evoq_event_to_routable/1, route_event/1, route_events_with_seq/2,
+         filter_by_type/2]).
 
 %% gen_server callbacks
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
@@ -115,13 +116,31 @@ init({StoreId, Opts}) ->
     }}.
 
 %% @private
-%% New event types are registered dynamically. Since we subscribe to
-%% $all, we don't need to create new subscriptions — events for this
-%% type are already being delivered. We just acknowledge and move on.
-handle_info({new_event_type, EventType}, #state{store_id = StoreId} = State) ->
-    logger:info("[evoq] New event type registered for ~s: ~s (already covered by $all)",
+%% New event types are registered dynamically, and this fires only for
+%% one that just got its FIRST handler ever (see
+%% evoq_event_type_registry:register/2's own doc) — so every handler
+%% currently registered for EventType at this moment is late, not a mix
+%% of old and new. The $all live subscription only delivers events
+%% APPENDED after it was created; it does NOT retroactively cover a type
+%% whose handler registers after the initial catch-up phase already ran
+%% and scanned past any of that type's events with zero handlers to
+%% deliver to (evoq_event_router:route_event_internal/3's routing table
+%% lookup happens at delivery time, not at scan time). Without this
+%% backfill, a handler in an OTP application that boots after whichever
+%% application owns this store's catch-up call — the normal shape for a
+%% multi-app vertical-slice umbrella, not an edge case — silently never
+%% receives ANY event appended before it registered. Confirmed live in
+%% hecate-whiteboard 2026-08-25: a restart with real history logged
+%% "Catch-up ... handlers=0" for all 13 events, then this exact
+%% "(already covered by $all)" message once its projection handlers
+%% registered ~0.8s later — the read model came back completely empty.
+handle_info({new_event_type, EventType}, #state{store_id = StoreId, seq = Seq0} = State) ->
+    logger:info("[evoq] New event type registered for ~s: ~s -- backfilling its history "
+                "(a handler registering after catch-up already ran would otherwise never "
+                "see events of this type appended before it subscribed)",
                 [StoreId, EventType]),
-    {noreply, State};
+    Seq1 = backfill_event_type(StoreId, EventType, Seq0),
+    {noreply, State#state{seq = Seq1}};
 
 handle_info({events, Events}, #state{seq = Seq0} = State) when is_list(Events) ->
     Seq1 = route_events_with_seq(Events, Seq0),
@@ -178,6 +197,52 @@ catch_up_loop(StoreId, Offset, BatchSize, Seq) ->
                            [StoreId, Offset, Reason]),
             Seq
     end.
+
+%% @private Re-scan history for ONE event type and deliver it to whichever
+%% handler(s) just registered for it (see the handle_info/2 clause above
+%% for why this exists). Filters to EventType only, so already-covered
+%% handlers for OTHER types see no redundant delivery. Continues this
+%% subscription's own running Seq counter rather than starting a fresh
+%% one, so backfilled events get version numbers appended after
+%% whatever's already been delivered instead of colliding with them —
+%% same reason catch_up_historical/1's own result seeds Seq for the live
+%% subscription that starts right after it.
+-spec backfill_event_type(atom(), binary(), non_neg_integer()) -> non_neg_integer().
+backfill_event_type(StoreId, EventType, Seq0) ->
+    BatchSize = 1000,
+    backfill_loop(StoreId, EventType, 0, BatchSize, Seq0).
+
+-spec backfill_loop(atom(), binary(), non_neg_integer(), pos_integer(), non_neg_integer()) ->
+    non_neg_integer().
+backfill_loop(StoreId, EventType, Offset, BatchSize, Seq) ->
+    case evoq_event_store:read_all_global(StoreId, Offset, BatchSize) of
+        {ok, []} ->
+            Seq;
+        {ok, Events} ->
+            Matching = filter_by_type(Events, EventType),
+            Seq1 = route_events_with_seq(Matching, Seq),
+            logger:info("[evoq] Backfill ~s/~s: matched ~b of ~b scanned (seq ~b -> ~b)",
+                        [StoreId, EventType, length(Matching), length(Events), Seq, Seq1]),
+            continue_backfill(length(Events) < BatchSize,
+                              StoreId, EventType, Offset, Events, BatchSize, Seq1);
+        {error, Reason} ->
+            logger:warning("[evoq] Backfill failed for ~s/~s at offset ~b: ~p",
+                           [StoreId, EventType, Offset, Reason]),
+            Seq
+    end.
+
+%% @private Recurse for another batch unless this was the last one.
+continue_backfill(true, _StoreId, _EventType, _Offset, _Events, _BatchSize, Seq1) ->
+    Seq1;
+continue_backfill(false, StoreId, EventType, Offset, Events, BatchSize, Seq1) ->
+    backfill_loop(StoreId, EventType, Offset + length(Events), BatchSize, Seq1).
+
+%% @doc Keep only the events matching EventType, in order. Exported for
+%% testing (pure, no store needed) -- backfill_loop/5 is the only real
+%% caller, and needs a live store to exercise past this point.
+-spec filter_by_type([evoq_event() | term()], binary()) -> [evoq_event() | term()].
+filter_by_type(Events, EventType) ->
+    [E || E <- Events, event_type_or_unknown(E) =:= EventType].
 
 %% @private
 log_catch_up_events(StoreId, Events) ->

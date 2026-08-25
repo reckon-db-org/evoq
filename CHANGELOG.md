@@ -5,6 +5,41 @@ All notable changes to evoq will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.23.1] - 2026-08-25
+
+### Fixed — a handler registering after catch-up never saw events already appended
+
+`evoq_store_subscription` replays a store's full history exactly once, at
+subscription startup (the "catch-up" phase), routing each event to whichever
+handlers are registered for its type *at that moment*. A handler for a type
+that registers **after** catch-up already ran — the normal shape for any
+multi-application/umbrella architecture where the application owning the
+store's subscription boots before the applications registering handlers for
+it, not an edge case — never received the history appended before it
+subscribed. The module already listened for `{new_event_type, EventType}`
+(fired once, when a type gets its first-ever handler) but only logged
+"already covered by `$all`" and did nothing: true for events appended *after*
+the subscription started, false for anything appended before a late
+handler's type had *any* handler at all.
+
+Confirmed live in `hecate-whiteboard` (a real 3-app CMD/PRJ/QRY umbrella)
+2026-08-25: a container restart with 13 real historical events logged
+`handlers=0` for every one during catch-up, then the exact "already covered"
+message once the PRJ app's projection handlers registered ~0.8s later — the
+read model came back completely empty on every restart from then on, even
+though the underlying event store was untouched.
+
+Fix: on `{new_event_type, EventType}`, `evoq_store_subscription` now
+backfills history for that one type internally (reusing
+`route_events_with_seq/2` on the existing running `seq` counter so no
+version collides with anything already delivered) instead of a no-op log
+line. Filtered to the newly-registered type only, so already-covered
+handlers for other types see no redundant delivery.
+
+No public API changes. `filter_by_type/2` is exported for unit testing only,
+same convention `evoq_event_to_routable/1`/`route_event/1`/
+`route_events_with_seq/2` already use in this module.
+
 ## [1.23.0] - 2026-06-25
 
 ### Added — stateful Decision/Context actor (CCC Part B)
