@@ -19,7 +19,7 @@ must preserve crosses streams:
 For per-aggregate invariants, keep using `evoq_aggregate`.
 
 For background: the underlying primitive is [reckon-db's Dynamic
-Consistency Boundary](https://codeberg.org/reckon-db-org/reckon-db/src/branch/main/guides/dcb.md).
+Consistency Boundary](https://github.com/reckon-db-org/reckon-db/blob/main/guides/dcb.md).
 
 ---
 
@@ -375,6 +375,6 @@ happen in this filter?", not "is the domain rule satisfied?"
 
 ## See also
 
-- [reckon-db DCB guide](https://codeberg.org/reckon-db-org/reckon-db/src/branch/main/guides/dcb.md) — primitive-level reference
+- [reckon-db DCB guide](https://github.com/reckon-db-org/reckon-db/blob/main/guides/dcb.md) — primitive-level reference
 - [Aggregates guide](aggregates.md) — the per-aggregate sibling pattern
 - [Process managers guide](process_managers.md) — for orchestration that needs to span multiple Decisions

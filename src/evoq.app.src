@@ -26,6 +26,6 @@
     {modules, []},
     {licenses, ["Apache-2.0"]},
     {links, [
-        {"Codeberg", "https://codeberg.org/reckon-db-org/evoq"}
+        {"GitHub", "https://github.com/reckon-db-org/evoq"}
     ]}
 ]}.

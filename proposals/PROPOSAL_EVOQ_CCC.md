@@ -8,7 +8,7 @@ Path 1 — see `SPIKE_EVOQ_DECISION_ACTOR.md`). Both 2026-06-25.
 
 - `evoq_decision` / `evoq_decision_runtime` (existing DCB Decision behaviour)
 - reckon-db CCC payload indexes (reckon_db 5.5.1+, reckon-gater 3.7.0+)
-- [reckon-gater CCC guide](https://codeberg.org/reckon-db-org/reckon-gater/src/branch/main/guides/ccc.md)
+- [reckon-gater CCC guide](https://github.com/reckon-db-org/reckon-gater/blob/main/guides/ccc.md)
 - DCB specification — https://dcb.events/
 
 ---

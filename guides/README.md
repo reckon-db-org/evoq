@@ -56,7 +56,7 @@ suggested orders below.
 **I need strong consistency across streams (DCB / CCC):**
 
 1. [Decisions](decisions.md)
-2. The [reckon-db DCB guide](https://codeberg.org/reckon-db-org/reckon-db/src/branch/main/guides/dcb.md) and [CCC guide](https://codeberg.org/reckon-db-org/reckon-db/src/branch/main/guides/ccc.md) for the primitive-level backend reference
+2. The [reckon-db DCB guide](https://github.com/reckon-db-org/reckon-db/blob/main/guides/dcb.md) and [CCC guide](https://github.com/reckon-db-org/reckon-db/blob/main/guides/ccc.md) for the primitive-level backend reference
 
 **I am integrating across bounded contexts:**
 

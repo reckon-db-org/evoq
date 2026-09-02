@@ -43,7 +43,7 @@ Add to your `rebar.config`:
 
 evoq is a standalone framework: it has **no** Reckon dependencies. `telemetry`
 is its only runtime dependency. Pair it with any event store through an adapter
-(see [guides/adapters.md](guides/adapters.md)); the [reckon-evoq](https://codeberg.org/reckon-db-org/reckon-evoq)
+(see [guides/adapters.md](guides/adapters.md)); the [reckon-evoq](https://github.com/reckon-db-org/reckon-evoq)
 adapter wires it to a Reckon store. The CCC payload-condition features require a
 store and adapter that expose payload indexes (reckon-gater >= 3.7 /
 reckon-db >= 5.3 via reckon-evoq >= 2.7), and *only* for decisions that use
@@ -430,15 +430,15 @@ The full, grouped guide index with suggested reading orders lives in
 
 evoq is one library in the Reckon event-sourcing ecosystem. In dependency order (a library only knows about the ones above it):
 
-- **[reckon-proto](https://codeberg.org/reckon-db-org/reckon-proto)**: the wire-contract protobufs; source of truth for the gateway surface.
-- **[reckon-gater](https://codeberg.org/reckon-db-org/reckon-gater)**: shared types and protocols; no Reckon dependencies.
-- **[reckon-db](https://codeberg.org/reckon-db-org/reckon-db)**: BEAM-native event store. Depends on reckon_gater, khepri, ra.
-- **[reckon-nifs](https://codeberg.org/reckon-db-org/reckon-nifs)**: standalone Rust NIF helpers with pure-Erlang fallbacks.
+- **[reckon-proto](https://github.com/reckon-db-org/reckon-proto)**: the wire-contract protobufs; source of truth for the gateway surface.
+- **[reckon-gater](https://github.com/reckon-db-org/reckon-gater)**: shared types and protocols; no Reckon dependencies.
+- **[reckon-db](https://github.com/reckon-db-org/reckon-db)**: BEAM-native event store. Depends on reckon_gater, khepri, ra.
+- **[reckon-nifs](https://github.com/reckon-db-org/reckon-nifs)**: standalone Rust NIF helpers with pure-Erlang fallbacks.
 - **evoq (this repo)**: standalone CQRS/event-sourcing framework (aggregates, projections, process managers, middleware pipeline, decisions/DCB/CCC). No Reckon dependencies; pairs with any store via an adapter.
-- **[reckon-evoq](https://codeberg.org/reckon-db-org/reckon-evoq)**: adapter wiring evoq to a Reckon store. Depends on evoq and reckon_gater; not on reckon_db (reaches the store through the gater API).
-- **[reckon-gateway](https://codeberg.org/reckon-db-org/reckon-gateway)**: gRPC + HTTP/JSON ingress. Consumes reckon_gater; can embed reckon_db or federate remote clusters.
-- **[reckon-go](https://codeberg.org/reckon-db-org/reckon-go)**: the Go client; talks to reckon-gateway.
-- **reckon-portal**: docs and landing site ([reckon-internal/reckon-portal](https://codeberg.org/reckon-internal/reckon-portal)).
+- **[reckon-evoq](https://github.com/reckon-db-org/reckon-evoq)**: adapter wiring evoq to a Reckon store. Depends on evoq and reckon_gater; not on reckon_db (reaches the store through the gater API).
+- **[reckon-gateway](https://github.com/reckon-db-org/reckon-gateway)**: gRPC + HTTP/JSON ingress. Consumes reckon_gater; can embed reckon_db or federate remote clusters.
+- **[reckon-go](https://github.com/reckon-db-org/reckon-go)**: the Go client; talks to reckon-gateway.
+- **reckon-portal**: docs and landing site ([reckon-internal/reckon-portal](https://github.com/reckon-db-org/reckon-portal)).
 
 ## License
 
