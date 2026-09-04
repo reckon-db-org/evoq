@@ -32,6 +32,26 @@ without blocking `start_link` itself. New test asserts `init/1` returns in
 under 100ms against a store id that would hang or error if init/1 still
 touched it directly, proving catch-up genuinely moved out.
 
+**A second bug this surfaced (caught by adversarial review before release,
+not by the fix's own author):** making catch-up asynchronous means a
+handler can now register for a type WHILE catch-up is running, which was
+never previously possible — `init/1` used to block the whole node, so no
+sibling application could register a handler mid-replay. `catch_up_loop/4`
+routed by calling `evoq_event_type_registry:get_handlers/1` live, at
+delivery time; a type gaining its first handler mid-burst would then get
+routed by catch-up for every event scanned AFTER the registration landed,
+*and* delivered again in full when the queued `{new_event_type, EventType}`
+notification ran `backfill_event_type/3` right after catch-up finished —
+double delivery for exactly the events that happened to be scanned after
+the race. Fixed by gating catch-up's routing on `known_types`, the type
+snapshot `register_listener/1` already returned in `init/1` (previously
+discarded) — a type absent from that snapshot is now *always* skipped by
+catch-up, unconditionally, deferring its entire history to the backfill
+sweep exactly as if the handler had registered after catch-up finished
+outright (one delivery, not a mix of two paths). New tests cover
+`filter_by_type_set/2` directly, including the exact "type present at
+scan time, absent from the original snapshot" case.
+
 Also: `catch_up_loop/4` now logs elapsed time per page, not just event
 counts (`[evoq] Catch-up ~s: routed ~b events (seq ~b -> ~b) in ~.1fms`) —
 the gap between reckon_db 5.11.1's synthetic 10k-event benchmark and its

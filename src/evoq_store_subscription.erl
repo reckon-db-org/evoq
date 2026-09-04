@@ -42,7 +42,7 @@
 
 %% Internal (exported for testing)
 -export([evoq_event_to_routable/1, route_event/1, route_events_with_seq/2,
-         filter_by_type/2]).
+         filter_by_type/2, filter_by_type_set/2]).
 
 %% gen_server callbacks
 -export([init/1, handle_continue/2, handle_call/3, handle_cast/2, handle_info/2,
@@ -56,7 +56,12 @@
     %% through this subscription. Used instead of stream-local version
     %% in metadata so that projections receiving events from $all
     %% subscriptions (multiple streams) have a valid checkpoint.
-    seq :: non_neg_integer()
+    seq :: non_neg_integer(),
+    %% Event types with a registered handler at the moment this listener
+    %% registered (register_listener/1's own snapshot). Gates catch-up
+    %% routing -- see handle_continue/2's comment for why a type must NOT
+    %% be routed by catch-up just because it gained a handler mid-replay.
+    known_types :: [binary()]
 }).
 
 %%====================================================================
@@ -87,13 +92,17 @@ init({StoreId, Opts}) ->
     %% Register as a listener with the type registry.
     %% We still register so we know about new types, but we no longer
     %% need to create per-type subscriptions — we subscribe to $all.
-    {ok, _CurrentTypes} = evoq_event_type_registry:register_listener(self()),
+    %% CurrentTypes is kept (not discarded) -- see handle_continue/2's
+    %% comment for why catch-up needs this exact snapshot, not "whatever
+    %% has a handler right now".
+    {ok, CurrentTypes} = evoq_event_type_registry:register_listener(self()),
 
     {ok, #state{
         store_id = StoreId,
         subscription_id = undefined,
         opts = Opts,
-        seq = 0
+        seq = 0,
+        known_types = CurrentTypes
     }, {continue, catch_up}}.
 
 %% @private Historical replay + the $all subscription, run right after
@@ -115,12 +124,28 @@ init({StoreId, Opts}) ->
 %% below still runs before this process handles its first real message
 %% (continues run before anything already in the mailbox), so ordering is
 %% unchanged; only the blocking of `start_link' itself is gone.
-handle_continue(catch_up, #state{store_id = StoreId, opts = Opts} = State) ->
+%%
+%% One thing THIS change did move: a handler can now register WHILE
+%% catch-up is running (init/1 no longer blocks the whole node while it
+%% replays), where before it never could -- the whole app was blocked on
+%% this same replay. Catch-up is therefore gated on `known_types', the
+%% snapshot `register_listener/1' returned in init/1, NOT "whichever
+%% handlers exist right now": if it used live `get_handlers/1' lookups (as
+%% `route_event_with_seq/2' does for the live $all feed), a type that
+%% gains its first handler mid-replay would get double-delivered -- once
+%% by catch-up for every one of its events scanned AFTER the registration
+%% landed, and again in full when the queued `{new_event_type, EventType}'
+%% notification runs `backfill_event_type/3' right after catch-up
+%% finishes. Gating on the snapshot defers ALL of that type's history to
+%% the backfill sweep, uniformly, exactly like a handler registering after
+%% catch-up already finished -- one delivery, not two.
+handle_continue(catch_up, #state{store_id = StoreId, opts = Opts,
+                                  known_types = KnownTypes} = State) ->
     %% Phase 1: Replay historical events (catch-up).
     %% This populates projections with all events stored before this
     %% subscription was created. Events are routed through the same
     %% path as live events, maintaining causal order.
-    Seq0 = catch_up_historical(StoreId),
+    Seq0 = catch_up_historical(StoreId, KnownTypes),
 
     %% Phase 2: Subscribe to new events going forward.
     %% The $all subscription will only deliver events appended AFTER
@@ -193,16 +218,19 @@ terminate(_Reason, #state{store_id = StoreId}) ->
 
 %% @private Replay all historical events from the store.
 %% Reads events in batches via read_all_global and routes each batch
-%% through the same routing path as live events.
+%% through the same routing path as live events -- restricted to
+%% KnownTypes (see handle_continue/2's comment for why: a type gaining its
+%% first handler mid-replay must NOT be routed by catch-up, only by the
+%% backfill it triggers, or it is delivered twice).
 %% Returns the final sequence number (= total events replayed).
--spec catch_up_historical(atom()) -> non_neg_integer().
-catch_up_historical(StoreId) ->
+-spec catch_up_historical(atom(), [binary()]) -> non_neg_integer().
+catch_up_historical(StoreId, KnownTypes) ->
     BatchSize = 1000,
-    catch_up_loop(StoreId, 0, BatchSize, 0).
+    catch_up_loop(StoreId, 0, BatchSize, 0, KnownTypes).
 
--spec catch_up_loop(atom(), non_neg_integer(), pos_integer(), non_neg_integer()) ->
-    non_neg_integer().
-catch_up_loop(StoreId, Offset, BatchSize, Seq) ->
+-spec catch_up_loop(atom(), non_neg_integer(), pos_integer(), non_neg_integer(),
+                     [binary()]) -> non_neg_integer().
+catch_up_loop(StoreId, Offset, BatchSize, Seq, KnownTypes) ->
     %% Elapsed time per page, not just event counts: the reckon_db 5.11.1
     %% cache fix looked sufficient against a synthetic 10k-event benchmark
     %% and was materially worse against a real ~87k-event store -- a gap
@@ -220,16 +248,27 @@ catch_up_loop(StoreId, Offset, BatchSize, Seq) ->
         {ok, Events} ->
             %% Log event types and handler status for diagnostics
             log_catch_up_events(StoreId, Events),
-            Seq1 = route_events_with_seq(Events, Seq),
-            logger:info("[evoq] Catch-up ~s: routed ~b events (seq ~b -> ~b) in ~.1fms",
-                        [StoreId, length(Events), Seq, Seq1, ElapsedMs]),
+            %% Route only types known at catch-up's start -- see
+            %% handle_continue/2. Pagination bookkeeping (below) still uses
+            %% the FULL, unfiltered Events/BatchSize so end-of-store
+            %% detection and the next Offset are unaffected by the filter.
+            Routable = filter_by_type_set(Events, KnownTypes),
+            Seq1 = route_events_with_seq(Routable, Seq),
+            logger:info("[evoq] Catch-up ~s: routed ~b of ~b events (seq ~b -> ~b) in ~.1fms",
+                        [StoreId, length(Routable), length(Events), Seq, Seq1, ElapsedMs]),
             continue_catch_up(length(Events) < BatchSize,
-                              StoreId, Offset, Events, BatchSize, Seq1);
+                              StoreId, Offset, Events, BatchSize, Seq1, KnownTypes);
         {error, Reason} ->
             logger:warning("[evoq] Catch-up failed for ~s at offset ~b: ~p (~.1fms)",
                            [StoreId, Offset, Reason, ElapsedMs]),
             Seq
     end.
+
+%% @private Keep only events whose type is in KnownTypes. Same filtering
+%% shape as filter_by_type/2, generalized from one type to a snapshot set.
+-spec filter_by_type_set([evoq_event() | term()], [binary()]) -> [evoq_event() | term()].
+filter_by_type_set(Events, KnownTypes) ->
+    [E || E <- Events, lists:member(event_type_or_unknown(E), KnownTypes)].
 
 %% @private Re-scan history for ONE event type and deliver it to whichever
 %% handler(s) just registered for it (see the handle_info/2 clause above
@@ -291,10 +330,10 @@ event_type_or_unknown(#evoq_event{event_type = T}) -> T;
 event_type_or_unknown(_) -> unknown.
 
 %% @private Recurse for another batch unless this was the last one.
-continue_catch_up(true, _StoreId, _Offset, _Events, _BatchSize, Seq1) ->
+continue_catch_up(true, _StoreId, _Offset, _Events, _BatchSize, Seq1, _KnownTypes) ->
     Seq1;
-continue_catch_up(false, StoreId, Offset, Events, BatchSize, Seq1) ->
-    catch_up_loop(StoreId, Offset + length(Events), BatchSize, Seq1).
+continue_catch_up(false, StoreId, Offset, Events, BatchSize, Seq1, KnownTypes) ->
+    catch_up_loop(StoreId, Offset + length(Events), BatchSize, Seq1, KnownTypes).
 
 %% @private Subscribe to the $all stream on the store.
 %% Uses by_stream subscription type with <<"$all">> selector,

@@ -188,6 +188,49 @@ filter_by_type_skips_non_evoq_event_terms_test() ->
     ?assertEqual([A1], evoq_store_subscription:filter_by_type([A1, not_an_event, {}], <<"type_a">>)).
 
 %%====================================================================
+%% filter_by_type_set/2 -- the catch-up-vs-mid-replay-registration fix
+%%
+%% Gates catch-up routing on the type snapshot register_listener/1
+%% returned in init/1, not "whichever handlers exist right now" (that's
+%% what the live $all feed's route_event_with_seq/2 uses, correctly, since
+%% there's no replay burst to double up against). Without this gate, a
+%% type gaining its first handler mid-catch-up gets double-delivered: once
+%% by catch-up for events scanned after the registration landed, and again
+%% in full by the backfill_event_type/3 sweep the registration triggers
+%% right after catch-up finishes. See handle_continue/2's own comment.
+%%====================================================================
+
+filter_by_type_set_keeps_only_known_types_test() ->
+    A1 = make_event(<<"known_a">>, <<"s-1">>, 0),
+    B1 = make_event(<<"unknown_b">>, <<"s-1">>, 1),
+    A2 = make_event(<<"known_a">>, <<"s-2">>, 0),
+    ?assertEqual([A1, A2],
+                 evoq_store_subscription:filter_by_type_set(
+                     [A1, B1, A2], [<<"known_a">>])).
+
+%% The exact bug this fixes: a type with NO handler at catch-up's start
+%% (so absent from the snapshot) gains a handler mid-replay. Later pages
+%% would report get_handlers/1 = non-empty, but the snapshot-gated filter
+%% still drops every event of that type during catch-up, unconditionally
+%% -- ALL of it (before and after the registration) is left for the
+%% single backfill sweep, so it is delivered exactly once, not twice.
+filter_by_type_set_drops_type_that_registers_mid_replay_test() ->
+    SnapshotAtCatchUpStart = [<<"already_known">>],
+    Before = make_event(<<"late_registering">>, <<"s-1">>, 0),
+    %% "After" represents an event scanned on a LATER page, once the type
+    %% has a handler -- the snapshot from init/1 hasn't changed, so it is
+    %% dropped exactly like "Before" was.
+    After = make_event(<<"late_registering">>, <<"s-1">>, 1),
+    Known = make_event(<<"already_known">>, <<"s-2">>, 0),
+    ?assertEqual([Known],
+                 evoq_store_subscription:filter_by_type_set(
+                     [Before, After, Known], SnapshotAtCatchUpStart)).
+
+filter_by_type_set_empty_snapshot_drops_everything_test() ->
+    A1 = make_event(<<"type_a">>, <<"s-1">>, 0),
+    ?assertEqual([], evoq_store_subscription:filter_by_type_set([A1], [])).
+
+%%====================================================================
 %% Test Helpers
 %%====================================================================
 
