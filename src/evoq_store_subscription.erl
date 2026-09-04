@@ -45,7 +45,8 @@
          filter_by_type/2]).
 
 %% gen_server callbacks
--export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
+-export([init/1, handle_continue/2, handle_call/3, handle_cast/2, handle_info/2,
+         terminate/2]).
 
 -record(state, {
     store_id :: atom(),
@@ -80,13 +81,41 @@ start_link(StoreId, Opts) ->
 %% gen_server callbacks
 %%====================================================================
 
-%% @private
+%% @private Registers with the type registry and returns immediately --
+%% see `handle_continue/2' for why catch-up moved out of here.
 init({StoreId, Opts}) ->
     %% Register as a listener with the type registry.
     %% We still register so we know about new types, but we no longer
     %% need to create per-type subscriptions — we subscribe to $all.
     {ok, _CurrentTypes} = evoq_event_type_registry:register_listener(self()),
 
+    {ok, #state{
+        store_id = StoreId,
+        subscription_id = undefined,
+        opts = Opts,
+        seq = 0
+    }, {continue, catch_up}}.
+
+%% @private Historical replay + the $all subscription, run right after
+%% init/1 returns rather than inside it.
+%%
+%% Catch-up against a store with real accumulated volume is not fast: a
+%% full scan-and-sort per page (see reckon_db_streams:read_all_global/3)
+%% against a real ~87k-event evidence store measured in the low seconds on
+%% capable hardware, and this store's own weaker production hardware sees
+%% worse. Running that inline in init/1 blocked THIS process -- and
+%% therefore `gen_server:start_link's caller, and therefore its
+%% supervisor's own start_link -- for the whole replay. On weak or loaded
+%% hardware that is long enough to plausibly trip an external liveness
+%% expectation (a container healthcheck, a supervisor timeout) mid-replay;
+%% killing the node there restarts catch-up from offset 0 with nothing
+%% carried over, which looks exactly like a non-terminating loop that
+%% never gets past the first page. `{continue, catch_up}' lets this
+%% process report "started" to its supervisor immediately -- the replay
+%% below still runs before this process handles its first real message
+%% (continues run before anything already in the mailbox), so ordering is
+%% unchanged; only the blocking of `start_link' itself is gone.
+handle_continue(catch_up, #state{store_id = StoreId, opts = Opts} = State) ->
     %% Phase 1: Replay historical events (catch-up).
     %% This populates projections with all events stored before this
     %% subscription was created. Events are routed through the same
@@ -108,12 +137,7 @@ init({StoreId, Opts}) ->
     logger:info("[evoq] Store subscription started for ~s (catch-up: ~b events replayed)",
                 [StoreId, Seq0]),
 
-    {ok, #state{
-        store_id = StoreId,
-        subscription_id = SubId,
-        opts = Opts,
-        seq = Seq0
-    }}.
+    {noreply, State#state{subscription_id = SubId, seq = Seq0}}.
 
 %% @private
 %% New event types are registered dynamically, and this fires only for
@@ -179,22 +203,31 @@ catch_up_historical(StoreId) ->
 -spec catch_up_loop(atom(), non_neg_integer(), pos_integer(), non_neg_integer()) ->
     non_neg_integer().
 catch_up_loop(StoreId, Offset, BatchSize, Seq) ->
-    case evoq_event_store:read_all_global(StoreId, Offset, BatchSize) of
+    %% Elapsed time per page, not just event counts: the reckon_db 5.11.1
+    %% cache fix looked sufficient against a synthetic 10k-event benchmark
+    %% and was materially worse against a real ~87k-event store -- a gap
+    %% only visible with per-page timing, which is why it's logged here now
+    %% instead of needing a from-scratch repro to diagnose next time.
+    {ElapsedUs, Result} = timer:tc(evoq_event_store, read_all_global,
+                                    [StoreId, Offset, BatchSize]),
+    ElapsedMs = ElapsedUs / 1000,
+    case Result of
         {ok, []} ->
-            logger:info("[evoq] Catch-up ~s: read_all_global returned 0 events at offset ~b",
-                        [StoreId, Offset]),
+            logger:info("[evoq] Catch-up ~s: read_all_global returned 0 events "
+                        "at offset ~b (~.1fms)",
+                        [StoreId, Offset, ElapsedMs]),
             Seq;
         {ok, Events} ->
             %% Log event types and handler status for diagnostics
             log_catch_up_events(StoreId, Events),
             Seq1 = route_events_with_seq(Events, Seq),
-            logger:info("[evoq] Catch-up ~s: routed ~b events (seq ~b -> ~b)",
-                        [StoreId, length(Events), Seq, Seq1]),
+            logger:info("[evoq] Catch-up ~s: routed ~b events (seq ~b -> ~b) in ~.1fms",
+                        [StoreId, length(Events), Seq, Seq1, ElapsedMs]),
             continue_catch_up(length(Events) < BatchSize,
                               StoreId, Offset, Events, BatchSize, Seq1);
         {error, Reason} ->
-            logger:warning("[evoq] Catch-up failed for ~s at offset ~b: ~p",
-                           [StoreId, Offset, Reason]),
+            logger:warning("[evoq] Catch-up failed for ~s at offset ~b: ~p (~.1fms)",
+                           [StoreId, Offset, Reason, ElapsedMs]),
             Seq
     end.
 

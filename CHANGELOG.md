@@ -5,6 +5,40 @@ All notable changes to evoq will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.23.2] - 2026-09-05
+
+### Fixed — a slow catch-up replay blocked this process's own start_link, not just the caller
+
+`evoq_store_subscription:init/1` ran the full historical catch-up replay
+(`catch_up_historical/1`) synchronously before returning, which meant
+`gen_server:start_link` — and therefore this process's supervisor's own
+start_link — stayed blocked for the whole replay. Against a store with real
+accumulated volume this is not fast (reckon_db 5.11.1's cache alone measured
+~110-130ms/page against a real ~87k-event evidence store, and the full
+scan-and-sort for the first page was ~1.5s even on capable hardware — see
+reckon_db 5.11.3's changelog for the read-side fix). On weaker or loaded
+hardware that is long enough to plausibly trip an external liveness
+expectation (a container healthcheck, a supervisor timeout) mid-replay;
+killing the node there restarts catch-up from offset 0 with nothing carried
+over — a crash-restart loop that never gets past the first page, matching
+exactly what was observed in production (hecate-sentinel, stopped
+2026-09-01 after this pattern pushed CPU past 300%+ and kept climbing).
+
+Moved catch-up into `handle_continue/2` (`{continue, catch_up}` returned
+from `init/1`): this process now reports "started" to its supervisor
+immediately, and the replay runs right after — still before this process
+handles its first real message, so event ordering is unchanged — but
+without blocking `start_link` itself. New test asserts `init/1` returns in
+under 100ms against a store id that would hang or error if init/1 still
+touched it directly, proving catch-up genuinely moved out.
+
+Also: `catch_up_loop/4` now logs elapsed time per page, not just event
+counts (`[evoq] Catch-up ~s: routed ~b events (seq ~b -> ~b) in ~.1fms`) —
+the gap between reckon_db 5.11.1's synthetic 10k-event benchmark and its
+real ~87k-event behavior was only found by rebuilding a from-scratch repro
+against real data; per-page timing in the normal logs would have made
+that unnecessary.
+
 ## [1.23.1] - 2026-08-25
 
 ### Fixed — a handler registering after catch-up never saw events already appended

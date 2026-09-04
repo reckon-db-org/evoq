@@ -85,6 +85,25 @@ event_to_routable_metadata_routing_fields_override_test() ->
     ?assertEqual(<<"value">>, maps:get(custom, Metadata)).
 
 %%====================================================================
+%% init/1 does not block on catch-up
+%%====================================================================
+
+%% @doc init/1 must return {continue, catch_up} immediately, WITHOUT
+%% touching the store -- catch_up_historical/1 (and therefore any real
+%% scan-and-sort cost) moved to handle_continue/2 so a slow replay against
+%% a store with real volume can't block gen_server:start_link (and
+%% therefore this process's supervisor, and therefore anything gated on
+%% the app finishing boot -- see the comment on init/1 for the incident
+%% this fixes). A store id that doesn't exist and would error or hang if
+%% init/1 tried to read from it directly proves init/1 never does.
+init_does_not_block_on_catch_up_test() ->
+    ensure_routing_infrastructure(),
+    StoreId = a_store_that_does_not_exist_and_would_hang_a_synchronous_catch_up,
+    {TimeUs, Result} = timer:tc(evoq_store_subscription, init, [{StoreId, #{}}]),
+    ?assertMatch({ok, _State, {continue, catch_up}}, Result),
+    ?assert(TimeUs < 100000).
+
+%%====================================================================
 %% Sequence-based routing tests
 %%====================================================================
 
