@@ -61,7 +61,14 @@
     %% registered (register_listener/1's own snapshot). Gates catch-up
     %% routing -- see handle_continue/2's comment for why a type must NOT
     %% be routed by catch-up just because it gained a handler mid-replay.
-    known_types :: [binary()]
+    known_types :: [binary()],
+    %% How many events this subscription has scanned/consumed so far, in
+    %% real global store order -- NOT `seq' (which only counts ones that
+    %% actually had a handler). This is the position acknowledged to the
+    %% persisted $all subscription (evoq_subscriptions:ack/4) so a FUTURE
+    %% restart's catch-up resumes from here instead of replaying the whole
+    %% store again. See handle_continue/2 and handle_info/2's comments.
+    offset :: non_neg_integer()
 }).
 
 %%====================================================================
@@ -102,7 +109,8 @@ init({StoreId, Opts}) ->
         subscription_id = undefined,
         opts = Opts,
         seq = 0,
-        known_types = CurrentTypes
+        known_types = CurrentTypes,
+        offset = 0
     }, {continue, catch_up}}.
 
 %% @private Historical replay + the $all subscription, run right after
@@ -139,18 +147,48 @@ init({StoreId, Opts}) ->
 %% finishes. Gating on the snapshot defers ALL of that type's history to
 %% the backfill sweep, uniformly, exactly like a handler registering after
 %% catch-up already finished -- one delivery, not two.
+%%
+%% == Why subscribe_to_all/3 is handed Offset0, and why handle_info/2 acks ==
+%%
+%% `evoq_subscriptions:ack/4' exists and used to go entirely unused here.
+%% Two consequences, confirmed live in production (hecate-tube,
+%% hecate-victron, hecate-sentinel each have a real `evoq_event_handler'
+%% with an unconditional mesh-publish side effect and no dedup of their
+%% own -- this was not a theoretical gap):
+%%
+%% 1. `subscribe_to_all's underlying persisted subscription
+%%    (reckon_db_subscriptions) runs its OWN catch-up on every FRESH
+%%    subscribe -- a full second replay of everything this process's own
+%%    Phase 1 above just finished delivering, moments earlier, in the same
+%%    boot. Fixed by handing it Offset0 (the real global position Phase 1
+%%    scanned up to) as its starting point, so it has nothing left to
+%%    replay -- see `catch_up_historical/2's own doc for why Offset0 is
+%%    NOT Seq0 (Seq counts delivered events; Offset counts scanned ones,
+%%    the number `reckon_db_subscriptions' actually paginates on).
+%% 2. On every RESTART after the first, `reckon_db_subscriptions'
+%%    reconnect path (`reregister_subscriber/4') ignores whatever
+%%    start_from this process passes -- it resumes from the PERSISTED
+%%    subscription's own checkpoint instead. That checkpoint was NEVER
+%%    updated (ack/4 was dead code), so it stayed exactly where the first
+%%    boot ever left it: 0. Every restart, forever, replayed the entire
+%%    store's history again. Fixed by handle_info/2 acking after every
+%%    batch it processes, so a future restart resumes near where THIS one
+%%    left off instead of from the beginning.
+%%
+%% Together these close both ends: a truly fresh store no longer
+%% double-replays on its first boot, and a long-running store no longer
+%% replays its whole history on every restart after that.
 handle_continue(catch_up, #state{store_id = StoreId, opts = Opts,
                                   known_types = KnownTypes} = State) ->
     %% Phase 1: Replay historical events (catch-up).
     %% This populates projections with all events stored before this
     %% subscription was created. Events are routed through the same
     %% path as live events, maintaining causal order.
-    Seq0 = catch_up_historical(StoreId, KnownTypes),
+    {Seq0, Offset0} = catch_up_historical(StoreId, KnownTypes),
 
-    %% Phase 2: Subscribe to new events going forward.
-    %% The $all subscription will only deliver events appended AFTER
-    %% the subscription is created (Khepri triggers are prospective).
-    SubId = case subscribe_to_all(StoreId, Opts) of
+    %% Phase 2: Subscribe to new events going forward, starting from
+    %% Offset0 -- everything before it was just delivered above.
+    SubId = case subscribe_to_all(StoreId, Opts, Offset0) of
         {ok, Id} ->
             Id;
         {error, Reason} ->
@@ -159,10 +197,11 @@ handle_continue(catch_up, #state{store_id = StoreId, opts = Opts,
             undefined
     end,
 
-    logger:info("[evoq] Store subscription started for ~s (catch-up: ~b events replayed)",
-                [StoreId, Seq0]),
+    logger:info("[evoq] Store subscription started for ~s (catch-up: ~b events "
+                "replayed, ~b scanned)",
+                [StoreId, Seq0, Offset0]),
 
-    {noreply, State#state{subscription_id = SubId, seq = Seq0}}.
+    {noreply, State#state{subscription_id = SubId, seq = Seq0, offset = Offset0}}.
 
 %% @private
 %% New event types are registered dynamically, and this fires only for
@@ -191,9 +230,21 @@ handle_info({new_event_type, EventType}, #state{store_id = StoreId, seq = Seq0} 
     Seq1 = backfill_event_type(StoreId, EventType, Seq0),
     {noreply, State#state{seq = Seq1}};
 
-handle_info({events, Events}, #state{seq = Seq0} = State) when is_list(Events) ->
+%% This is the SAME message shape the $all subscription's own catch-up
+%% delivers (reckon_db_subscriptions:send_filtered_events/2) and its live
+%% feed delivers -- one handler for both, as it always was. What changed:
+%% acking the new Offset after every batch, so a future restart's
+%% reckon_db-side catch-up (reregister_subscriber/4) resumes from here
+%% instead of from 0 -- see handle_continue/2's comment for the full
+%% mechanism this closes. A failed ack is logged and NOT fatal: it costs
+%% the next restart a bigger (still correct, since catch-up is idempotent
+%% by construction) replay, not a missed event.
+handle_info({events, Events}, #state{store_id = StoreId, seq = Seq0,
+                                      offset = Offset0} = State) when is_list(Events) ->
     Seq1 = route_events_with_seq(Events, Seq0),
-    {noreply, State#state{seq = Seq1}};
+    Offset1 = Offset0 + length(Events),
+    ack_progress(StoreId, Offset1),
+    {noreply, State#state{seq = Seq1, offset = Offset1}};
 
 handle_info(_Info, State) ->
     {noreply, State}.
@@ -223,13 +274,23 @@ terminate(_Reason, #state{store_id = StoreId}) ->
 %% first handler mid-replay must NOT be routed by catch-up, only by the
 %% backfill it triggers, or it is delivered twice).
 %% Returns the final sequence number (= total events replayed).
--spec catch_up_historical(atom(), [binary()]) -> non_neg_integer().
+%% Returns `{Seq, Offset}': Seq is how many events were actually routed
+%% (had a handler) -- carried into live routing so version numbers stay
+%% monotonic across the catch-up/live boundary. Offset is how many events
+%% were SCANNED, routed or not -- the real global store position, which is
+%% what `subscribe_to_all/3' hands the persisted $all subscription as its
+%% own starting point (see handle_continue/2's comment for why these two
+%% counters must not be conflated: using Seq there would make the
+%% persisted subscription re-scan every event catch-up skipped for having
+%% no handler, every single boot).
+-spec catch_up_historical(atom(), [binary()]) ->
+    {non_neg_integer(), non_neg_integer()}.
 catch_up_historical(StoreId, KnownTypes) ->
     BatchSize = 1000,
     catch_up_loop(StoreId, 0, BatchSize, 0, KnownTypes).
 
 -spec catch_up_loop(atom(), non_neg_integer(), pos_integer(), non_neg_integer(),
-                     [binary()]) -> non_neg_integer().
+                     [binary()]) -> {non_neg_integer(), non_neg_integer()}.
 catch_up_loop(StoreId, Offset, BatchSize, Seq, KnownTypes) ->
     %% Elapsed time per page, not just event counts: the reckon_db 5.11.1
     %% cache fix looked sufficient against a synthetic 10k-event benchmark
@@ -244,7 +305,7 @@ catch_up_loop(StoreId, Offset, BatchSize, Seq, KnownTypes) ->
             logger:info("[evoq] Catch-up ~s: read_all_global returned 0 events "
                         "at offset ~b (~.1fms)",
                         [StoreId, Offset, ElapsedMs]),
-            Seq;
+            {Seq, Offset};
         {ok, Events} ->
             %% Log event types and handler status for diagnostics
             log_catch_up_events(StoreId, Events),
@@ -261,7 +322,7 @@ catch_up_loop(StoreId, Offset, BatchSize, Seq, KnownTypes) ->
         {error, Reason} ->
             logger:warning("[evoq] Catch-up failed for ~s at offset ~b: ~p (~.1fms)",
                            [StoreId, Offset, Reason, ElapsedMs]),
-            Seq
+            {Seq, Offset}
     end.
 
 %% @private Keep only events whose type is in KnownTypes. Same filtering
@@ -330,22 +391,45 @@ event_type_or_unknown(#evoq_event{event_type = T}) -> T;
 event_type_or_unknown(_) -> unknown.
 
 %% @private Recurse for another batch unless this was the last one.
-continue_catch_up(true, _StoreId, _Offset, _Events, _BatchSize, Seq1, _KnownTypes) ->
-    Seq1;
+continue_catch_up(true, _StoreId, Offset, Events, _BatchSize, Seq1, _KnownTypes) ->
+    {Seq1, Offset + length(Events)};
 continue_catch_up(false, StoreId, Offset, Events, BatchSize, Seq1, KnownTypes) ->
     catch_up_loop(StoreId, Offset + length(Events), BatchSize, Seq1, KnownTypes).
 
-%% @private Subscribe to the $all stream on the store.
-%% Uses by_stream subscription type with <<"$all">> selector,
-%% which matches events in ALL streams (global store order).
--spec subscribe_to_all(atom(), map()) -> {ok, binary()} | {error, term()}.
-subscribe_to_all(StoreId, Opts) ->
+%% @private Subscribe to the $all stream on the store, starting from
+%% Offset0 -- the real position Phase 1's catch_up_historical/2 already
+%% scanned up to. Uses by_stream subscription type with <<"$all">>
+%% selector, which matches events in ALL streams (global store order).
+%%
+%% Offset0 only controls the checkpoint reckon_db_subscriptions:subscribe/5
+%% assigns a BRAND NEW subscription (store_and_setup/6's own Draft); on a
+%% RECONNECT (subscription already persisted from an earlier boot) it is
+%% ignored -- reregister_subscriber/4 resumes from whatever checkpoint is
+%% already on disk instead, which is why handle_info/2 acking on every
+%% batch matters just as much as this does. See handle_continue/2's
+%% comment for the full mechanism.
+-spec subscribe_to_all(atom(), map(), non_neg_integer()) -> {ok, binary()} | {error, term()}.
+subscribe_to_all(StoreId, _Opts, Offset0) ->
     SubName = subscription_name(StoreId),
-    StartFrom = maps:get(start_from, Opts, 0),
     evoq_subscriptions:subscribe(
         StoreId, stream, <<"$all">>, SubName,
-        #{subscriber_pid => self(), start_from => StartFrom}
+        #{subscriber_pid => self(), start_from => Offset0}
     ).
+
+%% @private Best-effort: persists how far this subscription has actually
+%% consumed the store, so a future restart's catch-up resumes from here
+%% instead of the beginning. A failure here is not fatal -- see
+%% handle_info/2's comment.
+-spec ack_progress(atom(), non_neg_integer()) -> ok.
+ack_progress(StoreId, Offset) ->
+    case evoq_subscriptions:ack(StoreId, subscription_name(StoreId), undefined, Offset) of
+        ok ->
+            ok;
+        {error, Reason} ->
+            logger:warning("[evoq] Failed to ack progress (offset ~b) for ~s: ~p",
+                           [Offset, StoreId, Reason]),
+            ok
+    end.
 
 %% @private Route events with a monotonically increasing sequence number.
 %% Returns the next sequence number after all events are routed.

@@ -5,6 +5,65 @@ All notable changes to evoq will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.23.3] - 2026-09-05
+
+### Fixed — every event was delivered twice to every projection/PM, on every boot, since 2026-03-19
+
+`evoq_subscriptions:ack/4` exists and is exported but was never called
+anywhere in this module. Two consequences, both real in production
+(confirmed live examples: hecate-tube's clip-publish/withdraw PMs,
+hecate-victron's mesh-publish PM, hecate-sentinel's threat projection —
+each fires an unconditional, undeduplicated side effect):
+
+1. **Every fresh `$all` subscription always passed `start_from => 0`.**
+   `subscribe_to_all/2` (now `/3`) hardcoded this regardless of what
+   `catch_up_historical/1` (now `/2`, returning `{Seq, Offset}`) had
+   already scanned moments earlier in the SAME boot. The persisted
+   subscription's own catch-up (`reckon_db_subscriptions:maybe_start_catchup/2`)
+   then redelivered the entire store a second time, immediately, every
+   single first boot.
+2. **Because `ack/4` was never called, the persisted checkpoint never
+   advanced past that initial 0.** `reckon_db_subscriptions`' reconnect
+   path (`reregister_subscriber/4`) resumes from the PERSISTED checkpoint
+   on every restart — not from anything this process passes — so it
+   replayed the entire store's history again on every restart too, not
+   just the first boot. `route_event_with_seq/2`'s own `Metadata.version`
+   (a monotonically-increasing per-delivery counter, overwritten
+   specifically so $all subscribers get ordered checkpoints) means
+   `evoq_projection`'s `EventVersion =< Checkpoint` guard and
+   `evoq_event_handler`'s checkpoint tracking can NEVER recognize a
+   duplicate delivery as one — a duplicate always gets a new, higher
+   number. This was not a narrow race window; it was the normal, expected
+   shape of every boot, and evoq's own advertised idempotency mechanism
+   provided zero protection against it.
+
+   Fixed both ends:
+   - `catch_up_historical/2` now returns `{Seq, Offset}` -- Seq is how
+     many events were actually routed (had a handler; unchanged
+     semantics), Offset is how many were scanned, routed or not (the real
+     global store position). `subscribe_to_all/3` is handed Offset0
+     explicitly and passes it as `start_from`, so a brand-new
+     subscription's own catch-up has nothing left to redeliver on the
+     very first boot.
+   - `handle_info({events, Events}, State)` now calls
+     `evoq_subscriptions:ack/4` after every batch it processes (catch-up
+     or live), advancing the persisted checkpoint continuously, so every
+     restart after the first resumes from close to where the previous
+     instance left off instead of from the beginning. A failed ack is
+     logged and non-fatal — worst case is a bigger (still correct) replay
+     on the next restart, never a missed event.
+
+   New tests boot a real `evoq_store_subscription` gen_server against a
+   fake adapter modeling `reckon_db_subscriptions`' actual checkpoint
+   semantics exactly (read from its source, not guessed: a fresh
+   subscription honors the caller's `start_from`; a reconnect ignores it
+   and resumes from the persisted checkpoint instead) and assert both
+   scenarios directly: a fresh boot over a 25-event store redelivers 0
+   events via the persisted subscription's own catch-up, and a simulated
+   restart (subscriber pid killed without a clean unsubscribe, store
+   grown by 10 events while "down") redelivers exactly those 10 — not 0
+   (lost) and not the whole store (the original bug).
+
 ## [1.23.2] - 2026-09-05
 
 ### Fixed — a slow catch-up replay blocked this process's own start_link, not just the caller
