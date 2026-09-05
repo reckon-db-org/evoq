@@ -42,27 +42,55 @@ each fires an unconditional, undeduplicated side effect):
      many events were actually routed (had a handler; unchanged
      semantics), Offset is how many were scanned, routed or not (the real
      global store position). `subscribe_to_all/3` is handed Offset0
-     explicitly and passes it as `start_from`, so a brand-new
-     subscription's own catch-up has nothing left to redeliver on the
-     very first boot.
-   - `handle_info({events, Events}, State)` now calls
-     `evoq_subscriptions:ack/4` after every batch it processes (catch-up
-     or live), advancing the persisted checkpoint continuously, so every
-     restart after the first resumes from close to where the previous
-     instance left off instead of from the beginning. A failed ack is
-     logged and non-fatal — worst case is a bigger (still correct) replay
-     on the next restart, never a missed event.
+     explicitly and passes it as `start_from`, closing the gap for a
+     subscription's own very first ever create.
+   - `handle_continue/2` now acks Offset0 to the persisted subscription
+     BEFORE calling `subscribe_to_all/3` -- this is the one that actually
+     closes every RESTART, not just the first boot: `start_from` only
+     affects a subscription's initial creation
+     (`reckon_db_subscriptions:store_and_setup/6`); on a reconnect,
+     `reregister_subscriber/4` ignores it entirely and resumes from
+     whatever checkpoint is already persisted. Acking here moves that
+     checkpoint to Offset0 before the reconnect ever reads it, so its own
+     catch-up (`maybe_start_catchup/2`) finds the store already fully
+     covered. An adversarial review caught that the first cut of this fix
+     only had the `start_from` half wired in -- both existing tests
+     passed even with this exact call stubbed to a no-op, because a
+     subscription's first-ever create doesn't need it. Confirmed empirically:
+     without this line a restart still redelivered the gap since the last
+     boot; with it, nothing.
+   - `handle_info({events, Events}, State)` continues to ack afterward
+     too, so a long-running instance's checkpoint doesn't go stale --
+     coalesced to once every 200 events consumed rather than once per
+     message, since acking is a synchronous, retrying, Raft-committing
+     gateway call and doing it per live event would be a real throughput
+     ceiling under sustained load that delivery never had before. A
+     failed ack is logged and non-fatal.
 
    New tests boot a real `evoq_store_subscription` gen_server against a
    fake adapter modeling `reckon_db_subscriptions`' actual checkpoint
    semantics exactly (read from its source, not guessed: a fresh
    subscription honors the caller's `start_from`; a reconnect ignores it
-   and resumes from the persisted checkpoint instead) and assert both
-   scenarios directly: a fresh boot over a 25-event store redelivers 0
-   events via the persisted subscription's own catch-up, and a simulated
-   restart (subscriber pid killed without a clean unsubscribe, store
-   grown by 10 events while "down") redelivers exactly those 10 — not 0
-   (lost) and not the whole store (the original bug).
+   and resumes from the persisted checkpoint instead; acking a
+   subscription that doesn't exist yet is a no-op, not a silent create --
+   getting this last one wrong would let a test pass for the wrong
+   reason, which is exactly what happened on the first pass before
+   review). Three scenarios: a fresh boot over a 25-event store
+   redelivers 0 events via the persisted subscription's own catch-up; a
+   simulated restart (subscriber pid killed without a clean unsubscribe,
+   store grown by 10 events while "down") redelivers 0 (not the original
+   bug's whole-store replay, and not the 10-event partial fix an earlier
+   version of this change stopped at); and acking directly against the
+   real `evoq_subscriptions` API confirms an existing checkpoint moves
+   and a missing one no-ops.
+
+   Note what this fix deliberately does NOT change: `catch_up_historical/2`
+   (Phase 1) still rescans the whole store fresh on every single boot, by
+   original design, independent of any checkpoint -- a side-effecting
+   handler still fires for the entire history once per restart, same as
+   before this fix. What's fixed is the SEPARATE, redundant redelivery
+   the persisted `$all` subscription's own catch-up used to add on top of
+   that, which is the part that was silently doubling everything.
 
 ## [1.23.2] - 2026-09-05
 

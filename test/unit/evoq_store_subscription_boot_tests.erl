@@ -36,7 +36,16 @@ fresh_boot_does_not_redeliver_via_persisted_catchup_test() ->
 
     stop_subscription(Pid).
 
-restart_resumes_from_acked_checkpoint_not_from_zero_test() ->
+%% Regression test for the exact gap an earlier version of this fix left
+%% open (caught by adversarial review, "Experiment A": both boot tests
+%% passed even with the pre-subscribe ack_progress/2 call in
+%% handle_continue/2 stubbed to a no-op, because subscribe_to_all/3's
+%% start_from ALONE already covers a subscription's own first-ever
+%% create). This test only distinguishes the two: it forces a RECONNECT
+%% (a persisted subscription already exists from Boot 1), which is the
+%% one case start_from cannot help with (reregister_subscriber/4 ignores
+%% it) and only the pre-subscribe ack closes.
+restart_resumes_with_nothing_left_to_redeliver_test() ->
     ensure_infra(),
     StoreId = unique_store(),
     evoq_fake_boot_backend:seed(StoreId, events(1, 20)),
@@ -50,30 +59,73 @@ restart_resumes_from_acked_checkpoint_not_from_zero_test() ->
     %% Crash it -- unlink first so its exit doesn't take the test process
     %% down too, then kill without ever calling unsubscribe. This is
     %% exactly what a real node restart looks like to
-    %% reckon_db_subscriptions: the persisted subscription survives with
-    %% whatever checkpoint was last acked (20, from Boot 1's own
-    %% start_from -- see subscribe_to_all/3's comment), and its old
-    %% subscriber pid is simply dead.
+    %% reckon_db_subscriptions: the persisted subscription survives (with
+    %% whatever checkpoint was last written) and its old subscriber pid
+    %% is simply dead.
     unlink(Boot1),
     MRef = erlang:monitor(process, Boot1),
     exit(Boot1, kill),
     receive {'DOWN', MRef, process, Boot1, _} -> ok after 2000 -> error(boot1_did_not_die) end,
 
-    %% The store grows by 10 while "the service is down" -- these are the
-    %% only events a correct restart should ever redeliver.
+    %% The store grows by 10 while "the service is down".
     evoq_fake_boot_backend:seed(StoreId, events(1, 30)),
 
     %% Boot 2: a genuinely different pid, same StoreId/subscription name.
+    %% Its own Phase 1 rescans all 30 directly (unchanged, pre-existing
+    %% behavior -- catch_up_historical/2 always starts at 0, on every
+    %% boot, by design; not what this fix touches). What this fix DOES
+    %% guarantee: the persisted ($all) subscription's OWN separate
+    %% catch-up, reckon_db_subscriptions' `maybe_start_catchup/2', has
+    %% NOTHING left to redeliver on top of that -- Boot 2's own
+    %% pre-subscribe ack (handle_continue/2) moves the persisted
+    %% checkpoint to 30 before its reconnect ever reads the stale value
+    %% Boot 1 left behind, so reregister_subscriber/4's do_catchup finds
+    %% the store already fully covered.
     {ok, Boot2} = evoq_store_subscription:start_link(StoreId),
     settle(),
 
-    %% Must be exactly the 10 new events -- not 0 (that would mean they
-    %% were silently lost) and not 30 (that would mean the old bug: a
-    %% restart redelivering the entire store because the checkpoint never
-    %% advanced past 0).
-    ?assertEqual(10, evoq_fake_boot_backend:delivered_count(StoreId)),
+    ?assertEqual(0, evoq_fake_boot_backend:delivered_count(StoreId)),
 
     stop_subscription(Boot2).
+
+%% Isolates the SAME property this fix relies on but from the checkpoint
+%% mechanism's own side, independent of evoq_store_subscription: acking a
+%% subscription that already exists moves its checkpoint immediately (the
+%% property Boot 2's pre-subscribe ack above depends on), while acking one
+%% that does not exist yet is a harmless no-op (the property that makes
+%% the SAME call safe to make unconditionally on a genuinely fresh boot,
+%% where start_from already does the job). Exercises evoq_subscriptions
+%% directly, the real evoq API surface (not the fake module's internals).
+ack_moves_an_existing_checkpoint_and_no_ops_on_a_missing_one_test() ->
+    ensure_infra(),
+    StoreId = unique_store(),
+    SubName = <<"ack_direct_test">>,
+    evoq_fake_boot_backend:reset(StoreId),
+
+    ?assertEqual({error, {subscription_not_found, SubName}},
+                 evoq_subscriptions:ack(StoreId, SubName, undefined, 42)),
+
+    {ok, _} = evoq_subscriptions:subscribe(
+        StoreId, stream, <<"$all">>, SubName,
+        #{subscriber_pid => self(), start_from => 5}),
+    ok = evoq_subscriptions:ack(StoreId, SubName, undefined, 99),
+
+    %% A second subscribe under the same name is exactly reconnect's own
+    %% shape (an existing entry, ignoring the new start_from) -- prove the
+    %% ack above actually stuck by reconnecting with a DIFFERENT
+    %% start_from and confirming the fake's own persisted value is 99, not
+    %% 5 and not the new call's argument.
+    {ok, _} = evoq_subscriptions:subscribe(
+        StoreId, stream, <<"$all">>, SubName,
+        #{subscriber_pid => self(), start_from => 0}),
+    settle(),
+    %% Seeded with nothing, so there is nothing at or after offset 99 to
+    %% redeliver regardless -- the real assertion is indirect: if ack/4
+    %% had been a no-op, reconnect would have resumed from 5 (the
+    %% original start_from) instead, which this test cannot distinguish
+    %% without seeded data. Cross-checked directly instead: read the
+    %% fake's own persisted view.
+    ?assertEqual(99, evoq_fake_boot_backend:persisted_checkpoint(StoreId, SubName)).
 
 %%====================================================================
 %% Helpers

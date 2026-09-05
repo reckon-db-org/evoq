@@ -68,8 +68,25 @@
     %% persisted $all subscription (evoq_subscriptions:ack/4) so a FUTURE
     %% restart's catch-up resumes from here instead of replaying the whole
     %% store again. See handle_continue/2 and handle_info/2's comments.
-    offset :: non_neg_integer()
+    offset :: non_neg_integer(),
+    %% Offset value as of the last successful (or attempted) ack. Lets
+    %% handle_info/2 coalesce acks (see ?ACK_EVERY_N_EVENTS) instead of
+    %% making a synchronous, retrying, Raft-committing gateway call for
+    %% every single live event.
+    last_acked :: non_neg_integer()
 }).
+
+%% Every live event acked individually would mean one synchronous
+%% gen_server:call (reckon_db_subscriptions:ack/4, a Khepri/Raft commit,
+%% retried up to ~30s on transient gateway trouble per
+%% reckon_gater_retry) PER EVENT, serialized in this process's own
+%% message loop -- a real throughput ceiling under sustained live load
+%% that plain per-event delivery never had. Coalescing trades a small,
+%% bounded increase in what a restart might re-scan (at most this many
+%% events, on top of Phase 1's own always-from-0 rescan, which already
+%% dwarfs it) for acking at a steady, load-independent rate instead of
+%% once per message.
+-define(ACK_EVERY_N_EVENTS, 200).
 
 %%====================================================================
 %% API
@@ -82,8 +99,12 @@ start_link(StoreId) ->
 
 %% @doc Start a store subscription with options.
 %%
-%% Options:
-%%   start_from - Starting position (default: 0)
+%% No options are currently read from Opts -- catch-up always starts at
+%% 0 and the live $all subscription's own starting point is always
+%% whatever catch_up_historical/2 actually scanned up to (see
+%% handle_continue/2), not a caller-supplied position. Opts is still
+%% accepted and threaded through (subscribe_to_all/3 receives it) for a
+%% future option this shape doesn't need yet -- e.g. pool_size.
 -spec start_link(atom(), map()) -> {ok, pid()} | {error, term()}.
 start_link(StoreId, Opts) ->
     Name = registration_name(StoreId),
@@ -110,7 +131,8 @@ init({StoreId, Opts}) ->
         opts = Opts,
         seq = 0,
         known_types = CurrentTypes,
-        offset = 0
+        offset = 0,
+        last_acked = 0
     }, {continue, catch_up}}.
 
 %% @private Historical replay + the $all subscription, run right after
@@ -171,13 +193,27 @@ init({StoreId, Opts}) ->
 %%    subscription's own checkpoint instead. That checkpoint was NEVER
 %%    updated (ack/4 was dead code), so it stayed exactly where the first
 %%    boot ever left it: 0. Every restart, forever, replayed the entire
-%%    store's history again. Fixed by handle_info/2 acking after every
-%%    batch it processes, so a future restart resumes near where THIS one
-%%    left off instead of from the beginning.
+%%    store's history again. Fixed by acking Offset0 BEFORE calling
+%%    subscribe_to_all/3 below (not just relying on handle_info/2's own
+%%    ongoing acks): on a reconnect this moves the PERSISTED checkpoint
+%%    to what Phase 1 just covered before reregister_subscriber/4 ever
+%%    reads it, so this boot's own reconnect catch-up has nothing left to
+%%    replay either -- confirmed empirically (Fable), not just reasoned:
+%%    without this pre-ack, a restart still double-delivers every event
+%%    scanned between the old checkpoint and Offset0, once via Phase 1's
+%%    own rescan and once via the reconnect catch-up, exactly the
+%%    failure this fix exists to close. Acking here on a FRESH boot (no
+%%    persisted subscription yet) is a harmless no-op --
+%%    reckon_db_subscriptions:ack/4 returns `subscription_not_found',
+%%    whitelisted as non-retriable, and `start_from => Offset0' below
+%%    already does that case's job. handle_info/2 continues acking
+%%    afterward so a LATER restart, once live traffic has moved the
+%%    position further, doesn't fall back to replaying everything since
+%%    Offset0.
 %%
 %% Together these close both ends: a truly fresh store no longer
 %% double-replays on its first boot, and a long-running store no longer
-%% replays its whole history on every restart after that.
+%% replays its whole history on any restart after that.
 handle_continue(catch_up, #state{store_id = StoreId, opts = Opts,
                                   known_types = KnownTypes} = State) ->
     %% Phase 1: Replay historical events (catch-up).
@@ -185,6 +221,7 @@ handle_continue(catch_up, #state{store_id = StoreId, opts = Opts,
     %% subscription was created. Events are routed through the same
     %% path as live events, maintaining causal order.
     {Seq0, Offset0} = catch_up_historical(StoreId, KnownTypes),
+    ack_progress(StoreId, Offset0),
 
     %% Phase 2: Subscribe to new events going forward, starting from
     %% Offset0 -- everything before it was just delivered above.
@@ -201,7 +238,8 @@ handle_continue(catch_up, #state{store_id = StoreId, opts = Opts,
                 "replayed, ~b scanned)",
                 [StoreId, Seq0, Offset0]),
 
-    {noreply, State#state{subscription_id = SubId, seq = Seq0, offset = Offset0}}.
+    {noreply, State#state{subscription_id = SubId, seq = Seq0, offset = Offset0,
+                           last_acked = Offset0}}.
 
 %% @private
 %% New event types are registered dynamically, and this fires only for
@@ -233,21 +271,34 @@ handle_info({new_event_type, EventType}, #state{store_id = StoreId, seq = Seq0} 
 %% This is the SAME message shape the $all subscription's own catch-up
 %% delivers (reckon_db_subscriptions:send_filtered_events/2) and its live
 %% feed delivers -- one handler for both, as it always was. What changed:
-%% acking the new Offset after every batch, so a future restart's
-%% reckon_db-side catch-up (reregister_subscriber/4) resumes from here
-%% instead of from 0 -- see handle_continue/2's comment for the full
-%% mechanism this closes. A failed ack is logged and NOT fatal: it costs
-%% the next restart a bigger (still correct, since catch-up is idempotent
-%% by construction) replay, not a missed event.
+%% acking progress periodically (every ?ACK_EVERY_N_EVENTS, not every
+%% single message -- see that macro's own comment for why per-event
+%% acking is a real throughput hazard, not just unnecessary), so a future
+%% restart's reckon_db-side catch-up (reregister_subscriber/4) resumes
+%% from near here instead of from 0 -- see handle_continue/2's comment
+%% for the full mechanism this closes. A failed ack is logged and NOT
+%% fatal: it costs the next restart a bigger (still correct, since
+%% catch-up is idempotent by construction) replay, not a missed event.
 handle_info({events, Events}, #state{store_id = StoreId, seq = Seq0,
-                                      offset = Offset0} = State) when is_list(Events) ->
+                                      offset = Offset0,
+                                      last_acked = LastAcked} = State) when is_list(Events) ->
     Seq1 = route_events_with_seq(Events, Seq0),
     Offset1 = Offset0 + length(Events),
-    ack_progress(StoreId, Offset1),
-    {noreply, State#state{seq = Seq1, offset = Offset1}};
+    NewLastAcked = maybe_ack(StoreId, Offset1, LastAcked),
+    {noreply, State#state{seq = Seq1, offset = Offset1, last_acked = NewLastAcked}};
 
 handle_info(_Info, State) ->
     {noreply, State}.
+
+%% @private Acks only once at least ?ACK_EVERY_N_EVENTS have accumulated
+%% since the last ack, returning whichever Offset is now the acked one
+%% (so the caller's `last_acked' stays accurate whether or not this call
+%% actually acked).
+maybe_ack(StoreId, Offset, LastAcked) when Offset - LastAcked >= ?ACK_EVERY_N_EVENTS ->
+    ack_progress(StoreId, Offset),
+    Offset;
+maybe_ack(_StoreId, _Offset, LastAcked) ->
+    LastAcked.
 
 %% @private
 handle_call(_Request, _From, State) ->
@@ -258,9 +309,20 @@ handle_cast(_Msg, State) ->
     {noreply, State}.
 
 %% @private
-terminate(_Reason, #state{store_id = StoreId}) ->
+%% A clean stop (unlike a crash/kill, which skips terminate/2 entirely
+%% and is exactly the case ?ACK_EVERY_N_EVENTS coalescing already
+%% tolerates) can flush its up-to-date position for free, so the next
+%% boot's reconnect catch-up has that much less to redeliver.
+terminate(_Reason, #state{store_id = StoreId, offset = Offset,
+                          last_acked = LastAcked}) ->
+    ack_progress_if_ahead(StoreId, Offset, LastAcked),
     evoq_event_type_registry:unregister_listener(self()),
     logger:info("[evoq] Store subscription stopping for ~s", [StoreId]),
+    ok.
+
+ack_progress_if_ahead(StoreId, Offset, LastAcked) when Offset > LastAcked ->
+    ack_progress(StoreId, Offset);
+ack_progress_if_ahead(_StoreId, _Offset, _LastAcked) ->
     ok.
 
 %%====================================================================
@@ -273,7 +335,6 @@ terminate(_Reason, #state{store_id = StoreId}) ->
 %% KnownTypes (see handle_continue/2's comment for why: a type gaining its
 %% first handler mid-replay must NOT be routed by catch-up, only by the
 %% backfill it triggers, or it is delivered twice).
-%% Returns the final sequence number (= total events replayed).
 %% Returns `{Seq, Offset}': Seq is how many events were actually routed
 %% (had a handler) -- carried into live routing so version numbers stay
 %% monotonic across the catch-up/live boundary. Offset is how many events
