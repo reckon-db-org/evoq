@@ -61,11 +61,17 @@ register_handler(EventType, HandlerModule) ->
 unregister_handler(EventType, HandlerModule) ->
     gen_server:call(?SERVER, {unregister_module, EventType, HandlerModule}).
 
-%% @doc Get all handlers registered for an event type.
-%% Returns both pids (from pg) and modules (from internal state).
--spec get_handlers(binary()) -> [pid() | atom()].
+%% @doc Get all handler pids registered for an event type.
+%%
+%% Reads pg directly rather than round-tripping through this gen_server:
+%% pg membership lives in ETS and is safe to read from any process, and a
+%% gen_server:call here sits on the event router's hot path, where its 5s
+%% call timeout would crash the router if this process were ever briefly
+%% busy. pg stores only pids (the module-registration API is a no-op), so
+%% the result is always pids.
+-spec get_handlers(binary()) -> [pid()].
 get_handlers(EventType) ->
-    gen_server:call(?SERVER, {get_handlers, EventType}).
+    pg:get_members(?PG_SCOPE, event_type_group(EventType)).
 
 %% @doc Get all registered event types.
 -spec get_all_event_types() -> [binary()].
@@ -130,11 +136,6 @@ handle_call({register_module, _EventType, _HandlerModule}, _From, State) ->
 
 handle_call({unregister_module, _EventType, _HandlerModule}, _From, State) ->
     {reply, ok, State};
-
-handle_call({get_handlers, EventType}, _From, State) ->
-    Group = event_type_group(EventType),
-    Handlers = pg:get_members(?PG_SCOPE, Group),
-    {reply, Handlers, State};
 
 handle_call(get_all_event_types, _From, State) ->
     Groups = pg:which_groups(?PG_SCOPE),

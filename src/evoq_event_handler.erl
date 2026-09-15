@@ -43,7 +43,6 @@
 %% API
 -export([start_link/2, start_link/3]).
 -export([get_event_types/1]).
--export([notify/4]).
 -export([deliver/4]).
 
 %% gen_server callbacks
@@ -88,16 +87,6 @@ start_link(HandlerModule, Config, Opts) ->
 -spec get_event_types(pid()) -> [binary()].
 get_event_types(Pid) ->
     gen_server:call(Pid, get_event_types).
-
-%% @doc Notify handler of an event synchronously.
-%%
-%% Blocks the caller until the event is fully processed (including any
-%% retry backoff). This path is retained for callers that genuinely need
-%% a result -- e.g. strong-consistency waits and tests. The router does
-%% NOT use it; it uses deliver/4 so one handler can never stall another.
--spec notify(pid(), binary(), map(), map()) -> ok | {error, term()}.
-notify(Pid, EventType, Event, Metadata) ->
-    gen_server:call(Pid, {notify, EventType, Event, Metadata}, infinity).
 
 %% @doc Hand an event to the handler without waiting.
 %%
@@ -144,9 +133,6 @@ register_self(EventType) ->
 %% @private
 handle_call(get_event_types, _From, #state{event_types = Types} = State) ->
     {reply, Types, State};
-
-handle_call({notify, EventType, Event, Metadata}, _From, State) ->
-    reply_sync(sync_process(EventType, Event, Metadata, State), State);
 
 handle_call(_Request, _From, State) ->
     {reply, {error, unknown_request}, State}.
@@ -229,36 +215,11 @@ retry_inflight(State) ->
     run_inflight(State).
 
 %%--------------------------------------------------------------------
-%% Synchronous driver (notify/4: strong-consistency waits and tests)
-%%--------------------------------------------------------------------
-%% Blocks the caller through the full retry sequence, as before. Only the
-%% caller waits -- the router never takes this path.
-
-reply_sync({ok, NewState}, _State) ->
-    {reply, ok, NewState};
-reply_sync({stop, Reason}, State) ->
-    {stop, Reason, {error, Reason}, State}.
-
-sync_process(EventType, Event, Metadata, State) ->
-    Context = new_failure_context(State#state.handler_module, Event),
-    sync_loop(attempt_event(EventType, Event, Metadata, Context, State),
-              EventType, Event, Metadata, State).
-
-sync_loop({done, NewState}, _EventType, _Event, _Metadata, _State) ->
-    {ok, NewState};
-sync_loop({retry, DelayMs, Context1}, EventType, Event, Metadata, State) ->
-    timer:sleep(DelayMs),
-    sync_loop(attempt_event(EventType, Event, Metadata, Context1, State),
-              EventType, Event, Metadata, State);
-sync_loop({stop, Reason}, _EventType, _Event, _Metadata, _State) ->
-    {stop, Reason}.
-
-%%--------------------------------------------------------------------
-%% Single-attempt core (shared by both drivers)
+%% Single-attempt core
 %%--------------------------------------------------------------------
 
-%% @private One attempt at an event. Returns the next step for a driver to
-%% carry out; it never loops, sleeps, or blocks itself.
+%% @private One attempt at an event. Returns the next step for the driver
+%% to carry out; it never loops, sleeps, or blocks itself.
 -spec attempt_event(binary(), map(), map(), #evoq_failure_context{}, #state{}) ->
     {done, #state{}} | {retry, non_neg_integer(), #evoq_failure_context{}} |
     {stop, term()}.
@@ -269,8 +230,23 @@ attempt_event(EventType, Event, Metadata, Context, State) ->
                       #{system_time => StartTime},
                       #{handler => HandlerModule, event_type => EventType,
                         attempt => Context#evoq_failure_context.attempt_number}),
-    Result = HandlerModule:handle_event(EventType, Event, Metadata, HandlerState),
-    handle_result(Result, EventType, Event, Metadata, Context, State, StartTime).
+    Outcome = run_callback(HandlerModule, EventType, Event, Metadata, HandlerState),
+    handle_result(Outcome, EventType, Event, Metadata, Context, State, StartTime).
+
+%% @private Invoke the handler callback, converting a raise into the same
+%% {error, Reason, Stacktrace} the error path already handles -- so a
+%% throwing handler goes through on_error/retry/dead-letter instead of
+%% crashing the process and losing its queue and mailbox. A returned
+%% error carries an empty stacktrace.
+-spec run_callback(atom(), binary(), map(), map(), term()) ->
+    {ok, term()} | {error, term(), list()}.
+run_callback(HandlerModule, EventType, Event, Metadata, HandlerState) ->
+    try HandlerModule:handle_event(EventType, Event, Metadata, HandlerState) of
+        {ok, NewHandlerState} -> {ok, NewHandlerState};
+        {error, Reason} -> {error, Reason, []}
+    catch
+        Class:Reason:Stacktrace -> {error, {Class, Reason}, Stacktrace}
+    end.
 
 handle_result({ok, NewHandlerState}, EventType, _Event, Metadata, _Context, State, StartTime) ->
     telemetry:execute(?TELEMETRY_HANDLER_EVENT_STOP,
@@ -278,13 +254,14 @@ handle_result({ok, NewHandlerState}, EventType, _Event, Metadata, _Context, Stat
                       #{handler => State#state.handler_module, event_type => EventType}),
     {done, State#state{handler_state = NewHandlerState,
                        checkpoint = advance(Metadata, State)}};
-handle_result({error, Reason}, EventType, Event, Metadata, Context, State, StartTime) ->
+handle_result({error, Reason, Stacktrace}, EventType, Event, Metadata, Context, State, StartTime) ->
     #state{handler_module = HandlerModule, handler_state = HandlerState} = State,
     telemetry:execute(?TELEMETRY_HANDLER_EVENT_EXCEPTION,
                       #{duration => erlang:system_time(microsecond) - StartTime},
                       #{handler => HandlerModule, event_type => EventType, error => Reason}),
     Context1 = Context#evoq_failure_context{
-        error = Reason, last_failure_at = erlang:system_time(millisecond)},
+        error = Reason, last_failure_at = erlang:system_time(millisecond),
+        stacktrace = Stacktrace},
     Action = evoq_error_handler:handle_error(
         HandlerModule, Reason, Event, Context1, HandlerState),
     map_action(Action, Event, Metadata, Context1, State).

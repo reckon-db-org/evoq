@@ -213,13 +213,27 @@ handle_call({notify, EventType, Event, Metadata}, _From, State) ->
 handle_call(_Request, _From, State) ->
     {reply, {error, unknown_request}, State}.
 
-%% @private
+%% @private Asynchronous delivery from the event router. A projection
+%% registers its pid in the same event-type registry as a handler, so it
+%% receives the router's {deliver, ...} cast. Processing is synchronous
+%% within the cast and the gen_server serializes casts, so events are
+%% applied one at a time in arrival order (a projection has no retry, so
+%% no explicit queue is needed -- the mailbox is the queue). On a project
+%% error the checkpoint is not advanced (the event is left for redelivery
+%% by a later catch-up), matching the pre-async behaviour.
+handle_cast({deliver, EventType, Event, Metadata}, State) ->
+    {noreply, apply_delivered(handle_event_internal(EventType, Event, Metadata, State), State)};
+
 handle_cast(_Msg, State) ->
     {noreply, State}.
 
 %% @private
 handle_info(_Info, State) ->
     {noreply, State}.
+
+%% @private
+apply_delivered({ok, NewState}, _State) -> NewState;
+apply_delivered({error, _Reason}, State) -> State.
 
 %% @private
 terminate(_Reason, #state{

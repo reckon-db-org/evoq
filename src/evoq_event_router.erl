@@ -141,12 +141,4 @@ notify_handler(Handler, EventType, Event, Metadata) when is_pid(Handler), node(H
     evoq_event_handler:deliver(Handler, EventType, Event, Metadata);
 notify_handler(Handler, _EventType, _Event, _Metadata) when is_pid(Handler) ->
     %% Remote handler pid — skip (belongs to another node)
-    ok;
-notify_handler(Handler, EventType, Event, Metadata) when is_atom(Handler) ->
-    %% Handler is a module - call directly (legacy support)
-    try
-        Handler:handle_event(EventType, Event, Metadata, undefined)
-    catch
-        _:Reason ->
-            logger:warning("Failed to call handler ~p: ~p", [Handler, Reason])
-    end.
+    ok.
