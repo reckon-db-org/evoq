@@ -233,20 +233,36 @@ attempt_event(EventType, Event, Metadata, Context, State) ->
     Outcome = run_callback(HandlerModule, EventType, Event, Metadata, HandlerState),
     handle_result(Outcome, EventType, Event, Metadata, Context, State, StartTime).
 
-%% @private Invoke the handler callback, converting a raise into the same
-%% {error, Reason, Stacktrace} the error path already handles -- so a
-%% throwing handler goes through on_error/retry/dead-letter instead of
-%% crashing the process and losing its queue and mailbox. A returned
-%% error carries an empty stacktrace.
+%% @private Invoke the handler callback, converting a raise OR an
+%% unexpected return into the same {error, Reason, Stacktrace} the error
+%% path already handles -- so a throwing or misbehaving handler goes
+%% through on_error/retry/dead-letter instead of crashing the process and
+%% losing its queue and mailbox. A bad return matching neither {ok, _} nor
+%% {error, _} would otherwise raise try_clause in the `of' section, which
+%% the `catch' does NOT cover, so it needs its own clause here. A returned
+%% error carries an empty stacktrace; a caught raise carries a sanitized
+%% one (argument lists stripped, so event data never rides a stack frame
+%% into a dead letter, on_error, or a log).
 -spec run_callback(atom(), binary(), map(), map(), term()) ->
     {ok, term()} | {error, term(), list()}.
 run_callback(HandlerModule, EventType, Event, Metadata, HandlerState) ->
     try HandlerModule:handle_event(EventType, Event, Metadata, HandlerState) of
         {ok, NewHandlerState} -> {ok, NewHandlerState};
-        {error, Reason} -> {error, Reason, []}
+        {error, Reason} -> {error, Reason, []};
+        Other -> {error, {bad_return, Other}, []}
     catch
-        Class:Reason:Stacktrace -> {error, {Class, Reason}, Stacktrace}
+        Class:Reason:Stacktrace -> {error, {Class, Reason}, sanitize_stacktrace(Stacktrace)}
     end.
+
+%% @private Replace each frame's argument list with its arity, so captured
+%% stack frames carry no event payload into anything downstream.
+sanitize_stacktrace(Stacktrace) ->
+    [sanitize_frame(Frame) || Frame <- Stacktrace].
+
+sanitize_frame({Module, Function, Args, Location}) when is_list(Args) ->
+    {Module, Function, length(Args), Location};
+sanitize_frame(Frame) ->
+    Frame.
 
 handle_result({ok, NewHandlerState}, EventType, _Event, Metadata, _Context, State, StartTime) ->
     telemetry:execute(?TELEMETRY_HANDLER_EVENT_STOP,

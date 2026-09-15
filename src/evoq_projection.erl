@@ -52,6 +52,9 @@
 -include("evoq.hrl").
 -include("evoq_telemetry.hrl").
 
+%% Rate-limit the dropped-event warning to at most one per this window.
+-define(DROP_LOG_WINDOW_MS, 60000).
+
 %% Required callbacks
 -callback interested_in() -> [EventType :: binary()].
 
@@ -291,9 +294,12 @@ do_project(EventType, Event, Metadata, EventVersion,
         event_type => EventType
     }),
 
-    %% Call the projection
+    %% Call the projection under a guard: a raise or an unexpected return
+    %% must not crash the process and take every event queued behind this
+    %% one down with it. Both map to the {error, ...} path below (no
+    %% stacktrace kept, so no event data rides a stack frame downstream).
     FullEvent = Event#{event_type => EventType},
-    case ProjectionModule:project(FullEvent, Metadata, ProjectionState, ReadModel) of
+    case safe_project(ProjectionModule, FullEvent, Metadata, ProjectionState, ReadModel) of
         {ok, NewProjectionState, NewReadModel} ->
             Duration = erlang:system_time(microsecond) - StartTime,
 
@@ -342,10 +348,58 @@ do_project(EventType, Event, Metadata, EventVersion,
                 error => Reason
             }),
 
+            %% Until durable redelivery lands (later slice), an error drops
+            %% this event with the checkpoint unchanged and no retry. Count
+            %% it and log at most once a window so the drop is not silent.
+            record_drop(ProjectionModule, EventType),
+
             %% Check for error callback
             notify_on_error(erlang:function_exported(ProjectionModule, on_error, 4),
                             ProjectionModule, Event, Reason, ProjectionState, Error)
     end.
+
+%% @private Invoke project/4 under a guard, normalising a raise or an
+%% unexpected return into {error, Reason} so the caller's error path
+%% applies. No stacktrace is retained (it can carry event data in a top
+%% frame's argument list).
+safe_project(ProjectionModule, FullEvent, Metadata, ProjectionState, ReadModel) ->
+    try ProjectionModule:project(FullEvent, Metadata, ProjectionState, ReadModel) of
+        {ok, _, _} = Ok -> Ok;
+        {skip, _, _} = Skip -> Skip;
+        {error, _} = Err -> Err;
+        Other -> {error, {bad_return, Other}}
+    catch
+        Class:Reason -> {error, {Class, Reason}}
+    end.
+
+%% @private Count a dropped event and log at most once per window. State
+%% lives in the process dictionary -- a projection is a single process, so
+%% this is process-local and needs no record field.
+record_drop(ProjectionModule, EventType) ->
+    N = drop_count() + 1,
+    put(dropped_events, N),
+    Now = erlang:system_time(millisecond),
+    Due = Now - last_drop_log_ms() >= ?DROP_LOG_WINDOW_MS,
+    maybe_log_drop(Now, Due, ProjectionModule, EventType, N).
+
+drop_count() ->
+    count_or_zero(get(dropped_events)).
+
+count_or_zero(undefined) -> 0;
+count_or_zero(N) -> N.
+
+last_drop_log_ms() ->
+    count_or_zero(get(last_drop_log_ms)).
+
+maybe_log_drop(Now, true, ProjectionModule, EventType, N) ->
+    put(last_drop_log_ms, Now),
+    logger:warning("[evoq] projection ~p has dropped ~b event(s) so far "
+                   "(latest type ~s): checkpoint not advanced, no retry until "
+                   "durable redelivery lands",
+                   [ProjectionModule, N, EventType]),
+    ok;
+maybe_log_drop(_Now, false, _ProjectionModule, _EventType, _N) ->
+    ok.
 
 %% @private Invoke the projection's on_error/4 callback when present.
 notify_on_error(true, ProjectionModule, Event, Reason, ProjectionState, Error) ->

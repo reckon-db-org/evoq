@@ -35,7 +35,11 @@ isolation_test_() ->
       {"a raising handler does not lose its queued events",
        fun raise_does_not_lose_queue/0},
       {"per-handler order is preserved across a retry",
-       fun order_preserved_across_retry/0}
+       fun order_preserved_across_retry/0},
+      {"a raising projection does not lose its queued events",
+       fun raising_projection_keeps_queue/0},
+      {"an unexpected handler return does not lose the queue",
+       fun bad_return_does_not_lose_queue/0}
      ]}.
 
 setup() ->
@@ -132,6 +136,38 @@ order_preserved_across_retry() ->
 
     stop_handlers([Ordering]).
 
+%% A projection that raises in project/4 must not crash its process and
+%% lose the events queued behind the failed one.
+raising_projection_keeps_queue() ->
+    {ok, Proj} = start_unlinked_projection(evoq_raising_projection),
+
+    %% Distinct global versions: a projection's idempotency guard skips any
+    %% event at or below its checkpoint, so the events must advance it.
+    route_data_v(<<"raise_proj_evt_v1">>, <<"boom">>, #{item_id => <<"boom">>}, 1),
+    route_data_v(<<"raise_proj_evt_v1">>, <<"pe2">>, #{item_id => <<"pe2">>}, 2),
+    route_data_v(<<"raise_proj_evt_v1">>, <<"pe3">>, #{item_id => <<"pe3">>}, 3),
+
+    ?assertEqual(ok, poll_read_model(Proj, {item, <<"pe2">>}, 2000)),
+    ?assertEqual(ok, poll_read_model(Proj, {item, <<"pe3">>}, 2000)),
+    ?assert(is_process_alive(Proj)),
+
+    stop_handlers([Proj]).
+
+%% A handler that returns a value matching neither {ok, _} nor {error, _}
+%% must take the error path, not raise try_clause and lose its queue.
+bad_return_does_not_lose_queue() ->
+    {ok, Handler} = start_unlinked(evoq_bad_return_handler),
+
+    route(<<"ret_evt_v1">>, <<"badret">>),
+    route(<<"ret_evt_v1">>, <<"rr2">>),
+    route(<<"ret_evt_v1">>, <<"rr3">>),
+
+    ?assertEqual(ok, await({ret_handled, <<"rr2">>}, 2000)),
+    ?assertEqual(ok, await({ret_handled, <<"rr3">>}, 2000)),
+    ?assert(is_process_alive(Handler)),
+
+    stop_handlers([Handler]).
+
 %%====================================================================
 %% Helpers
 %%====================================================================
@@ -143,6 +179,11 @@ start_handler(Module) ->
 %% process down with it (and we can then assert on the handler's liveness).
 start_unlinked(Module) ->
     {ok, Pid} = start_handler(Module),
+    true = unlink(Pid),
+    {ok, Pid}.
+
+start_unlinked_projection(Module) ->
+    {ok, Pid} = evoq_projection:start_link(Module, #{}, #{}),
     true = unlink(Pid),
     {ok, Pid}.
 
@@ -159,8 +200,11 @@ route(Type, Id) ->
     route_data(Type, Id, #{}).
 
 route_data(Type, Id, Data) ->
+    route_data_v(Type, Id, Data, 0).
+
+route_data_v(Type, Id, Data, Version) ->
     Event = #{event_type => Type, event_id => Id, data => Data},
-    Metadata = #{stream_id => <<"stream">>, version => 0, epoch_us => 0},
+    Metadata = #{stream_id => <<"stream">>, version => Version, epoch_us => 0},
     evoq_event_router:route_event(Event, Metadata).
 
 await(Msg, Timeout) ->
