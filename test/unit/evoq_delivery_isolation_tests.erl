@@ -41,7 +41,9 @@ isolation_test_() ->
       {"an unexpected handler return does not lose the queue",
        fun bad_return_does_not_lose_queue/0},
       {"a bad return's error term keeps only its shape, not its payload",
-       fun bad_return_keeps_only_shape/0}
+       fun bad_return_keeps_only_shape/0},
+      {"a dead-lettered bad return carries no payload into the dead letter",
+       fun bad_return_keeps_no_payload_in_dead_letter/0}
      ]}.
 
 setup() ->
@@ -182,6 +184,33 @@ bad_return_keeps_only_shape() ->
     ?assertEqual({bad_return, {oops, 2}}, Error),
 
     stop_handlers([Handler]).
+
+%% The shape reduction happens in run_callback/5 before the error flows
+%% anywhere, so the same protection covers the dead-letter path: a
+%% dead-lettered bad return carries the shape, never the returned secret,
+%% in either its error field or its failure context. (Logs are covered by
+%% the same source: no code path logs the return term, only the shape.)
+bad_return_keeps_no_payload_in_dead_letter() ->
+    {ok, Handler} = start_handler(evoq_leaky_deadletter_handler),
+
+    route(<<"dl_evt_v1">>, <<"dl1">>),
+
+    Entry = await_dead_letter(evoq_leaky_deadletter_handler, 2000),
+    Secret = <<"secret-payload-xyz">>,
+    ?assertEqual(nomatch, binary:match(term_to_binary(Entry), Secret)),
+
+    stop_handlers([Handler]).
+
+await_dead_letter(_Handler, Remaining) when Remaining =< 0 ->
+    erlang:error(no_dead_letter);
+await_dead_letter(Handler, Remaining) ->
+    first_dead_letter(evoq_dead_letter:list(#{handler => Handler}), Handler, Remaining).
+
+first_dead_letter([Entry | _], _Handler, _Remaining) ->
+    Entry;
+first_dead_letter([], Handler, Remaining) ->
+    timer:sleep(25),
+    await_dead_letter(Handler, Remaining - 25).
 
 %%====================================================================
 %% Helpers
