@@ -249,10 +249,27 @@ run_callback(HandlerModule, EventType, Event, Metadata, HandlerState) ->
     try HandlerModule:handle_event(EventType, Event, Metadata, HandlerState) of
         {ok, NewHandlerState} -> {ok, NewHandlerState};
         {error, Reason} -> {error, Reason, []};
-        Other -> {error, {bad_return, Other}, []}
+        Other -> {error, {bad_return, return_shape(Other)}, []}
     catch
         Class:Reason:Stacktrace -> {error, {Class, Reason}, sanitize_stacktrace(Stacktrace)}
     end.
+
+%% @private Reduce a bad return to its shape -- its tag (and arity for a
+%% tagged tuple) or its term kind -- so an event's data or the handler's
+%% state, which a return term can carry, never reaches a dead letter,
+%% on_error, or a log. Atoms are kept whole (they carry no payload).
+return_shape(Atom) when is_atom(Atom) -> Atom;
+return_shape(Tuple) when is_tuple(Tuple), tuple_size(Tuple) >= 1,
+                         is_atom(element(1, Tuple)) ->
+    {element(1, Tuple), tuple_size(Tuple)};
+return_shape(Tuple) when is_tuple(Tuple) -> {tuple, tuple_size(Tuple)};
+return_shape(List) when is_list(List) -> list;
+return_shape(Map) when is_map(Map) -> map;
+return_shape(Bin) when is_binary(Bin) -> binary;
+return_shape(Int) when is_integer(Int) -> integer;
+return_shape(Float) when is_float(Float) -> float;
+return_shape(Pid) when is_pid(Pid) -> pid;
+return_shape(_) -> other.
 
 %% @private Replace each frame's argument list with its arity, so captured
 %% stack frames carry no event payload into anything downstream.

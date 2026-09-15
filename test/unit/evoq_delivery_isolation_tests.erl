@@ -39,7 +39,9 @@ isolation_test_() ->
       {"a raising projection does not lose its queued events",
        fun raising_projection_keeps_queue/0},
       {"an unexpected handler return does not lose the queue",
-       fun bad_return_does_not_lose_queue/0}
+       fun bad_return_does_not_lose_queue/0},
+      {"a bad return's error term keeps only its shape, not its payload",
+       fun bad_return_keeps_only_shape/0}
      ]}.
 
 setup() ->
@@ -165,6 +167,19 @@ bad_return_does_not_lose_queue() ->
     ?assertEqual(ok, await({ret_handled, <<"rr2">>}, 2000)),
     ?assertEqual(ok, await({ret_handled, <<"rr3">>}, 2000)),
     ?assert(is_process_alive(Handler)),
+
+    stop_handlers([Handler]).
+
+%% A bad return can carry event data or handler state; the error term
+%% derived from it must keep only the return's shape (tag + arity), so no
+%% payload rides into on_error, a dead letter, or a log.
+bad_return_keeps_only_shape() ->
+    {ok, Handler} = start_handler(evoq_leaky_return_handler),
+
+    route(<<"leak_evt_v1">>, <<"leak1">>),
+
+    Error = receive {captured_error, E} -> E after 2000 -> timeout end,
+    ?assertEqual({bad_return, {oops, 2}}, Error),
 
     stop_handlers([Handler]).
 
