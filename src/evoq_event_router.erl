@@ -6,7 +6,10 @@
 %% Key features:
 %% - Per-event-type routing (not per-stream)
 %% - Event upcasting before delivery
-%% - Parallel delivery to multiple handlers
+%% - Non-blocking hand-off to each handler: delivery is a cast, so a slow,
+%%   failing or retrying handler delays only itself, never the router and
+%%   never another handler or event type. Each handler processes its own
+%%   events in arrival order in its own process.
 %% - Telemetry for observability
 %%
 %% @author rgfaber
@@ -133,8 +136,9 @@ apply_upcast(skip, Event, EventType) ->
 
 %% @private
 notify_handler(Handler, EventType, Event, Metadata) when is_pid(Handler), node(Handler) =:= node() ->
-    %% Local handler pid - check alive before notifying
-    notify_if_alive(is_process_alive(Handler), Handler, EventType, Event, Metadata);
+    %% Local handler pid - hand off asynchronously (never blocks the
+    %% router). Delivery to a since-dead pid is a harmless no-op cast.
+    evoq_event_handler:deliver(Handler, EventType, Event, Metadata);
 notify_handler(Handler, _EventType, _Event, _Metadata) when is_pid(Handler) ->
     %% Remote handler pid — skip (belongs to another node)
     ok;
@@ -146,14 +150,3 @@ notify_handler(Handler, EventType, Event, Metadata) when is_atom(Handler) ->
         _:Reason ->
             logger:warning("Failed to call handler ~p: ~p", [Handler, Reason])
     end.
-
-%% @private Notify a local handler pid only if still alive.
-notify_if_alive(true, Handler, EventType, Event, Metadata) ->
-    try
-        evoq_event_handler:notify(Handler, EventType, Event, Metadata)
-    catch
-        _:Reason ->
-            logger:warning("Failed to notify handler ~p: ~p", [Handler, Reason])
-    end;
-notify_if_alive(false, _Handler, _EventType, _Event, _Metadata) ->
-    ok.

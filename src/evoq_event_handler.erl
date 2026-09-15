@@ -44,17 +44,30 @@
 -export([start_link/2, start_link/3]).
 -export([get_event_types/1]).
 -export([notify/4]).
+-export([deliver/4]).
 
 %% gen_server callbacks
 -behaviour(gen_server).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
+
+%% An event currently being processed (or retried) by this handler.
+-type inflight() :: none | {binary(), map(), map(), #evoq_failure_context{}}.
 
 -record(state, {
     handler_module :: atom(),
     handler_state :: term(),
     event_types :: [binary()],
     consistency :: eventual | strong,
-    checkpoint :: non_neg_integer()
+    checkpoint :: non_neg_integer(),
+    %% Events delivered asynchronously (deliver/4) but not yet processed,
+    %% kept in arrival order. The router hands events off without waiting,
+    %% so a slow or retrying handler backs up here instead of stalling the
+    %% router or any other handler.
+    pending = queue:new() :: queue:queue({binary(), map(), map()}),
+    %% The single event this handler is working on. While it is set, later
+    %% pending events are held back, so per-handler order is preserved even
+    %% across a retry.
+    inflight = none :: inflight()
 }).
 
 %%====================================================================
@@ -76,10 +89,25 @@ start_link(HandlerModule, Config, Opts) ->
 get_event_types(Pid) ->
     gen_server:call(Pid, get_event_types).
 
-%% @doc Notify handler of an event.
+%% @doc Notify handler of an event synchronously.
+%%
+%% Blocks the caller until the event is fully processed (including any
+%% retry backoff). This path is retained for callers that genuinely need
+%% a result -- e.g. strong-consistency waits and tests. The router does
+%% NOT use it; it uses deliver/4 so one handler can never stall another.
 -spec notify(pid(), binary(), map(), map()) -> ok | {error, term()}.
 notify(Pid, EventType, Event, Metadata) ->
     gen_server:call(Pid, {notify, EventType, Event, Metadata}, infinity).
+
+%% @doc Hand an event to the handler without waiting.
+%%
+%% Delivery is a cast: it never blocks the caller and never fails on a
+%% dead handler. The handler enqueues the event and processes it in
+%% arrival order in its own process, so a slow, failing or retrying
+%% handler delays only itself. This is the router's delivery path.
+-spec deliver(pid(), binary(), map(), map()) -> ok.
+deliver(Pid, EventType, Event, Metadata) ->
+    gen_server:cast(Pid, {deliver, EventType, Event, Metadata}).
 
 %%====================================================================
 %% gen_server callbacks
@@ -118,24 +146,26 @@ handle_call(get_event_types, _From, #state{event_types = Types} = State) ->
     {reply, Types, State};
 
 handle_call({notify, EventType, Event, Metadata}, _From, State) ->
-    case handle_event_internal(EventType, Event, Metadata, State) of
-        {ok, NewState} ->
-            {reply, ok, NewState};
-        {stop, Reason} ->
-            %% Handler decided to stop
-            {stop, Reason, {error, Reason}, State};
-        {error, _Reason} = Error ->
-            {reply, Error, State}
-    end;
+    reply_sync(sync_process(EventType, Event, Metadata, State), State);
 
 handle_call(_Request, _From, State) ->
     {reply, {error, unknown_request}, State}.
 
-%% @private
+%% @private Asynchronous delivery from the router. Enqueue and drive the
+%% single-in-flight processing loop; a busy (retrying) handler just backs
+%% events up in its own queue rather than blocking anyone.
+handle_cast({deliver, EventType, Event, Metadata}, State) ->
+    drive(enqueue(State, {EventType, Event, Metadata}));
+
 handle_cast(_Msg, State) ->
     {noreply, State}.
 
-%% @private
+%% @private A due retry: re-attempt whatever event is currently in flight.
+%% The backoff elapsed as a timer, never as a sleep in this or any shared
+%% process, so nothing was blocked while it ran.
+handle_info(retry_head, State) ->
+    retry_inflight(State);
+
 handle_info(_Info, State) ->
     {noreply, State}.
 
@@ -151,120 +181,143 @@ terminate(_Reason, #state{event_types = EventTypes}) ->
 %% Internal functions
 %%====================================================================
 
+%%--------------------------------------------------------------------
+%% Asynchronous delivery driver (the router's path)
+%%--------------------------------------------------------------------
+%% One event is processed at a time, in arrival order. A retry keeps the
+%% failed event in flight and defers the rest of the queue, so per-handler
+%% order holds across retries. Nothing here blocks: a backoff is a timer,
+%% not a sleep.
+
+%% @private Append an event to the pending queue.
+enqueue(#state{pending = Q} = State, Item) ->
+    State#state{pending = queue:in(Item, Q)}.
+
+%% @private Start the next event if the handler is idle; otherwise leave
+%% it queued behind the in-flight one.
+-spec drive(#state{}) -> {noreply, #state{}} | {stop, term(), #state{}}.
+drive(#state{inflight = none, pending = Q} = State) ->
+    drive_next(queue:out(Q), State);
+drive(State) ->
+    {noreply, State}.
+
+drive_next({empty, _Q}, State) ->
+    {noreply, State};
+drive_next({{value, {EventType, Event, Metadata}}, Q1}, State) ->
+    Context = new_failure_context(State#state.handler_module, Event),
+    run_inflight(State#state{pending = Q1,
+                             inflight = {EventType, Event, Metadata, Context}}).
+
+%% @private Attempt the in-flight event once and act on the result.
+run_inflight(#state{inflight = {EventType, Event, Metadata, Context}} = State) ->
+    dispatch_action(attempt_event(EventType, Event, Metadata, Context, State), State).
+
+dispatch_action({done, NewState}, _State) ->
+    drive(NewState#state{inflight = none});
+dispatch_action({retry, DelayMs, Context1},
+                #state{inflight = {EventType, Event, Metadata, _}} = State) ->
+    _ = erlang:send_after(DelayMs, self(), retry_head),
+    {noreply, State#state{inflight = {EventType, Event, Metadata, Context1}}};
+dispatch_action({stop, Reason}, State) ->
+    {stop, Reason, State}.
+
+%% @private A due retry re-attempts the in-flight event. A stray timer
+%% (event already resolved) is a harmless no-op.
+retry_inflight(#state{inflight = none} = State) ->
+    {noreply, State};
+retry_inflight(State) ->
+    run_inflight(State).
+
+%%--------------------------------------------------------------------
+%% Synchronous driver (notify/4: strong-consistency waits and tests)
+%%--------------------------------------------------------------------
+%% Blocks the caller through the full retry sequence, as before. Only the
+%% caller waits -- the router never takes this path.
+
+reply_sync({ok, NewState}, _State) ->
+    {reply, ok, NewState};
+reply_sync({stop, Reason}, State) ->
+    {stop, Reason, {error, Reason}, State}.
+
+sync_process(EventType, Event, Metadata, State) ->
+    Context = new_failure_context(State#state.handler_module, Event),
+    sync_loop(attempt_event(EventType, Event, Metadata, Context, State),
+              EventType, Event, Metadata, State).
+
+sync_loop({done, NewState}, _EventType, _Event, _Metadata, _State) ->
+    {ok, NewState};
+sync_loop({retry, DelayMs, Context1}, EventType, Event, Metadata, State) ->
+    timer:sleep(DelayMs),
+    sync_loop(attempt_event(EventType, Event, Metadata, Context1, State),
+              EventType, Event, Metadata, State);
+sync_loop({stop, Reason}, _EventType, _Event, _Metadata, _State) ->
+    {stop, Reason}.
+
+%%--------------------------------------------------------------------
+%% Single-attempt core (shared by both drivers)
+%%--------------------------------------------------------------------
+
+%% @private One attempt at an event. Returns the next step for a driver to
+%% carry out; it never loops, sleeps, or blocks itself.
+-spec attempt_event(binary(), map(), map(), #evoq_failure_context{}, #state{}) ->
+    {done, #state{}} | {retry, non_neg_integer(), #evoq_failure_context{}} |
+    {stop, term()}.
+attempt_event(EventType, Event, Metadata, Context, State) ->
+    #state{handler_module = HandlerModule, handler_state = HandlerState} = State,
+    StartTime = erlang:system_time(microsecond),
+    telemetry:execute(?TELEMETRY_HANDLER_EVENT_START,
+                      #{system_time => StartTime},
+                      #{handler => HandlerModule, event_type => EventType,
+                        attempt => Context#evoq_failure_context.attempt_number}),
+    Result = HandlerModule:handle_event(EventType, Event, Metadata, HandlerState),
+    handle_result(Result, EventType, Event, Metadata, Context, State, StartTime).
+
+handle_result({ok, NewHandlerState}, EventType, _Event, Metadata, _Context, State, StartTime) ->
+    telemetry:execute(?TELEMETRY_HANDLER_EVENT_STOP,
+                      #{duration => erlang:system_time(microsecond) - StartTime},
+                      #{handler => State#state.handler_module, event_type => EventType}),
+    {done, State#state{handler_state = NewHandlerState,
+                       checkpoint = advance(Metadata, State)}};
+handle_result({error, Reason}, EventType, Event, Metadata, Context, State, StartTime) ->
+    #state{handler_module = HandlerModule, handler_state = HandlerState} = State,
+    telemetry:execute(?TELEMETRY_HANDLER_EVENT_EXCEPTION,
+                      #{duration => erlang:system_time(microsecond) - StartTime},
+                      #{handler => HandlerModule, event_type => EventType, error => Reason}),
+    Context1 = Context#evoq_failure_context{
+        error = Reason, last_failure_at = erlang:system_time(millisecond)},
+    Action = evoq_error_handler:handle_error(
+        HandlerModule, Reason, Event, Context1, HandlerState),
+    map_action(Action, Event, Metadata, Context1, State).
+
+%% @private Translate the error handler's decision into a driver step.
+map_action(retry, _Event, _Metadata, Context, _State) ->
+    {retry, 0, increment_attempt(Context)};
+map_action({retry, DelayMs}, _Event, _Metadata, Context, _State) ->
+    {retry, DelayMs, increment_attempt(Context)};
+map_action(skip, _Event, Metadata, _Context, State) ->
+    {done, State#state{checkpoint = advance(Metadata, State)}};
+map_action({dead_letter, Reason}, Event, Metadata, Context, State) ->
+    _ = evoq_dead_letter:store(Event, State#state.handler_module, Context, Reason),
+    {done, State#state{checkpoint = advance(Metadata, State)}};
+map_action(stop, _Event, _Metadata, Context, _State) ->
+    {stop, {handler_stopped, Context#evoq_failure_context.error}}.
+
+%% @private Next checkpoint from event metadata, or the current one.
+advance(Metadata, #state{checkpoint = Checkpoint}) ->
+    maps:get(version, Metadata, Checkpoint).
+
 %% @private
-handle_event_internal(EventType, Event, Metadata, State) ->
-    FailureContext = #evoq_failure_context{
-        handler_module = State#state.handler_module,
+new_failure_context(HandlerModule, Event) ->
+    Now = erlang:system_time(millisecond),
+    #evoq_failure_context{
+        handler_module = HandlerModule,
         event = Event,
         error = undefined,
         attempt_number = 1,
-        first_failure_at = erlang:system_time(millisecond),
-        last_failure_at = erlang:system_time(millisecond),
+        first_failure_at = Now,
+        last_failure_at = Now,
         stacktrace = []
-    },
-    handle_event_with_retry(EventType, Event, Metadata, State, FailureContext).
-
-%% @private
-handle_event_with_retry(EventType, Event, Metadata, State, FailureContext) ->
-    #state{
-        handler_module = HandlerModule,
-        handler_state = HandlerState,
-        checkpoint = Checkpoint
-    } = State,
-
-    StartTime = erlang:system_time(microsecond),
-
-    %% Emit start telemetry
-    telemetry:execute(?TELEMETRY_HANDLER_EVENT_START, #{
-        system_time => StartTime
-    }, #{
-        handler => HandlerModule,
-        event_type => EventType,
-        attempt => FailureContext#evoq_failure_context.attempt_number
-    }),
-
-    %% Call the handler
-    case HandlerModule:handle_event(EventType, Event, Metadata, HandlerState) of
-        {ok, NewHandlerState} ->
-            Duration = erlang:system_time(microsecond) - StartTime,
-
-            %% Emit success telemetry
-            telemetry:execute(?TELEMETRY_HANDLER_EVENT_STOP, #{
-                duration => Duration
-            }, #{
-                handler => HandlerModule,
-                event_type => EventType
-            }),
-
-            %% Update checkpoint from event metadata
-            NewCheckpoint = maps:get(version, Metadata, Checkpoint),
-
-            NewState = State#state{
-                handler_state = NewHandlerState,
-                checkpoint = NewCheckpoint
-            },
-            {ok, NewState};
-
-        {error, Reason} ->
-            Duration = erlang:system_time(microsecond) - StartTime,
-
-            %% Emit failure telemetry
-            telemetry:execute(?TELEMETRY_HANDLER_EVENT_EXCEPTION, #{
-                duration => Duration
-            }, #{
-                handler => HandlerModule,
-                event_type => EventType,
-                error => Reason
-            }),
-
-            %% Update failure context
-            UpdatedContext = FailureContext#evoq_failure_context{
-                error = Reason,
-                last_failure_at = erlang:system_time(millisecond)
-            },
-
-            %% Get error action from handler or use default
-            Action = evoq_error_handler:handle_error(
-                HandlerModule, Reason, Event, UpdatedContext, HandlerState
-            ),
-
-            %% Execute the action
-            execute_error_action(Action, EventType, Event, Metadata, State, UpdatedContext)
-    end.
-
-%% @private
-%% Execute error action based on handler's decision
-execute_error_action(retry, EventType, Event, Metadata, State, FailureContext) ->
-    %% Retry immediately
-    NewContext = increment_attempt(FailureContext),
-    handle_event_with_retry(EventType, Event, Metadata, State, NewContext);
-
-execute_error_action({retry, DelayMs}, EventType, Event, Metadata, State, FailureContext) ->
-    %% Retry after delay
-    timer:sleep(DelayMs),
-    NewContext = increment_attempt(FailureContext),
-    handle_event_with_retry(EventType, Event, Metadata, State, NewContext);
-
-execute_error_action(skip, _EventType, _Event, Metadata, State, _FailureContext) ->
-    %% Skip this event, update checkpoint and continue
-    #state{checkpoint = Checkpoint} = State,
-    NewCheckpoint = maps:get(version, Metadata, Checkpoint),
-    {ok, State#state{checkpoint = NewCheckpoint}};
-
-execute_error_action(stop, _EventType, _Event, _Metadata, _State, FailureContext) ->
-    %% Stop the handler - return error to trigger gen_server stop
-    {stop, {handler_stopped, FailureContext#evoq_failure_context.error}};
-
-execute_error_action({dead_letter, Reason}, _EventType, Event, Metadata, State, FailureContext) ->
-    %% Send to dead letter queue and continue
-    #state{handler_module = HandlerModule, checkpoint = Checkpoint} = State,
-
-    %% Store in dead letter
-    _ = evoq_dead_letter:store(Event, HandlerModule, FailureContext, Reason),
-
-    %% Update checkpoint and continue
-    NewCheckpoint = maps:get(version, Metadata, Checkpoint),
-    {ok, State#state{checkpoint = NewCheckpoint}}.
+    }.
 
 %% @private
 increment_attempt(#evoq_failure_context{attempt_number = N} = Ctx) ->
