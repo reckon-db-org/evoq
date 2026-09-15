@@ -33,7 +33,7 @@ start_link() ->
     gen_server:start_link({local, ?SERVER}, ?MODULE, [], []).
 
 %% @doc Load checkpoint for a projection.
--spec load(atom()) -> {ok, non_neg_integer()} | {error, not_found}.
+-spec load(atom()) -> {ok, evoq_checkpoint_store:checkpoint()} | {error, not_found}.
 load(ProjectionName) ->
     case ets:lookup(?TABLE, ProjectionName) of
         [{ProjectionName, Checkpoint}] ->
@@ -43,7 +43,7 @@ load(ProjectionName) ->
     end.
 
 %% @doc Save checkpoint for a projection.
--spec save(atom(), non_neg_integer()) -> ok.
+-spec save(atom(), evoq_checkpoint_store:checkpoint()) -> ok.
 save(ProjectionName, Checkpoint) ->
     true = ets:insert(?TABLE, {ProjectionName, Checkpoint}),
     ok.

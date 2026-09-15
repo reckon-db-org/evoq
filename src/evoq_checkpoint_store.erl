@@ -12,11 +12,18 @@
 %% @author rgfaber
 -module(evoq_checkpoint_store).
 
+%% A checkpoint is an opaque position term. Projections use a
+%% non-negative integer version; the checkpointed event handler uses an
+%% {Offset, OrderKey} pair. An implementation stores and returns it
+%% verbatim.
+-type checkpoint() :: term().
+-export_type([checkpoint/0]).
+
 %% Behavior callbacks
 -callback load(ProjectionName :: atom()) ->
-    {ok, Checkpoint :: non_neg_integer()} | {error, not_found | term()}.
+    {ok, Checkpoint :: checkpoint()} | {error, not_found | term()}.
 
--callback save(ProjectionName :: atom(), Checkpoint :: non_neg_integer()) ->
+-callback save(ProjectionName :: atom(), Checkpoint :: checkpoint()) ->
     ok | {error, term()}.
 
 %% Optional: delete checkpoint
