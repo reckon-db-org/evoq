@@ -128,13 +128,24 @@ jobs:
       #
       # ⚠ EXPECTED RED ON ARRIVAL. DO NOT "FIX" THIS BY WEAKENING THE STEP.
       #
-      # At the commit that added this workflow, `rebar3 dialyzer' exits 1 on
-      # main with eight findings, measured on OTP 28.4.2. Four are supertype
-      # specs in evoq_aggregate. Four look like real defects: evoq_projection
-      # matches {ok, NewState} against a type that can only be {error, _},
-      # constructs its state record with checkpoint = -1 against a field
-      # declared non_neg_integer(), and evoq_event_handler matches an error
-      # tuple that can never occur.
+      # `rebar3 dialyzer' exits 1 with SIXTEEN findings, confirmed identical
+      # locally on OTP 28.4.2 and in this job's first run. Eleven are loose
+      # specs (a supertype or an extra error return) in evoq_aggregate x4,
+      # evoq_snapshot_store, evoq_store_subscription x2, evoq_telemetry,
+      # evoq_read_model_ets and evoq_test_assertions x2. FIVE look like real
+      # defects and are the ones worth reading first:
+      #
+      #   evoq_event_handler:127  a pattern {error, _} that can never match
+      #   evoq_projection:199     a pattern {ok, _} against an error-only type
+      #   evoq_projection:367     the state record built with checkpoint = -1
+      #                           against a field declared non_neg_integer()
+      #   evoq_projection:380     replay_events/2 can never be called
+      #   evoq_projection:398     replay_events_list/2 can never be called
+      #
+      # An earlier version of this comment said eight. That was wrong: the
+      # count came from reading a truncated head of the output rather than the
+      # summary line, which says 16 in both places. Read `Warnings occurred
+      # running dialyzer: N', not the findings you can see.
       #
       # That red is the POINT, not a defect in this workflow. It is what a
       # library gets when nothing has ever run its checks, and it is the first
@@ -145,7 +156,13 @@ jobs:
       # It also cannot simply be made green from here: one finding is in
       # evoq_event_handler.erl, which a parked branch has uncommitted work in,
       # so fixing it on main would collide with work that is neither finished
-      # nor abandoned. Fix the other seven by all means, in their own change,
+      # nor abandoned. Fix the other fifteen by all means, in their own change,
       # and leave that one to whoever resumes that branch.
+      #
+      # One practical consequence of the red, worth knowing before someone
+      # calls the cache broken: because this step fails, the cache's post step
+      # never runs, so nothing is saved and every run rebuilds the PLT from
+      # scratch. That is most of the four and a half minutes. It resolves
+      # itself when the findings are fixed; it is not a cache misconfiguration.
       - name: Dialyzer
         run: rebar3 dialyzer
