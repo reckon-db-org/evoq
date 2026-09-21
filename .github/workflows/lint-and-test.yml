@@ -125,5 +125,27 @@ jobs:
       # Configured in rebar.config with unmatched_returns, error_handling and
       # underspecs, which is a stricter set than the default. Last because it
       # is the slowest and the PLT build dominates a cold run.
+      #
+      # ⚠ EXPECTED RED ON ARRIVAL. DO NOT "FIX" THIS BY WEAKENING THE STEP.
+      #
+      # At the commit that added this workflow, `rebar3 dialyzer' exits 1 on
+      # main with eight findings, measured on OTP 28.4.2. Four are supertype
+      # specs in evoq_aggregate. Four look like real defects: evoq_projection
+      # matches {ok, NewState} against a type that can only be {error, _},
+      # constructs its state record with checkpoint = -1 against a field
+      # declared non_neg_integer(), and evoq_event_handler matches an error
+      # tuple that can never occur.
+      #
+      # That red is the POINT, not a defect in this workflow. It is what a
+      # library gets when nothing has ever run its checks, and it is the first
+      # time anything has said so. The findings are information; deleting the
+      # step, marking it continue-on-error, or dropping it to get a green first
+      # run would restore the exact silence this file exists to end.
+      #
+      # It also cannot simply be made green from here: one finding is in
+      # evoq_event_handler.erl, which a parked branch has uncommitted work in,
+      # so fixing it on main would collide with work that is neither finished
+      # nor abandoned. Fix the other seven by all means, in their own change,
+      # and leave that one to whoever resumes that branch.
       - name: Dialyzer
         run: rebar3 dialyzer
