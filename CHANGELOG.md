@@ -5,6 +5,31 @@ All notable changes to evoq will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed — `event_type/0`'s declared type was narrower than this library's own runtime
+
+`-callback event_type() -> atom().` is now `atom() | binary()`.
+
+Nothing about behaviour changes. The spec was simply wrong about what evoq
+accepts: `evoq_aggregate:resolve_event_type/1` has always had an `is_atom`
+clause that converts to binary and an `is_binary` clause that passes through,
+and every layer below it is binary-only — `{event_type, binary()}` in
+`evoq_decision`, the `[by_event_type]` index read in
+`evoq_decision_runtime`, `event_type :: binary()` in reckon_gater's shared
+event record, and `is_binary` guards on reckon_db's index paths. The
+atom-only spec was the single outlier in the whole stack.
+
+The cost of it was borne by consumers: every Elixir event module returning a
+string (the wire and event-store discriminator format the pipeline already
+depends on) drew a dialyzer `callback_type_mismatch` it could not fix without
+changing stored event data. macula-realm alone carried twelve
+`.dialyzer_ignore.exs` entries for it, which between them masked the only
+callback this behaviour actually checks.
+
+Purely additive: Erlang implementations returning atoms, which is what the
+hecate-sdk code generator emits, were correct before and are correct now.
+
 ## [1.23.3] - 2026-09-05
 
 ### Fixed — every event was delivered twice to every projection/PM, on every boot, since 2026-03-19
