@@ -32,6 +32,26 @@ name: lint-and-test
 
 on:
   push:
+    # ⚠ `branches' IS LOAD-BEARING, NOT DECORATION. A `push' event fires for
+    # TAG refs as well as branch refs, so without it this suite ran a second
+    # time on every release tag, beside publish-hex.yml. Measured on v1.23.4:
+    # the tag triggered both workflows. `**' matches every branch and excludes
+    # tags, which is the whole intent. A branch push is not the case that
+    # distinguishes the two triggers, which is why it went unnoticed until the
+    # first real tag existed to distinguish them.
+    #
+    # WHAT IS LOST IS REAL: after this, no suite runs against a tag ref at all.
+    # What justifies it is that a tag adds no code and names a commit where
+    # this suite already ran on that exact tree. PUT IT BACK if either of those
+    # stops holding: if tags stop being cut from already-green main commits, or
+    # if publish-hex.yml's verify job grows past a package build into something
+    # that could pass while the suite would not.
+    #
+    # Same defect, same cause and same fix in macula-io/macula, found
+    # independently by Mercurius on its own first tag and fixed there in
+    # 7edc84d2. Two repositories, two sessions, one bug; the reasoning above is
+    # his, kept rather than re-derived.
+    branches: ['**']
     paths-ignore:
       - '**.md'
       - 'guides/**'
