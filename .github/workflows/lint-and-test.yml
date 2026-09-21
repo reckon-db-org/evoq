@@ -1,0 +1,129 @@
+# Structural lint, EUnit, Common Test, PropEr and Dialyzer.
+#
+# THIS IS evoq's FIRST WORKFLOW. Until it existed, no test in this repository
+# had ever been run by a machine on any change, at any point in its history.
+# evoq is a hex library that reckon_evoq and every event-sourced application we
+# run sits on top of, so "the author ran it locally before tagging" was the only
+# gate between a regression here and every consumer of it.
+#
+# ON PUSH AND PULL REQUEST, deliberately, and this is where it diverges from
+# mcl-om's equivalent. That one is `workflow_dispatch` only, because its
+# push/PR churn produced five runs for five CI-fix pushes and no signal. Two
+# things make the trade different here:
+#
+#   * This job is cheap. evoq has ONE runtime dependency (telemetry, exactly
+#     pinned), no NIF, no rocksdb, and no ML-DSA requirement, so there is no
+#     OpenSSL-and-OTP-from-source build to pay for. setup-beam's prebuilt OTP
+#     is sufficient, which it is not for mcl-om or macula-station.
+#   * The failure mode being prevented is precisely "nobody remembers to run
+#     it". A dispatch-only gate on a repository that has never once been tested
+#     by machine preserves the condition it is meant to end.
+#
+# If the churn ever does become the problem here, narrow the trigger rather
+# than deleting the job, and say in the commit what changed your mind.
+#
+# ubuntu-latest, not self-hosted: evoq is a PUBLIC repository, so GitHub-hosted
+# minutes are free and there is no billing block of the kind that pushed
+# macula-io's private repos onto their own runners. It also keeps this job away
+# from the shared-workspace ownership class of failure that had macula-realm's
+# image job dead for fifteen consecutive runs.
+
+name: lint-and-test
+
+on:
+  push:
+    paths-ignore:
+      - '**.md'
+      - 'guides/**'
+      - 'assets/**'
+      - 'doc/**'
+      - 'proposals/**'
+  pull_request:
+    paths-ignore:
+      - '**.md'
+      - 'guides/**'
+      - 'assets/**'
+      - 'doc/**'
+      - 'proposals/**'
+  # So a docs-only change, or anything the filters above skip, can still be
+  # checked on demand without editing this file.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  # From .tool-versions, which is what a developer's shell resolves here. A
+  # different OTP in CI than on the desk is a class of bug this avoids by
+  # construction.
+  OTP_VERSION: '28.4.2'
+  REBAR3_VERSION: '3.27.0'
+
+concurrency:
+  group: lint-and-test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: lint + eunit + ct + proper + dialyzer (OTP 28.4.2)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Erlang/OTP and rebar3
+        uses: erlef/setup-beam@v1
+        with:
+          otp-version: ${{ env.OTP_VERSION }}
+          rebar3-version: ${{ env.REBAR3_VERSION }}
+          version-type: strict
+
+      # ⚠ The hex dependency cache and the Dialyzer PLT, deliberately NOT the
+      # whole `_build'.
+      #
+      # A cached `_build' restores stale beams, and rebar3 runs test modules
+      # from the build path: a DELETED test module keeps being run, and kept
+      # failing, from its stale beam. That has cost this team a false finding
+      # already. Dependency downloads and the PLT are the slow parts and
+      # neither has that hazard, so cache exactly those.
+      #
+      # No `rebar3 upgrade --all' step of the kind mcl-om needs: every dep here
+      # is an EXACT pin (telemetry 1.3.0, proper 1.4.0, meck 0.9.2), so a
+      # restored cache cannot be holding a stale "latest matching" release.
+      # rebar.lock is untracked here, per the house rule, and the cache key
+      # does not need it while the pins stay exact. If a range ever appears in
+      # rebar.config, this comment stops being true.
+      - name: Cache hex deps and the Dialyzer PLT
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/rebar3
+            _build/default/*_plt
+          key: evoq-otp${{ env.OTP_VERSION }}-${{ hashFiles('rebar.config', 'src/*.app.src') }}
+          restore-keys: |
+            evoq-otp${{ env.OTP_VERSION }}-
+
+      - name: Compile
+        run: rebar3 compile
+
+      # Elvis, against the repo's own focused `macula_min' ruleset: no deep
+      # nesting, no nested try/catch, no if-expressions. Cheapest check, so
+      # first.
+      - name: Lint
+        run: rebar3 lint
+
+      - name: EUnit
+        run: rebar3 eunit
+
+      - name: Common Test
+        run: rebar3 ct
+
+      - name: PropEr
+        run: rebar3 proper
+
+      # Configured in rebar.config with unmatched_returns, error_handling and
+      # underspecs, which is a stricter set than the default. Last because it
+      # is the slowest and the PLT build dominates a cold run.
+      - name: Dialyzer
+        run: rebar3 dialyzer
