@@ -29,7 +29,7 @@ Add to your `rebar.config`:
 
 ```erlang
 {deps, [
-    {evoq, "~> 1.23"}
+    {evoq, "~> 1.24"}
 ]}.
 ```
 

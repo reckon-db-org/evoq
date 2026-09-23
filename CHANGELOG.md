@@ -5,6 +5,89 @@ All notable changes to evoq will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.24.0] - 2026-09-23
+
+### Fixed — a restart re-fired everything the node had already reacted to
+
+`evoq_store_subscription` rescans the whole store on every boot, so
+in-memory read models can rebuild, and routed every stored event to every
+handler and process manager as if it were new. A process manager dispatched
+its whole command history again and a side-effecting handler repeated every
+side effect, on every restart. Measured live: 1174 re-publishes on one
+macula-realm restart; the same in mcl-sentinel.
+
+The persisted `$all` checkpoint (acked since 1.23.3) is now read at boot and
+is the boundary. Events below it are **replay** and carry
+`replaying => true` in their metadata, from catch-up and from backfill
+alike. Events at or above it were appended while the node was down and are
+delivered exactly as before. Live metadata is unchanged.
+
+- **Process managers**: for replay, `handle/3` and `apply/2` still run, so
+  an instance rebuilds exactly its state, but the commands `handle/3`
+  returns are **not dispatched**.
+- **Event handlers**: see *Added*. Undeclared handlers keep receiving
+  replay, as before.
+- **Projections**: unchanged.
+
+### Added — `evoq_event_handler` optional callback `replay_policy() -> skip | deliver`
+
+`skip` for a handler with side effects: it no longer sees replay. `deliver`
+for a handler rebuilding in-memory state. Not declaring it delivers, as
+before, and logs one warning per boot naming the handler the first time it
+is handed replay (`what => evoq_handler_received_replay_without_policy`).
+Any other return is an error.
+
+**Consumers with side-effecting handlers should declare `skip`**: until
+they do, they re-fire on restart exactly as on 1.23.x, and the warning names
+them.
+
+### Fixed — a handler's own messages never reached it
+
+`evoq_event_handler`'s `handle_info/2` dropped every message, so a handler
+that scheduled one to itself (a retry via `send_after`, as macula-realm's
+delegation publisher does) never saw it and the retry silently never ran.
+
+### Added — `evoq_event_handler` optional callback `handle_info/2`
+
+Receives every other message the handler process gets, gen_server's shape:
+`{noreply, NewState} | {stop, Reason, NewState}`. A handler without it that
+is sent a message logs a warning naming itself and the message
+(`what => evoq_handler_has_no_handle_info`).
+
+### Fixed — a projection with a checkpoint store dropped the first event it was ever handed
+
+A store holding no checkpoint yet (`load/1` returning `{error, not_found}`,
+i.e. every projection's first boot) or a store without `load/1` loaded as
+0, and since routed events are numbered from 0, event 0 read as already
+covered and was skipped without a word. Both now load as -1, the value
+`do_rebuild/1` already used for "nothing projected".
+
+`evoq_projection:get_checkpoint/1` therefore returns **-1, not 0,** before
+anything is projected when a checkpoint store is configured (it already
+returned -1 without one), and is typed `integer()`.
+
+### Build — project plugins pinned
+
+`rebar3_hex` 7.2.0, `rebar3_ex_doc` 0.3.0, `rebar3_proper` 0.12.1,
+`rebar3_lint` 6.0.0. `rebar3_hex` 7.3.0 ignores `HEX_API_KEY` and cannot
+publish from CI; the pin is inside the tag, so an unpinned tag could not have
+been rescued by a re-run.
+
+### Tests — every unit test module runs
+
+`eunit_tests` was a hand-kept module list, and two modules had never run in
+CI (`evoq_aggregate_registry_tests`, `evoq_lineage_tests`). It is now
+`{dir, "test/unit"}`. Two isolation bugs that the list had hidden are fixed.
+
+### Known limits
+
+- After a **crash**, up to 199 events delivered since the last ack arrive as
+  new again. Exactly-once would need a checkpoint per handler.
+- A node whose checkpoint was never moved (evoq before 1.23.3) sees its
+  history as new once more, on its first boot with 1.24.0.
+- An unreadable checkpoint is treated as "nothing is replay" (at-least-once)
+  and logged.
+
 ## [1.23.4] - 2026-09-21
 
 ### Fixed — `event_type/0`'s declared type was narrower than this library's own runtime
