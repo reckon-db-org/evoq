@@ -18,6 +18,25 @@
 %% 5. Routes matching events to evoq_event_router and evoq_pm_router
 %% 6. Skips events with no registered handlers (zero cost)
 %%
+%% == Replay ==
+%%
+%% Step 1 runs on every boot, so events this node had already consumed
+%% before it went down come around again. They are REPLAY: every event at a
+%% global position below the persisted $all checkpoint, read at boot before
+%% this boot's own ack moves it. Replay carries `replaying => true' in its
+%% metadata, from catch-up and from backfill alike. Process managers run
+%% handle/3 and apply/2 for it but do not dispatch the commands; event
+%% handlers declaring `replay_policy() -> skip' do not see it (see
+%% evoq_event_handler). Events at or above the checkpoint were appended
+%% while the node was down and are delivered exactly like live ones.
+%%
+%% Limits: the checkpoint is acked every 200 events and on a clean stop,
+%% so after a CRASH up to 199 events delivered since the last ack arrive as
+%% new again; exactly-once would need a checkpoint per handler. A node
+%% whose checkpoint was never moved (evoq before 1.23.3 never acked it)
+%% sees its whole history as new once more, on its first boot with 1.24.0.
+%% An unreadable checkpoint is treated as "nothing is replay", logged.
+%%
 %% == Usage ==
 %%
 %% Start one instance per event store:
