@@ -146,33 +146,22 @@ jobs:
       # underspecs, which is a stricter set than the default. Last because it
       # is the slowest and the PLT build dominates a cold run.
       #
-      # ⚠ EXPECTED RED ON ARRIVAL. DO NOT "FIX" THIS BY WEAKENING THE STEP.
+      # ⚠ A RATCHET, NOT A PASS/FAIL. The known findings are recorded in
+      # `.dialyzer_baseline'; scripts/check_ratchet.sh fails only on a finding
+      # NOT in it, and names it. A finding that disappears is reported so its
+      # line can be struck. (Same script as reckon-db and reckon-evoq.)
       #
-      # `rebar3 dialyzer' exits 1 with TWELVE findings on OTP 28.4.3. Eleven
-      # are loose specs (a supertype or an extra error return) in
-      # evoq_aggregate x4, evoq_snapshot_store, evoq_store_subscription x2,
-      # evoq_telemetry, evoq_read_model_ets and evoq_test_assertions x2. ONE
-      # looks like a real defect: in evoq_event_handler:notify_reply/5, a
-      # pattern {error, _} that can never match. Count from the summary line,
-      # `Warnings occurred running dialyzer: N', never from the findings you
-      # can see: a truncated head of this output once gave a wrong count.
+      # This step used to run bare `rebar3 dialyzer', which exited 1 on every
+      # push with the same twelve known findings. A CI that is always red says
+      # nothing: the next real failure would have looked exactly like every
+      # run before it. The twelve are still visible, in the baseline, one line
+      # each: eleven loose specs and one real defect (the `{error, _}' pattern
+      # that can never match in evoq_event_handler:notify_reply/5, left for
+      # the parked handler-delivery branch). Fix them in their own changes and
+      # strike their lines; do not add to the baseline without saying why.
       #
-      # That red is the POINT, not a defect in this workflow. It is what a
-      # library gets when nothing has ever run its checks, and it is the first
-      # time anything has said so. The findings are information; deleting the
-      # step, marking it continue-on-error, or dropping it to get a green first
-      # run would restore the exact silence this file exists to end.
-      #
-      # It also cannot simply be made green from here: one finding is in
-      # evoq_event_handler.erl, which a parked branch has uncommitted work in,
-      # so fixing it on main would collide with work that is neither finished
-      # nor abandoned. Fix the other eleven by all means, in their own change,
-      # and leave that one to whoever resumes that branch.
-      #
-      # One practical consequence of the red, worth knowing before someone
-      # calls the cache broken: because this step fails, the cache's post step
-      # never runs, so nothing is saved and every run rebuilds the PLT from
-      # scratch. That is most of the four and a half minutes. It resolves
-      # itself when the findings are fixed; it is not a cache misconfiguration.
-      - name: Dialyzer
-        run: rebar3 dialyzer
+      # Count from the summary line, `Warnings occurred running dialyzer: N',
+      # never from the findings you can see: a truncated head of this output
+      # once gave a wrong count.
+      - name: Dialyzer (ratchet against .dialyzer_baseline)
+        run: bash scripts/check_ratchet.sh

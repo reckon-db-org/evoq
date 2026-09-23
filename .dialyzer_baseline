@@ -1,0 +1,15 @@
+# Known dialyzer findings, recorded as a ratchet. See scripts/check_ratchet.sh.
+# dialyzer reported 12 when this was written (files for lint, warnings for dialyzer).
+# A new finding fails CI. A fixed finding should have its line deleted here.
+src/evoq_aggregate.erl	7710f09858d5	Type specification evoq_aggregate:is_wrong_version_error(term()) -> boolean() is a supertype of the success ty
+src/evoq_aggregate.erl	96215a4e8f43	Type specification evoq_aggregate:rebuild_and_reply_conflict(#evoq_aggregate_state{},module(),atom(),binary())
+src/evoq_aggregate.erl	9e84ed9cdf08	Type specification evoq_aggregate:reply_after_append_error(term(),#evoq_aggregate_state{},module(),atom(),bina
+src/evoq_aggregate.erl	a2678003a7d4	Type specification evoq_aggregate:is_integrity_violation(term()) -> boolean() is a supertype of the success ty
+src/evoq_event_handler.erl	e7ff723bce36	The pattern Error = {'error', _Reason} can never match the type {'ok',#state{handler_module::atom(),event_type
+src/evoq_read_model_ets.erl	9edc6642c3bd	The specification for evoq_read_model_ets:init/1 states that the function might also return {'error',_} but th
+src/evoq_snapshot_store.erl	13f08bd47e4f	Type specification evoq_snapshot_store:snapshot_to_map(evoq_snapshot()) -> map() is a supertype of the success
+src/evoq_store_subscription.erl	19db2981cea3	Type specification evoq_store_subscription:catch_up_loop(atom(),non_neg_integer(),pos_integer(),non_neg_intege
+src/evoq_store_subscription.erl	6fb8edd0f12f	Type specification evoq_store_subscription:evoq_event_to_routable(evoq_event()) -> {map(),map()} is a supertyp
+src/evoq_telemetry.erl	061ee7a4b2a9	Type specification evoq_telemetry:list_handlers() -> [map()] is a supertype of the success typing: evoq_teleme
+src/evoq_test_assertions.erl	5417535755dd	Type specification evoq_test_assertions:assert_no_events_produced([map()]) -> 'ok' is a supertype of the succe
+src/evoq_test_assertions.erl	f53bc3655186	Type specification evoq_test_assertions:collect_telemetry([atom()],fun(() -> term())) -> {term(),[map()]} is a
