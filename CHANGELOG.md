@@ -5,6 +5,30 @@ All notable changes to evoq will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.24.1] - 2026-09-23
+
+### Fixed — an aggregate over 1000 events could never accept another command
+
+`evoq_aggregate` replayed a stream with ONE store read of 1000 events and
+no loop. A longer stream loaded at version 999, and every command on it
+failed `{wrong_expected_version, 999, N}`, forever, on both the load path
+and the rebuild path. Found live on macula-realm (a 1173-event aggregate).
+Replay now reads 1000-event pages until a short one, and refuses
+(`{replay_not_advancing, ...}`) instead of looping if a store ignores the
+start version.
+
+### Fixed — resuming from a snapshot applied its last event twice
+
+Replay after a snapshot at version V started at V (reads are inclusive), so
+event V was applied again on top of the snapshot. It now starts at V + 1.
+Only aggregates exporting `snapshot/1` and `from_snapshot/1` were affected.
+
+### Known limit, not fixed here
+
+Reads by event type and by tag (`evoq_decision_runtime`, projection
+rebuild) return at most their batch size (1000), and reckon-db offers no
+offset for them, so they cannot page from evoq. Tracked as an issue.
+
 ## [1.24.0] - 2026-09-23
 
 ### Fixed — a restart re-fired everything the node had already reacted to
