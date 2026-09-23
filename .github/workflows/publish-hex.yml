@@ -11,29 +11,27 @@ name: Publish to hex
 # builds the package and docs, publishes, and checks that hex serves the tagged
 # code.
 #
-# - A pushed tag vX.Y.Z runs `verify'. Then `publish' waits in the
-#   `hex-publish' environment until its required reviewer approves it.
-#   THE TAG ARMS THE PUBLISH; THE APPROVAL PERFORMS IT.
+# - A pushed tag vX.Y.Z runs `verify', then `publish'. THE TAG PUBLISHES.
+#   There is no second human step, by design (see below).
 # - A manual dispatch is a dry run: it runs `verify' for the given tag and
 #   never publishes. GitHub only dispatches a workflow that is on the
 #   default branch.
 #
-# ⚠ THE GATE IS A GITHUB SETTING, NOT THIS FILE. `environment: hex-publish'
-# below does not create the environment or its reviewer. On a repository where
-# that environment does not exist, GitHub creates it implicitly WITH NO
-# PROTECTION RULES and the publish job runs unreviewed. As of this commit
-# reckon-db-org/evoq has no environments at all and no secrets, so before any
-# tag is pushed the environment must exist, carry `rgfaber' as a required
-# reviewer, and hold HEX_API_KEY as an ENVIRONMENT secret rather than a
-# repository one, which is how macula-io/macula is configured. Until
-# HEX_API_KEY exists the publish step fails rather than publishing, which is
-# luck rather than a gate; do not rely on it.
+# TAG-TO-RELEASE IS THE DESIGN, NOT A MISSING GATE. Raf, 2026-09-22: "I WANT
+# tag-to-release". The `hex-publish' environment here carries only a `v*.*.*'
+# branch policy and NO required reviewer, measured through
+# `gh api repos/.../environments/hex-publish', and that is deliberate: the
+# approval point is the PUSH OF THE TAG, which already goes to Raf under the
+# push gate. A second human gate after it would duplicate that one.
 #
-# ⚠ scripts/publish-to-hex.sh IN THIS REPOSITORY IS A SECOND PUBLISH PATH.
-# It runs `rebar3 hex publish' from a developer's working tree with no tag
-# check, no clean-tree check and no review. One version with two publish routes
-# is the thing this gate exists to prevent. It should be retired, or reduced to
-# a local dry run, in its own change; this workflow does not touch it.
+# ⛔ DO NOT ADD A REQUIRED REVIEWER HERE, and do not write a comment claiming
+# one exists. A comment describing a safeguard that is not there is worse than
+# no comment: it is the failure this project has hit before, where the text
+# said a check ran and nothing did. HEX_API_KEY is present as an environment
+# secret, so a pushed tag does publish.
+#
+# scripts/publish-to-hex.sh is the local half of this workflow: every guard,
+# the package and docs build, and a dry run. It never publishes.
 #
 # evoq is a pure-Erlang library with one exactly-pinned dependency and ships no
 # NIF, so there is no "does the NIF load from this build" step: the docs build
@@ -98,7 +96,7 @@ jobs:
         run: rebar3 hex build
 
       # The publish job's command as a dry run, with a placeholder key. It
-      # fails here, before anyone is asked to approve, if the command does
+      # fails here, before the publish job starts, if the command does
       # not read a key from HEX_API_KEY; it cannot tell whether the real key
       # works. The dead API URL keeps the placeholder away from hex.pm.
       - name: Dry-run the publish command
