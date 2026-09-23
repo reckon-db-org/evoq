@@ -76,7 +76,7 @@ env:
   # From .tool-versions, which is what a developer's shell resolves here. A
   # different OTP in CI than on the desk is a class of bug this avoids by
   # construction.
-  OTP_VERSION: '28.4.2'
+  OTP_VERSION: '28.4.3'
   REBAR3_VERSION: '3.27.0'
 
 concurrency:
@@ -85,7 +85,7 @@ concurrency:
 
 jobs:
   check:
-    name: lint + eunit + ct + proper + dialyzer (OTP 28.4.2)
+    name: lint + eunit + ct + proper + dialyzer (OTP 28.4.3)
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
@@ -148,7 +148,7 @@ jobs:
       #
       # ⚠ EXPECTED RED ON ARRIVAL. DO NOT "FIX" THIS BY WEAKENING THE STEP.
       #
-      # `rebar3 dialyzer' exits 1 with TWELVE findings on OTP 28.4.2. Eleven
+      # `rebar3 dialyzer' exits 1 with TWELVE findings on OTP 28.4.3. Eleven
       # are loose specs (a supertype or an extra error return) in
       # evoq_aggregate x4, evoq_snapshot_store, evoq_store_subscription x2,
       # evoq_telemetry, evoq_read_model_ets and evoq_test_assertions x2. ONE
