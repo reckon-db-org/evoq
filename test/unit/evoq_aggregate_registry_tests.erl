@@ -18,11 +18,15 @@ already_started_returns_ok_test_() ->
     ]}.
 
 start_deps() ->
-    application:ensure_all_started(evoq),
-    ok.
+    evoq_test_isolation:stop_leftover_evoq(),
+    {ok, Started} = application:ensure_all_started(evoq),
+    Started.
 
-stop_deps(_) ->
-    ok.
+%% Stop exactly what start_deps/0 started. Leaving evoq's whole supervision
+%% tree running made every later module that starts evoq processes of its
+%% own fail with already_started.
+stop_deps(Started) ->
+    lists:foreach(fun application:stop/1, lists:reverse(Started)).
 
 concurrent_get_or_start_same_aggregate() ->
     AggId = <<"race-test-", (integer_to_binary(erlang:unique_integer([positive])))/binary>>,

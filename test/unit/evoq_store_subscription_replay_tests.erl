@@ -132,6 +132,8 @@ restart_test(Fun) ->
     end}.
 
 fresh_store(Events) ->
+    %% A restart starts from nothing.
+    evoq_test_isolation:stop_leftover_evoq(),
     application:set_env(evoq, event_store_adapter, evoq_fake_boot_backend),
     application:set_env(evoq, subscription_adapter, evoq_fake_boot_backend),
     StoreId = list_to_atom("replay_test_store_" ++
