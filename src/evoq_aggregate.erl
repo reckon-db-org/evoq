@@ -47,8 +47,11 @@
 %% gen_server callbacks
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
 
+%% Events per store read when replaying a stream (see replay_events/5).
+-define(REPLAY_PAGE, 1000).
+
 -ifdef(TEST).
--export([rebuild_from_events/3, is_wrong_version_error/1,
+-export([rebuild_from_events/3, load_or_init/3, is_wrong_version_error/1,
          is_integrity_violation/1]).
 -endif.
 
@@ -333,7 +336,7 @@ from_snapshot_or_replay({error, not_found}, Module, StoreId, AggregateId) ->
     %% stream is version 0, so check State =/= undefined (set by
     %% replay_events when events exist) instead of Version > 0.
     replayed_from_zero(
-        replay_events(Module, StoreId, AggregateId, 0, undefined),
+        replay_events(Module, StoreId, AggregateId, -1, undefined),
         Module, AggregateId).
 
 replayed_or_fresh({ok, State, Version}, _Module, _AggregateId) -> {State, Version};
@@ -478,7 +481,7 @@ rebuild_failure_reply(false, _RebuildErr, State, _StoreId, _StreamId) ->
 %% the dispatcher's retry loop hands the Ra backend expected_version=0 for
 %% a stream at version=-1 and the next append fails forever.
 rebuild_from_events(Module, StoreId, AggregateId) ->
-    case replay_events(Module, StoreId, AggregateId, 0, undefined) of
+    case replay_events(Module, StoreId, AggregateId, -1, undefined) of
         {ok, State, Version} when State =/= undefined ->
             {ok, State, Version};
         {ok, undefined, _} ->
@@ -488,21 +491,53 @@ rebuild_from_events(Module, StoreId, AggregateId) ->
             Error
     end.
 
-replay_events(Module, StoreId, AggregateId, FromVersion, InitState) ->
-    replay_read(evoq_event_store:read(StoreId, AggregateId, FromVersion, 1000, forward),
-                Module, AggregateId, FromVersion, InitState).
+%% @private Replay every event AFTER AfterVersion onto InitState, however
+%% long the stream: pages of ?REPLAY_PAGE events, each starting one past the
+%% last version applied, until a page comes back short. Returns the last
+%% version applied, or AfterVersion when there was nothing after it.
+%%
+%% AfterVersion is the version of the last event InitState already holds:
+%% -1 for a fresh replay, the snapshot's version when resuming from one.
+%% Reads are inclusive (reckon_db returns versions Start..Start+Count-1).
+%%
+%% This read ONE page and stopped, so a stream over 1000 events loaded at
+%% version 999 and every command on it failed wrong_expected_version
+%% forever (found live, 2026-09-23, on a 1173-event realm aggregate). And
+%% resuming from a snapshot started AT its version, applying that event a
+%% second time.
+replay_events(Module, StoreId, AggregateId, AfterVersion, InitState) ->
+    replay_page(Module, StoreId, AggregateId, {InitState, AfterVersion}).
 
-replay_read({ok, Events}, Module, AggregateId, FromVersion, InitState)
-        when length(Events) > 0 ->
-    BaseState = base_state(InitState, Module, AggregateId),
-    {FinalState, LastVersion} =
+replay_page(Module, StoreId, AggregateId, {_State, Version} = Acc) ->
+    replay_read(evoq_event_store:read(StoreId, AggregateId, Version + 1,
+                                      ?REPLAY_PAGE, forward),
+                Module, StoreId, AggregateId, Acc).
+
+replay_read({ok, []}, _Module, _StoreId, _AggregateId, {State, Version}) ->
+    {ok, State, Version};
+replay_read({ok, Events}, Module, StoreId, AggregateId, {State, Version}) ->
+    BaseState = base_state(State, Module, AggregateId),
+    {NewState, LastVersion} =
         lists:foldl(fun(Event, Acc) -> apply_replayed(Module, Event, Acc) end,
-                    {BaseState, FromVersion}, Events),
-    {ok, FinalState, LastVersion};
-replay_read({ok, []}, _Module, _AggregateId, FromVersion, InitState) ->
-    {ok, InitState, FromVersion};
-replay_read({error, _} = Error, _Module, _AggregateId, _FromVersion, _InitState) ->
+                    {BaseState, Version}, Events),
+    continue_replay(page_end(length(Events), Version, LastVersion),
+                    Module, StoreId, AggregateId, {NewState, LastVersion});
+replay_read({error, _} = Error, _Module, _StoreId, _AggregateId, _Acc) ->
     Error.
+
+%% A short page is the end of the stream. A full page that did not move the
+%% version forward means the store ignored the start version: refuse rather
+%% than read the same page forever.
+page_end(Count, _Before, _After) when Count < ?REPLAY_PAGE -> done;
+page_end(_Count, Before, After) when After > Before -> more;
+page_end(_Count, Before, After) -> {stuck, Before, After}.
+
+continue_replay(done, _Module, _StoreId, _AggregateId, {State, Version}) ->
+    {ok, State, Version};
+continue_replay(more, Module, StoreId, AggregateId, Acc) ->
+    replay_page(Module, StoreId, AggregateId, Acc);
+continue_replay({stuck, Before, After}, _Module, _StoreId, AggregateId, _Acc) ->
+    {error, {replay_not_advancing, AggregateId, Before, After}}.
 
 %% @private Initial fold state: the provided snapshot, or a fresh init.
 base_state(undefined, Module, AggregateId) ->
