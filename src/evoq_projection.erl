@@ -89,7 +89,10 @@
     projection_state :: term(),
     read_model :: evoq_read_model:read_model(),
     event_types :: [binary()],
-    checkpoint :: non_neg_integer(),
+    %% Highest event version projected so far; -1 when nothing has been.
+    %% Versions start at 0, so "nothing yet" must sit below every one of
+    %% them or the first event reads as already covered.
+    checkpoint :: integer(),
     checkpoint_store :: atom() | undefined,
     store_id :: atom() | undefined
 }).
@@ -117,8 +120,9 @@ start_link(ProjectionModule, Config, Opts) ->
 get_event_types(Pid) ->
     gen_server:call(Pid, get_event_types).
 
-%% @doc Get the current checkpoint position.
--spec get_checkpoint(pid()) -> non_neg_integer().
+%% @doc Get the current checkpoint position: the highest event version
+%% projected so far, or -1 when nothing has been projected yet.
+-spec get_checkpoint(pid()) -> integer().
 get_checkpoint(Pid) ->
     gen_server:call(Pid, get_checkpoint).
 
@@ -457,10 +461,14 @@ load_checkpoint(ProjectionModule, CheckpointStore) ->
 load_checkpoint(true, ProjectionModule, CheckpointStore) ->
     checkpoint_value(CheckpointStore:load(ProjectionModule));
 load_checkpoint(false, _ProjectionModule, _CheckpointStore) ->
-    0.
+    -1.
 
+%% A store with nothing saved yet (every projection's first boot) means
+%% nothing has been projected: -1, the same as having no store at all.
+%% This read 0, which made version 0 look already covered and dropped the
+%% first event without a word.
 checkpoint_value({ok, Checkpoint}) -> Checkpoint;
-checkpoint_value({error, _}) -> 0.
+checkpoint_value({error, _}) -> -1.
 
 %% @private
 register_self(EventType) ->

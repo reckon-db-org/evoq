@@ -311,9 +311,11 @@ projection_checkpoint_test(_Config) ->
         checkpoint_store => evoq_checkpoint_store_ets
     }),
 
-    %% Get current checkpoint (should be 0)
+    %% Nothing projected yet: -1, the same as a projection with no store.
+    %% This asserted 0, which was the bug: 0 made version 0 read as already
+    %% covered, so the first event a projection was ever handed was dropped.
     Checkpoint1 = evoq_projection:get_checkpoint(Pid),
-    ?assertEqual(0, Checkpoint1),
+    ?assertEqual(-1, Checkpoint1),
 
     %% Add a new item
     Event = #{
