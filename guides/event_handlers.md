@@ -143,6 +143,33 @@ Limits:
   never acknowledged it) sees its whole history as new one more time, on
   its first boot with 1.24.0.
 
+## Messages to the Handler Process
+
+A handler runs in its own process. Anything sent to that process other than
+an event, most usefully a message the handler scheduled to itself from
+`handle_event/4`, goes to the optional `handle_info/2`, with gen_server's
+shape:
+
+```erlang
+handle_event(_Type, Event, _Meta, State) ->
+    publish_or_retry(Event, 0),
+    {ok, State}.
+
+handle_info({retry, Attempt, Event}, State) ->
+    publish_or_retry(Event, Attempt),
+    {noreply, State}.
+
+publish_or_retry(Event, Attempt) ->
+    case publish(Event) of
+        ok -> ok;
+        {error, _} -> erlang:send_after(5000, self(), {retry, Attempt + 1, Event})
+    end.
+```
+
+`{stop, Reason, NewState}` stops the handler. A handler without
+`handle_info/2` that is sent a message logs a warning naming itself and the
+message (`what => evoq_handler_has_no_handle_info`).
+
 ## Retry Strategies
 
 Event handlers can fail (network issues, service unavailable). evoq supports retry strategies:

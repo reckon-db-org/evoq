@@ -32,6 +32,12 @@
 %%   one warning per boot naming the handler the first time it is handed
 %%   replay: a handler with side effects and no policy is the one to find.
 %%
+%% - handle_info(Info, State) -> {noreply, NewState} | {stop, Reason, NewState}
+%%   Any other message the handler process receives, most usefully one it
+%%   scheduled to itself from handle_event/4 (a retry via send_after).
+%%   Same shape as gen_server's. A handler without it that is sent a
+%%   message logs a warning naming itself and the message.
+%%
 %% @author rgfaber
 -module(evoq_event_handler).
 
@@ -52,7 +58,10 @@
 
 -callback replay_policy() -> skip | deliver.
 
--optional_callbacks([on_error/4, replay_policy/0]).
+-callback handle_info(Info :: term(), State :: term()) ->
+    {noreply, NewState :: term()} | {stop, Reason :: term(), NewState :: term()}.
+
+-optional_callbacks([on_error/4, replay_policy/0, handle_info/2]).
 
 %% API
 -export([start_link/2, start_link/3]).
@@ -163,9 +172,26 @@ notify_reply(deliver, EventType, Event, Metadata, State) ->
 handle_cast(_Msg, State) ->
     {noreply, State}.
 
-%% @private
-handle_info(_Info, State) ->
+%% @private Everything else goes to the handler module. This dropped every
+%% message, so a handler's own scheduled retry never ran and nothing said.
+handle_info(Info, #state{handler_module = HandlerModule} = State) ->
+    forward_info(erlang:function_exported(HandlerModule, handle_info, 2), Info, State).
+
+forward_info(true, Info, #state{handler_module = HandlerModule,
+                                handler_state = HandlerState} = State) ->
+    info_result(HandlerModule:handle_info(Info, HandlerState), HandlerModule, State);
+forward_info(false, Info, #state{handler_module = HandlerModule} = State) ->
+    logger:warning(#{what => evoq_handler_has_no_handle_info,
+                     handler => HandlerModule,
+                     message => Info}),
     {noreply, State}.
+
+info_result({noreply, NewHandlerState}, _HandlerModule, State) ->
+    {noreply, State#state{handler_state = NewHandlerState}};
+info_result({stop, Reason, NewHandlerState}, _HandlerModule, State) ->
+    {stop, Reason, State#state{handler_state = NewHandlerState}};
+info_result(Other, HandlerModule, _State) ->
+    error({bad_handle_info_return, HandlerModule, Other}).
 
 %% @private
 terminate(_Reason, #state{event_types = EventTypes}) ->
