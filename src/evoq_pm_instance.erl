@@ -137,8 +137,22 @@ terminate(_Reason, #evoq_pm_state{
 %% Internal functions
 %%====================================================================
 
-%% @private
-handle_event_internal(Event, Metadata, #evoq_pm_state{
+%% @private Replay (`replaying => true': an event this node had already
+%% consumed before it restarted) still runs through handle/3 and apply/2,
+%% so a process manager rebuilds exactly the state it had, including state
+%% it keeps in handle/3 (the state-machine pattern does). What replay does
+%% NOT do is dispatch: the process manager already reacted to this event,
+%% and dispatching the commands again re-issued its whole history on every
+%% restart. handle/3 sees `replaying => true' in Metadata, so a process
+%% manager with a side effect of its own can tell as well.
+handle_event_internal(Event, Metadata, State) ->
+    drop_replayed_commands(maps:get(replaying, Metadata, false),
+                           react(Event, Metadata, State)).
+
+drop_replayed_commands(true, {ok, NewState, _AlreadyDispatched}) -> {ok, NewState};
+drop_replayed_commands(_Replaying, Result) -> Result.
+
+react(Event, Metadata, #evoq_pm_state{
     pm_module = PMModule,
     state = PMState
 } = State) ->

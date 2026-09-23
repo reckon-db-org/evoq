@@ -20,6 +20,18 @@
 %% - on_error(Error, Event, FailureContext, State) -> error_action()
 %%   Handle errors during event processing
 %%
+%% - replay_policy() -> skip | deliver
+%%   What to do with REPLAY: events this node had already consumed before
+%%   it restarted, which evoq_store_subscription hands out again on every
+%%   boot with `replaying => true' in the metadata. `skip' for a handler
+%%   with side effects (publishing, sending, dispatching), which would
+%%   otherwise repeat every one of them on every restart. `deliver' for a
+%%   handler rebuilding in-memory state from history.
+%%
+%%   Not declaring it delivers, as before this callback existed, and logs
+%%   one warning per boot naming the handler the first time it is handed
+%%   replay: a handler with side effects and no policy is the one to find.
+%%
 %% @author rgfaber
 -module(evoq_event_handler).
 
@@ -38,7 +50,9 @@
                    FailureContext :: #evoq_failure_context{}, State :: term()) ->
     evoq_error_handler:error_action().
 
--optional_callbacks([on_error/4]).
+-callback replay_policy() -> skip | deliver.
+
+-optional_callbacks([on_error/4, replay_policy/0]).
 
 %% API
 -export([start_link/2, start_link/3]).
@@ -54,7 +68,11 @@
     handler_state :: term(),
     event_types :: [binary()],
     consistency :: eventual | strong,
-    checkpoint :: non_neg_integer()
+    checkpoint :: non_neg_integer(),
+    %% Whether this boot has already warned that the handler receives
+    %% replay without declaring replay_policy/0. Once per boot, not once
+    %% per event: a store's whole history arrives as replay.
+    replay_warned = false :: boolean()
 }).
 
 %%====================================================================
@@ -117,7 +135,20 @@ register_self(EventType) ->
 handle_call(get_event_types, _From, #state{event_types = Types} = State) ->
     {reply, Types, State};
 
-handle_call({notify, EventType, Event, Metadata}, _From, State) ->
+handle_call({notify, EventType, Event, Metadata}, _From,
+            #state{handler_module = HandlerModule, replay_warned = Warned} = State) ->
+    {Action, Warned1} = replay_gate(HandlerModule, Metadata, Warned),
+    notify_reply(Action, EventType, Event, Metadata,
+                 State#state{replay_warned = Warned1});
+
+handle_call(_Request, _From, State) ->
+    {reply, {error, unknown_request}, State}.
+
+%% @private A skipped replay still moves the checkpoint: the event is
+%% consumed, the handler just declared it must not react to it again.
+notify_reply(skip, _EventType, _Event, Metadata, #state{checkpoint = Checkpoint} = State) ->
+    {reply, ok, State#state{checkpoint = maps:get(version, Metadata, Checkpoint)}};
+notify_reply(deliver, EventType, Event, Metadata, State) ->
     case handle_event_internal(EventType, Event, Metadata, State) of
         {ok, NewState} ->
             {reply, ok, NewState};
@@ -126,10 +157,7 @@ handle_call({notify, EventType, Event, Metadata}, _From, State) ->
             {stop, Reason, {error, Reason}, State};
         {error, _Reason} = Error ->
             {reply, Error, State}
-    end;
-
-handle_call(_Request, _From, State) ->
-    {reply, {error, unknown_request}, State}.
+    end.
 
 %% @private
 handle_cast(_Msg, State) ->
@@ -150,6 +178,47 @@ terminate(_Reason, #state{event_types = EventTypes}) ->
 %%====================================================================
 %% Internal functions
 %%====================================================================
+
+%% @private Decides what a handler module gets of one event: `deliver' or
+%% `skip'. Only replay (`replaying => true' in Metadata) can be skipped,
+%% and only by a module declaring `replay_policy() -> skip'. Warned says
+%% whether this boot already warned about Module receiving replay with no
+%% policy; the returned boolean is the new value, kept in the handler's
+%% state for the rest of the boot.
+-spec replay_gate(module(), map(), boolean()) -> {deliver | skip, boolean()}.
+replay_gate(Module, Metadata, Warned) ->
+    gate(maps:get(replaying, Metadata, false), Module, Warned).
+
+%% Live events never look the policy up: they are the common case.
+gate(false, _Module, Warned) -> {deliver, Warned};
+gate(true, Module, Warned) -> gate_replay(replay_policy_of(Module), Module, Warned).
+
+gate_replay(skip, _Module, Warned) -> {skip, Warned};
+gate_replay(deliver, _Module, Warned) -> {deliver, Warned};
+gate_replay(undeclared, _Module, true) -> {deliver, true};
+gate_replay(undeclared, Module, false) ->
+    logger:warning(#{what => evoq_handler_received_replay_without_policy,
+                     handler => Module,
+                     advice => <<"this handler is receiving events the node already "
+                                 "consumed before it restarted. Declare "
+                                 "replay_policy() -> skip if it has side effects, "
+                                 "or -> deliver to keep receiving them and silence "
+                                 "this warning.">>}),
+    {deliver, true}.
+
+replay_policy_of(Module) ->
+    _ = code:ensure_loaded(Module),
+    replay_policy_of(erlang:function_exported(Module, replay_policy, 0), Module).
+
+replay_policy_of(false, _Module) -> undeclared;
+replay_policy_of(true, Module) -> valid_replay_policy(Module:replay_policy(), Module).
+
+%% Anything but skip or deliver is a bug in the handler, and guessing
+%% either way would hide it: one repeats side effects, the other loses
+%% history.
+valid_replay_policy(skip, _Module) -> skip;
+valid_replay_policy(deliver, _Module) -> deliver;
+valid_replay_policy(Other, Module) -> error({bad_replay_policy, Module, Other}).
 
 %% @private
 handle_event_internal(EventType, Event, Metadata, State) ->

@@ -13,7 +13,7 @@
 
 -export([seed/2, push_live/2, reset/1, delivered_count/1, persisted_checkpoint/2]).
 -export([read_all_global/3]).
--export([subscribe/5, unsubscribe/2, ack/4, list/1, get_by_name/2]).
+-export([subscribe/5, unsubscribe/2, ack/4, get_checkpoint/2, list/1, get_by_name/2]).
 
 seed(StoreId, Events) ->
     ensure_table(),
@@ -131,6 +131,16 @@ ack(StoreId, SubName, _StreamId, Position) ->
             ok;
         [] ->
             {error, {subscription_not_found, SubName}}
+    end.
+
+%% Mirrors reckon_evoq_adapter:get_checkpoint/2 over
+%% reckon_db_subscriptions: the persisted checkpoint of an existing
+%% subscription, `{error, not_found}' when none has been created yet.
+get_checkpoint(StoreId, SubName) ->
+    ensure_table(),
+    case ets:lookup(?MODULE, {sub, StoreId, SubName}) of
+        [{_, CP}] -> {ok, CP};
+        [] -> {error, not_found}
     end.
 
 unsubscribe(_StoreId, _SubId) -> ok.

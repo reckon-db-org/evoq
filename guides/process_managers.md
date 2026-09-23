@@ -193,6 +193,27 @@ compensate(_, _) ->
     skip.
 ```
 
+## Restarts and Replay
+
+Process manager instances live in memory, so after a restart they are
+rebuilt by replaying history: every event the node had already consumed
+before it went down comes around again with `replaying => true` in the
+metadata.
+
+For replay, `handle/3` and `apply/2` both run, so an instance rebuilds
+exactly the state it had, including state kept in `handle/3` as in the
+state machine pattern below. **The commands `handle/3` returns are not
+dispatched**: the process manager already reacted to that event, and
+dispatching again would re-issue its whole history on every restart.
+
+Events appended while the node was down were never delivered, arrive
+without `replaying`, and are handled and dispatched normally.
+
+If `handle/3` has a side effect of its own rather than returning a
+command, check `maps:get(replaying, Metadata, false)` before performing
+it. After a crash, up to 199 events delivered since the last acknowledged
+checkpoint arrive as new again, so commands should still be idempotent.
+
 ## State Machine Pattern
 
 Process managers naturally model state machines:

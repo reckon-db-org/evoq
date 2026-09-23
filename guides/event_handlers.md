@@ -98,6 +98,51 @@ handle_event(EventType, Event, Metadata, State) ->
     {ok, State}.
 ```
 
+## Restarts and Replay
+
+`evoq_store_subscription` rescans the whole event store every time a node
+boots, so handlers and projections that keep their state in memory can
+rebuild it. Events the node had already consumed before it went down come
+around again as **replay**, with `replaying => true` in the metadata. Events
+appended while the node was down have never been delivered and arrive
+without that key, exactly like live events.
+
+The boundary is the store subscription's persisted checkpoint: how far this
+node had consumed the store when it stopped.
+
+A handler with side effects (publishing to the mesh, sending mail,
+calling an external API) must not repeat them for replay. Declare it:
+
+```erlang
+-export([interested_in/0, init/1, handle_event/4, replay_policy/0]).
+
+replay_policy() -> skip.
+```
+
+A handler rebuilding in-memory state from history wants replay:
+
+```erlang
+replay_policy() -> deliver.
+```
+
+Not declaring it delivers replay, as before `replay_policy/0` existed, and
+logs one warning per boot naming the handler the first time it is handed
+replay (`what => evoq_handler_received_replay_without_policy`). A handler
+with side effects and no policy is the one that warning exists to find.
+
+A handler can also read the flag itself, `maps:get(replaying, Metadata,
+false)`, for a decision finer than the whole handler.
+
+Limits:
+
+- The checkpoint is acknowledged every 200 events and on a clean stop.
+  After a **crash**, up to 199 events delivered since the last
+  acknowledgement arrive as new again. Exactly-once would need a
+  checkpoint per handler.
+- A node whose persisted checkpoint was never moved (evoq before 1.23.3
+  never acknowledged it) sees its whole history as new one more time, on
+  its first boot with 1.24.0.
+
 ## Retry Strategies
 
 Event handlers can fail (network issues, service unavailable). evoq supports retry strategies:
@@ -195,7 +240,7 @@ init(Config) ->
 
 ## Idempotency
 
-Handlers may receive the same event multiple times (restarts, redelivery). Make handlers idempotent:
+Handlers may still receive the same event more than once: redelivery, and the crash window described under [Restarts and Replay](#restarts-and-replay). Make handlers idempotent:
 
 ```erlang
 handle_event(<<"OrderShipped">>, Event, Metadata, State) ->

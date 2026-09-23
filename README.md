@@ -286,6 +286,8 @@ Subscribe to events by type (not by stream).
 -callback init(Config :: map()) -> {ok, State :: term()}.
 -callback handle_event(EventType, Event, Metadata, State) ->
     {ok, NewState} | {error, Reason}.
+%% Optional: skip for a handler with side effects, see guides/event_handlers.md
+-callback replay_policy() -> skip | deliver.
 ```
 
 ### evoq_process_manager
