@@ -58,7 +58,7 @@ Called when an aggregate is first created. Returns the initial state before any 
 -callback apply_event(State :: term(), Event :: map()) -> State :: term().
 ```
 
-Must be pure and deterministic. Called for each event produced by execute/2 and during replay. Same input must always produce same output, with no side effects.
+Must be pure and deterministic. Called for each event produced by execute/2, and again for every event each time the aggregate is loaded (replay, in stream version order, possibly starting from a snapshot's state in the middle of the stream). Same input must always produce same output, with no side effects.
 
 **to_map/1** -- Serialize state to a map.
 
@@ -229,9 +229,11 @@ This allows the aggregate to pattern-match on state fields for command validatio
 apply_event/2 MUST be pure and deterministic:
 
 - No side effects (no I/O, no process messaging, no ETS writes)
-- No calls to erlang:system_time or other non-deterministic functions
+- No calls to erlang:system_time or other non-deterministic functions: decide
+  the time in the handler (execute/2), put it in the event, and copy it here
 - Same event applied to same state always produces same result
-- This guarantees correct replay from the event store
+- This guarantees correct replay from the event store, whether from the first
+  event or from a snapshot
 
 ### Serialization
 

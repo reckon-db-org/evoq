@@ -15,6 +15,8 @@
 %% - init(AggregateId) -> {ok, State}
 %% - execute(State, Command) -> {ok, [Event]} | {error, Reason}
 %% - apply(State, Event) -> NewState
+%%   runs after execute/2 and on every later load, in stream version order,
+%%   possibly starting from a from_snapshot/1 state; pure: State and Event only
 %%
 %% Optional:
 %% - snapshot(State) -> SnapshotData

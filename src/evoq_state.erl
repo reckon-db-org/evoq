@@ -36,7 +36,9 @@
 -callback new(AggregateId :: binary()) -> State :: term().
 
 %% Apply a single event to update state. Must be pure and deterministic.
-%% Called for each event produced by execute/2 and during replay.
+%% Called for each event produced by execute/2, and again on every later load,
+%% in stream version order, possibly starting from a snapshot's state. State
+%% must come from State and Event alone: no clock, no I/O, no process state.
 -callback apply_event(State :: term(), Event :: map()) -> State :: term().
 
 %% Serialize state to a map. Used for session-level consistency feedback,

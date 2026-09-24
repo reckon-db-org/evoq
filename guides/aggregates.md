@@ -65,8 +65,11 @@ Validates the command against current state and produces events.
     {ok, [Event :: map()]} | {error, Reason :: term()}.
 
 execute(#{status := new}, #{command_type := open_account, initial_deposit := Amount}) ->
+    %% The time is decided here, once, and travels in the event.
+    OpenedAt = erlang:system_time(millisecond),
     {ok, [
-        #{event_type => <<"AccountOpened">>, data => #{initial_deposit => Amount}},
+        #{event_type => <<"AccountOpened">>,
+          data => #{initial_deposit => Amount, opened_at => OpenedAt}},
         #{event_type => <<"MoneyDeposited">>, data => #{amount => Amount}}
     ]};
 execute(#{status := active, balance := Balance}, #{command_type := withdraw, amount := Amount})
@@ -83,10 +86,14 @@ Key patterns:
 - Return `{ok, [Events]}` on success
 - Return `{error, Reason}` on validation failure
 - **Never** produce events if validation fails
+- Anything that is not in the command or the state (the time, a generated id)
+  is decided here and put into the event's data. `apply/2` only copies it.
 
 ### apply/2
 
-Updates state from a single event. Called for each event produced by `execute/2` and during replay.
+Updates state from a single event. It runs for each event `execute/2`
+produces, and again every time the aggregate is loaded later, when its stream
+is replayed.
 
 ```erlang
 -spec apply(State :: term(), Event :: map()) -> NewState :: term().
@@ -94,7 +101,7 @@ Updates state from a single event. Called for each event produced by `execute/2`
 apply(State, #{event_type := <<"AccountOpened">>, data := Data}) ->
     State#{
         status => active,
-        opened_at => erlang:system_time(millisecond),
+        opened_at => maps:get(opened_at, Data),
         initial_deposit => maps:get(initial_deposit, Data)
     };
 apply(#{balance := Balance} = State, #{event_type := <<"MoneyDeposited">>, data := #{amount := Amount}}) ->
@@ -107,7 +114,16 @@ Key patterns:
 - Must be pure (no side effects)
 - Must be deterministic (same input = same output)
 - Handle all event types the aggregate produces
-- Called during replay - don't assume order
+- Events always arrive in stream version order, oldest first, both right
+  after `execute/2` and on replay.
+- The first `apply/2` of a load does not always see the state `init/1`
+  returns. When a snapshot exists, it sees the state `from_snapshot/1` rebuilt
+  and the event after the snapshot, in the middle of the stream.
+- `apply/2` runs once when `execute/2` produces an event and again on every
+  later load, so the state must come from `State` and `Event` alone: no clock,
+  no I/O, no process state. Reading the clock here, as in
+  `opened_at => erlang:system_time(millisecond)`, gives the same account a
+  different opening time every time it is loaded.
 
 ## Optional Callbacks
 
@@ -129,8 +145,12 @@ from_snapshot(SnapshotData) ->
 
 When loading an aggregate:
 1. Load latest snapshot (if exists)
-2. Replay events after snapshot version
+2. Replay the events after the snapshot's version, in version order, starting
+   from the state `from_snapshot/1` returns
 3. Much faster than replaying all events
+
+Loading from a snapshot and replaying the whole stream must give the same
+state. That holds as long as `apply/2` is pure.
 
 ## Lifecycle Management
 

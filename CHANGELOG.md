@@ -5,6 +5,27 @@ All notable changes to evoq will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.24.2] - 2026-09-24
+
+### Documentation — what "called during replay" means for `apply/2`
+
+`guides/aggregates.md` said `apply/2` is "called during replay - don't assume
+order", and its example read the clock inside `apply/2`. Both were wrong.
+Replay folds `apply/2` over the stream in version order, oldest first, and a
+load from a snapshot runs `apply/2` from the `from_snapshot/1` state on the
+events after the snapshot's version. What `apply/2` must not assume is that it
+runs once: it runs after `execute/2` and again on every later load, so state
+comes from `State` and `Event` alone. The example now decides `opened_at` in
+`execute/2`, puts it in the event, and `apply/2` copies it.
+`guides/state_modules.md` and the `apply` callback docs in `evoq_aggregate`
+and `evoq_state` say the same.
+
+A new test, `evoq_aggregate_replay_determinism_tests`, replays one stream twice
+and from a snapshot and checks the three states equal the one `execute/2` and
+`apply/2` built live. It keeps the guide's old example and shows that every
+load of its stream gives the account a different opening time. Prompted by a
+question on the Elixir forum.
+
 ## [1.24.1] - 2026-09-23
 
 ### Fixed — an aggregate over 1000 events could never accept another command
