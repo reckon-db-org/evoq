@@ -91,7 +91,8 @@
 
 %% Read events across streams carrying any (Match = any) or all
 %% (Match = all) of Tags. BatchSize: see the limited-read contract above.
-%% Optional: needed for evoq_decision contexts on tags.
+%% Required: evoq_event_store:read_by_tags/4 calls it unguarded, for every
+%% evoq_decision context on tags.
 -callback read_by_tags(StoreId :: atom(),
                        Tags :: [binary()],
                        Match :: any | all,
@@ -158,6 +159,6 @@
 -callback payload_hash_indexes(StoreId :: atom()) ->
     {ok, [[binary()]]} | {error, term()}.
 
--optional_callbacks([read_all_global/3, read_by_tags/4,
+-optional_callbacks([read_all_global/3,
                      ccc_read_by_payload/4, ccc_read_by_payload_hash/4,
                      payload_indexes/1, payload_hash_indexes/1]).

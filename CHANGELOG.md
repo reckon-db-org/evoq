@@ -5,7 +5,7 @@ All notable changes to evoq will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.25.1] - 2026-09-25
+## [1.25.1] - 2026-09-26
 
 ### Fixed — a decision over more than 1000 matching events read only the oldest 1000 (evoq #6, part one)
 
@@ -44,8 +44,9 @@ because a context only grows.
 
 `evoq_adapter` states what the reads by type, tag and payload must do with
 `BatchSize` (at most that many, global order, oldest first, never capped
-lower), and gains an optional `read_by_tags/4` callback, which
-`evoq_event_store` already called.
+lower), and declares the `read_by_tags/4` callback `evoq_event_store` already
+called without it. It is required: an adapter without it failed with `undef`
+on the first tag decision, and now gets a compile warning instead.
 
 This release refuses rather than pages. Paging needs a resumable position
 on the store's reads by tag, type and payload (reckon-gater, reckon-db,

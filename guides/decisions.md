@@ -383,8 +383,8 @@ happen in this filter?", not "is the domain rule satisfied?"
   compound filter, so `{and_, [Wide, Narrow]}` is refused when `Wide`
   is over the limit even if the intersection is small. A stateful actor
   keeps its in-memory model until a command's append is refused and its
-  reload fails; it then drops the model and refuses until the context
-  can be read whole. Narrow the context (a more specific tag or payload
+  reload fails, or until it is passivated and rebuilt; it then refuses
+  until the context can be read whole. Narrow the context (a more specific tag or payload
   key) until reads can page.
 
 ---
