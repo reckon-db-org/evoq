@@ -19,10 +19,40 @@ again. Proved with a real two-boot test before the fix: `[1,2,3,4,5]` where
 
 The store subscription now puts `global_position` in the metadata of every
 event it routes, from catch-up, backfill and the live feed: the event's
-index in the store's global log, the same in every boot. A projection skips
-and checkpoints on it, falling back to `version` for events given to
-`notify/4` directly. A projection takes its events from one of the two, not
-both. `version` is unchanged for anything that reads it.
+index in the store's global log. A projection skips and checkpoints on it,
+falling back to `version` for events given to `notify/4` directly. A
+projection takes its events from one of the two, not both. `version` is
+unchanged for anything that reads it.
+
+### Changed — a late handler's types are backfilled in one pass, in store order
+
+A handler registering after the store subscription's catch-up (every
+handler in an application that boots after the one owning the store) gets
+its history through backfill, which ran once per type: the whole history of
+the first type, then of the second. With checkpoints on the global
+position, a projection on several types would then have skipped every event
+of its second type below the first type's last one (A1 B1 A2 B2 A3 B3
+projected as A1 A2 A3 B3). Projections and event handlers now register all
+their types at once with the new
+`evoq_event_type_registry:register_all/2`; store subscriptions get one
+`{new_event_types, Types}` message in place of one `{new_event_type, Type}`
+per type, and backfill those types in one pass in global order. A late
+multi-type projection now also receives its history in store order rather
+than grouped by type.
+
+### Fixed — a duplicate live delivery moved every later position
+
+reckon-db arms its trigger before its own catch-up and documents that an
+event written in between may be delivered twice; a reconnect whose
+pre-subscribe ack failed redelivers from the older checkpoint. The store
+subscription counted each delivery as a new position, so after a
+duplicate every later live event sat one position too high, and after a
+restart the checkpoint covered an event appended while the node was down,
+which was skipped (and the duplicate projected twice). It now drops an
+event whose id it consumed among the last 2000 (seeded with the tail of
+its own catch-up) before positioning or counting it. That also keeps the
+`$all` checkpoint acked to the store and the next boot's replay boundary
+from drifting.
 
 ### Fixed — a projection rebuild read one batch and checkpointed on the stream version
 
@@ -40,26 +70,48 @@ plus `global_position` and `replaying => true`. A projection written against
 the live feed crashed on rebuild before; one written against the old rebuild
 shape only must change.
 
-### Fixed — `evoq_event_store:read_all_global/3` ignored its offset on an adapter without the callback
+### Fixed — `evoq_event_store:read_all_global/3` on an adapter without the callback
 
-The fallback for an adapter without `read_all_global/3` returned the whole
-store for every offset, so a caller paging it (the store subscription's
-catch-up, and now rebuild) never saw a short page on a store of at least one
-batch. And it returned maps where the callback returns `#evoq_event{}`
-records, and the store subscription routes only records, so on such an
-adapter it routed nothing. It now returns the requested page of the
-adapter's records in `epoch_us` order. Found by the Dialyzer ratchet.
+The fallback returned the whole store for every offset, so a caller paging
+it (the store subscription's catch-up, and now rebuild) never saw a short
+page on a store of at least one batch. It returned maps where the callback
+returns `#evoq_event{}` records, and the store subscription routes only
+records, so on such an adapter it routed nothing. And it dropped a stream
+it could not read, which would renumber every event after it. It now
+returns the requested page of the adapter's records in `epoch_us` order,
+and `{error, {read_all_failed, StreamId, Reason}}` when a stream cannot be
+read. It reads every stream for each page; it is a fallback, not a path to
+run a large store on.
 
-### Known limit, fixed in 2.0.0, not here
+### Upgrading a projection with a persisted checkpoint
 
-A projection on more than one type that registers after the store
-subscription's catch-up gets its history by backfill, one type at a time.
-The first type's backfill moves the checkpoint to that type's last position,
-and the second type's backfill skips its own events below it. Pinned by
-`a_late_multi_type_projection_loses_the_older_events_of_its_second_type_test_`.
-Backfill also runs only for a type's first handler ever, so a late projection
-on a type another handler already covers gets none of its history. See
-"Known limit" in `guides/projections.md` for the workaround.
+A checkpoint saved by 1.24.x is the old per-boot counter, which is never
+above the global position of the event it was saved for. On the first boot
+of 1.25.0 nothing is skipped, but every event of the projection's types with
+a global position above the old number is projected once more, which for a
+type that is a small part of the store is most of its history. A projection
+that is not idempotent (counters, appended lists) is corrupted by that.
+Delete its checkpoint before upgrading and let it rebuild, or call
+`evoq_projection:rebuild/1` after. Projections without a checkpoint store
+start from -1 on every boot and are not affected.
+
+### What the global position assumes
+
+The position is an index into the store's global order. It names the same
+event in every boot as long as the store keeps that order: with reckon-db,
+while `epoch_us` stamps are monotone in commit order (no clock stepping
+back, no cluster nodes with differing clocks, no two concurrent appends
+committing in the reverse order of their stamps) and no event is ever
+removed (`delete_stream`, `scavenge`). Each violation moves later positions
+by one or more, and a restart then skips or repeats that many events. The
+`$all` checkpoint acked since 1.23.3 carries the same assumption. A commit
+sequence number in the store is what would make it exact.
+
+### Known gap, for 2.0.0
+
+Backfill runs only for a type's first handler ever. A handler that
+registers late for a type another handler already covers gets none of that
+type's history. Unchanged by this release; see `guides/projections.md`.
 
 ## [1.24.2] - 2026-09-24
 

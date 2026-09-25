@@ -112,7 +112,6 @@ start_link(ProjectionModule, Config) ->
 %% Options:
 %% - store_id: Event store to replay from (overrides app env)
 %% - checkpoint_store: Module for persistent checkpoint storage
-%% - start_from: origin | latest | {position, N}
 -spec start_link(atom(), map(), map()) -> {ok, pid()} | {error, term()}.
 start_link(ProjectionModule, Config, Opts) ->
     gen_server:start_link(?MODULE, {ProjectionModule, Config, Opts}, []).
@@ -169,7 +168,7 @@ init({ProjectionModule, Config, Opts}) ->
             Checkpoint = load_checkpoint(ProjectionModule, CheckpointStore),
 
             %% Register with event type registry
-            lists:foreach(fun register_self/1, EventTypes),
+            ok = evoq_event_type_registry:register_all(EventTypes, self()),
 
             %% Emit start telemetry
             telemetry:execute(?TELEMETRY_PROJECTION_START, #{}, #{
@@ -515,10 +514,6 @@ load_checkpoint(false, _ProjectionModule, _CheckpointStore) ->
 %% first event without a word.
 checkpoint_value({ok, Checkpoint}) -> Checkpoint;
 checkpoint_value({error, _}) -> -1.
-
-%% @private
-register_self(EventType) ->
-    evoq_event_type_registry:register(EventType, self()).
 
 %% @private
 save_checkpoint(_ProjectionModule, undefined, _Position) ->

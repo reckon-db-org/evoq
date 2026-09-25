@@ -291,14 +291,20 @@ global_records(Adapter, StoreId) ->
     global_records(Adapter:list_streams(StoreId), Adapter, StoreId).
 
 global_records({ok, StreamIds}, Adapter, StoreId) ->
-    Events = lists:flatmap(fun(Sid) -> stream_records(Adapter:read_all(StoreId, Sid, forward)) end,
-                           StreamIds),
-    {ok, lists:keysort(#evoq_event.epoch_us, Events)};
+    stream_records(StreamIds, Adapter, StoreId, []);
 global_records({error, _} = Error, _Adapter, _StoreId) ->
     Error.
 
-stream_records({ok, Events}) -> Events;
-stream_records({error, _}) -> [].
+%% @private A stream that cannot be read fails the whole read: leaving it
+%% out would renumber every event after it, and callers checkpoint on
+%% those numbers.
+stream_records([], _Adapter, _StoreId, Acc) ->
+    {ok, lists:keysort(#evoq_event.epoch_us, lists:append(lists:reverse(Acc)))};
+stream_records([Sid | Rest], Adapter, StoreId, Acc) ->
+    case Adapter:read_all(StoreId, Sid, forward) of
+        {ok, Events} -> stream_records(Rest, Adapter, StoreId, [Events | Acc]);
+        {error, Reason} -> {error, {read_all_failed, Sid, Reason}}
+    end.
 
 page({ok, Events}, Offset, _BatchSize) when Offset >= length(Events) ->
     {ok, []};

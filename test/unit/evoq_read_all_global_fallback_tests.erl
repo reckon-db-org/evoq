@@ -16,11 +16,14 @@
 
 -export([list_streams/1, read_all/3]).
 
-%% Two streams, interleaved in global order: a0 b0 a1 b1 a2.
-list_streams(_StoreId) -> {ok, [<<"a">>, <<"b">>]}.
+%% Two streams, interleaved in global order: a0 b0 a1 b1 a2. The broken
+%% store has a third stream whose read fails.
+list_streams(fallback_store) -> {ok, [<<"a">>, <<"b">>]};
+list_streams(broken_store) -> {ok, [<<"a">>, <<"broken">>, <<"b">>]}.
 
 read_all(_StoreId, <<"a">>, forward) -> {ok, [event(<<"a">>, V, 2 * V) || V <- [0, 1, 2]]};
-read_all(_StoreId, <<"b">>, forward) -> {ok, [event(<<"b">>, V, 2 * V + 1) || V <- [0, 1]]}.
+read_all(_StoreId, <<"b">>, forward) -> {ok, [event(<<"b">>, V, 2 * V + 1) || V <- [0, 1]]};
+read_all(_StoreId, <<"broken">>, forward) -> {error, read_timeout}.
 
 event(Stream, Version, Pos) ->
     #evoq_event{event_id = <<Stream/binary, (integer_to_binary(Version))/binary>>,
@@ -41,7 +44,12 @@ fallback_pages_by_offset_and_batch_size_test_() ->
      [?_assertEqual([<<"a0">>, <<"b0">>], ids(0, 2)),
       ?_assertEqual([<<"a1">>, <<"b1">>], ids(2, 2)),
       ?_assertEqual([<<"a2">>], ids(4, 2)),
-      ?_assertEqual([], ids(5, 2))]}.
+      ?_assertEqual([], ids(5, 2)),
+      %% A stream that cannot be read fails the page. Leaving it out would
+      %% renumber every event after it, and callers checkpoint on those
+      %% numbers.
+      ?_assertEqual({error, {read_all_failed, <<"broken">>, read_timeout}},
+                    evoq_event_store:read_all_global(broken_store, 0, 2))]}.
 
 ids(Offset, BatchSize) ->
     {ok, Events} = evoq_event_store:read_all_global(fallback_store, Offset, BatchSize),

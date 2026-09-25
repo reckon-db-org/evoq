@@ -196,7 +196,7 @@ filter_by_type_skips_non_evoq_event_terms_test() ->
 %% there's no replay burst to double up against). Without this gate, a
 %% type gaining its first handler mid-catch-up gets double-delivered: once
 %% by catch-up for events scanned after the registration landed, and again
-%% in full by the backfill_event_type/3 sweep the registration triggers
+%% in full by the backfill_event_types/4 sweep the registration triggers
 %% right after catch-up finishes. See handle_continue/2's own comment.
 %%====================================================================
 

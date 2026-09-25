@@ -16,7 +16,7 @@
 
 %% API
 -export([start_link/0]).
--export([register/2, unregister/2]).
+-export([register/2, register_all/2, unregister/2]).
 -export([register_handler/2, unregister_handler/2]).
 -export([get_handlers/1]).
 -export([get_all_event_types/0]).
@@ -39,12 +39,23 @@
 start_link() ->
     gen_server:start_link({local, ?SERVER}, ?MODULE, [], []).
 
-%% @doc Register a handler pid for an event type.
-%% Notifies any registered store subscription listeners when a
-%% previously unseen event type gets its first handler.
+%% @doc Register a handler pid for an event type. Same as
+%% `register_all([EventType], HandlerPid)'.
 -spec register(binary(), pid()) -> ok.
 register(EventType, HandlerPid) ->
-    gen_server:call(?SERVER, {register, EventType, HandlerPid}).
+    register_all([EventType], HandlerPid).
+
+%% @doc Register a handler pid for all its event types in one step.
+%%
+%% Store subscription listeners get ONE `{new_event_types, Types}' message
+%% naming every type in EventTypes that had no handler before, so a handler
+%% registering after catch-up is backfilled in one pass over the store, in
+%% global order. Registering its types one by one made one backfill per
+%% type, and a projection that checkpoints on the global position then
+%% skipped every event of its second type below the first type's last one.
+-spec register_all([binary()], pid()) -> ok.
+register_all(EventTypes, HandlerPid) ->
+    gen_server:call(?SERVER, {register_all, EventTypes, HandlerPid}).
 
 %% @doc Unregister a handler pid from an event type.
 -spec unregister(binary(), pid()) -> ok.
@@ -80,8 +91,9 @@ get_all_event_types() ->
 %% returning the current types and subscribing for notifications,
 %% because both happen in the same gen_server call.
 %%
-%% The listener receives `{new_event_type, EventType :: binary()}'
-%% messages when a previously unseen event type gets its first handler.
+%% The listener receives `{new_event_types, EventTypes :: [binary()]}' when
+%% a handler registers types that had no handler before (see
+%% register_all/2).
 -spec register_listener(pid()) -> {ok, [binary()]}.
 register_listener(ListenerPid) ->
     gen_server:call(?SERVER, {register_listener, ListenerPid}).
@@ -105,16 +117,10 @@ init([]) ->
     {ok, #state{}}.
 
 %% @private
-handle_call({register, EventType, HandlerPid}, _From, State) ->
-    Group = event_type_group(EventType),
-    %% Check if this is a new event type (no existing handlers)
-    IsNew = pg:get_members(?PG_SCOPE, Group) =:= [],
-    ok = pg:join(?PG_SCOPE, Group, HandlerPid),
-    %% Notify store subscription listeners about new event type
-    case IsNew of
-        true -> notify_listeners(EventType);
-        false -> ok
-    end,
+handle_call({register_all, EventTypes, HandlerPid}, _From, State) ->
+    NewTypes = [EventType || EventType <- lists:usort(EventTypes),
+                             join_group(EventType, HandlerPid)],
+    notify_listeners(NewTypes),
     {reply, ok, State};
 
 handle_call({unregister, EventType, HandlerPid}, _From, State) ->
@@ -183,9 +189,18 @@ is_event_type_group(_) -> false.
 %% @private
 extract_event_type({event_type, EventType}) -> EventType.
 
-%% @private Notify store subscription listeners about a new event type.
-notify_listeners(EventType) ->
+%% @private Join HandlerPid to EventType's group; true when the type had no
+%% handler before (its first handler ever).
+join_group(EventType, HandlerPid) ->
+    Group = event_type_group(EventType),
+    IsNew = pg:get_members(?PG_SCOPE, Group) =:= [],
+    ok = pg:join(?PG_SCOPE, Group, HandlerPid),
+    IsNew.
+
+%% @private Notify store subscription listeners about new event types, in
+%% one message.
+notify_listeners([]) ->
+    ok;
+notify_listeners(NewTypes) ->
     Listeners = pg:get_members(?PG_SCOPE, store_subscription_listeners),
-    lists:foreach(fun(Pid) ->
-        Pid ! {new_event_type, EventType}
-    end, Listeners).
+    lists:foreach(fun(Pid) -> Pid ! {new_event_types, NewTypes} end, Listeners).

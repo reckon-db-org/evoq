@@ -121,34 +121,83 @@ a_rebuild_is_not_capped_at_one_batch_test_() ->
         shutdown()
     end).
 
-%% KNOWN LIMIT, fixed in 2.0.0, not here. A projection on more than one type
-%% that registers after the store subscription's catch-up (every projection
-%% in an application that boots after the one that owns the store) gets its
-%% history through backfill, one type at a time, whole history per type. The
-%% first type's backfill moves the checkpoint to that type's last global
-%% position, and the second type's backfill then skips every one of its
-%% events below that position as already projected.
-%%
-%% This test pins the loss as it is, so the 2.0.0 fix has to change it on
-%% purpose: of the second type's events, only those after the first type's
-%% last one are projected.
+%% A projection on more than one type that registers after the store
+%% subscription's catch-up (every projection in an application that boots
+%% after the one that owns the store) gets its history through backfill.
+%% Backfilling one type at a time moved the checkpoint to the first type's
+%% last global position, and the second type's backfill then skipped its
+%% own older events as already projected: [A1,A2,A3,B3]. One backfill pass
+%% over all the types a projection registers, in global order, delivers
+%% every event once, in store order.
 %%
 %% Both types are new here (no other handler has them): backfill runs only
 %% for a type's first handler ever, so a type another handler already
-%% covers is not backfilled at all, a separate gap.
-a_late_multi_type_projection_loses_the_older_events_of_its_second_type_test_() ->
+%% covers is not backfilled at all, a separate gap left for 2.0.0.
+a_late_multi_type_projection_gets_every_event_in_store_order_test_() ->
     restart_test(fun() ->
         StoreId = fresh_store(interleaved(1, 3)),
         boot(StoreId, []),
-        started(evoq_projection:start_link(evoq_restart_probe_ab_projection, #{}, #{})),
-        timer:sleep(300),
+        start_late_ab_projection(),
 
-        Projected = [TN || {TN, _} <- evoq_replay_probe:calls(ab_projection)],
-        {First, Second} = case Projected of
-                              [{?A, _} | _] -> {?A, ?B};
-                              [{?B, _} | _] -> {?B, ?A}
-                          end,
-        ?assertEqual([{First, 1}, {First, 2}, {First, 3}, {Second, 3}], Projected),
+        ?assertEqual([{?A, 1}, {?B, 1}, {?A, 2}, {?B, 2}, {?A, 3}, {?B, 3}],
+                     ab_projected()),
+        shutdown()
+    end).
+
+%% The same late multi-type projection with a checkpoint store, over a
+%% restart with events appended while the node was down: every event of
+%% both types projected exactly once across the two boots.
+a_late_multi_type_projection_resumes_across_a_restart_test_() ->
+    restart_test(fun() ->
+        StoreId = fresh_store(interleaved(1, 3)),
+        boot(StoreId, []),
+        start_late_ab_projection(),
+        shutdown(),
+
+        evoq_fake_boot_backend:seed(StoreId, interleaved(1, 5)),
+        boot(StoreId, []),
+        start_late_ab_projection(),
+        ?assertEqual(lists:append([[{?A, N}, {?B, N}] || N <- lists:seq(1, 5)]),
+                     ab_projected()),
+        shutdown()
+    end).
+
+%% reckon-db arms its trigger before its own catch-up and documents that an
+%% event written in between may be delivered twice. A duplicate counted as a
+%% new position shifted every later live position up by one, so after a
+%% restart the checkpoint sat on an event appended while the node was down,
+%% which was then skipped (and the duplicate projected twice).
+a_live_duplicate_delivery_shifts_no_position_test_() ->
+    restart_test(fun() ->
+        StoreId = fresh_store(interleaved(1, 5)),
+        boot(StoreId, [projection, b_handler]),
+        evoq_fake_boot_backend:push_live(StoreId, interleaved(6, 6)),
+        redeliver(StoreId, interleaved(6, 6)),
+        timer:sleep(200),
+        ?assertEqual([1, 2, 3, 4, 5, 6], projected()),
+        shutdown(),
+
+        evoq_fake_boot_backend:seed(StoreId, interleaved(1, 8)),
+        boot(StoreId, [projection, b_handler]),
+        ?assertEqual([1, 2, 3, 4, 5, 6, 7, 8], projected()),
+        shutdown()
+    end).
+
+%% A reconnect whose pre-subscribe ack failed resumes reckon-db's catch-up
+%% from the older checkpoint and redelivers events this boot's own catch-up
+%% already scanned. Those are recognised as well, not counted as new.
+a_redelivery_of_caught_up_events_shifts_no_position_test_() ->
+    restart_test(fun() ->
+        StoreId = fresh_store(interleaved(1, 5)),
+        boot(StoreId, [projection, b_handler]),
+        redeliver(StoreId, interleaved(4, 5)),
+        timer:sleep(200),
+        ?assertEqual([1, 2, 3, 4, 5], projected()),
+        shutdown(),
+
+        evoq_fake_boot_backend:seed(StoreId, interleaved(1, 7)),
+        boot(StoreId, [projection, b_handler]),
+        ?assertEqual([1, 2, 3, 4, 5, 6, 7], projected()),
         shutdown()
     end).
 
@@ -227,6 +276,23 @@ stop(Pid) ->
 %%====================================================================
 
 projection_pid() -> get(projection_pid).
+
+%% The multi-type projection, started after the store subscription's
+%% catch-up, with the persistent checkpoint store.
+start_late_ab_projection() ->
+    started(evoq_projection:start_link(
+              evoq_restart_probe_ab_projection, #{},
+              #{checkpoint_store => evoq_restart_probe_checkpoint_store,
+                store_id => get(store_id)})),
+    timer:sleep(300).
+
+ab_projected() -> [TN || {TN, _} <- evoq_replay_probe:calls(ab_projection)].
+
+%% The second copy of a delivery, as reckon-db's trigger/catch-up overlap
+%% sends it: the same events again on the live path, not appended again.
+redeliver(StoreId, Events) ->
+    list_to_existing_atom("evoq_store_sub_" ++ atom_to_list(StoreId)) ! {events, Events},
+    ok.
 
 %% Every A event projected, over all boots, in delivery order.
 projected() -> [N || {N, _} <- evoq_replay_probe:calls(projection)].

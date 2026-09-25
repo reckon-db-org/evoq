@@ -239,39 +239,49 @@ survive a restart either.
 ### What the position is
 
 Events from the store subscription carry `global_position` in their
-metadata: the event's index in the store's global log. It names the same
-event in every boot, whatever handlers exist, and it is what the checkpoint
-holds. A rebuild delivers the same `global_position`, so a checkpoint saved
-by a rebuild and one saved from the live feed agree.
+metadata: the event's index in the store's global log. It is what the
+checkpoint holds. A rebuild delivers the same `global_position`, so a
+checkpoint saved by a rebuild and one saved from the live feed agree.
+
+It names the same event in every boot as long as the store keeps its global
+order. With reckon-db that means `epoch_us` stamps monotone in commit order
+(no clock stepping back, no cluster nodes with differing clocks, no two
+concurrent appends committing in the reverse order of their stamps) and no
+event ever removed from the store (`delete_stream`, `scavenge`). Each
+violation moves the positions after it, and the next restart skips or
+repeats that many events.
+
+Live positions are counted, not read from the store, so a second delivery
+of the same event (reckon-db may deliver one twice while its catch-up
+overlaps its live trigger) would move every later one. The store
+subscription drops an event whose id it consumed among the last 2000
+before counting it.
 
 Before 1.25.0 the checkpoint held the subscription's per-boot counter,
 `version` in the metadata, which restarts at 0 and counts only events that
 have a handler. When the set of handlers changed between boots, a saved
 checkpoint pointed at a different event: events appended while the node was
 down were skipped, or projected events were projected again. `version` is
-still there for anything that reads it; do not persist it.
+still there for anything that reads it; do not persist it. A checkpoint
+saved by 1.24.x makes the first boot of 1.25.0 project part of the history
+again (never skip): delete it before upgrading, or rebuild after.
 
 Events handed to `evoq_projection:notify/4` directly have no
 `global_position` and are checkpointed on `version`. The two numbers are not
 comparable, so a projection takes its events from one source, never both.
 
-### Known limit: a late projection on several new types
+### A projection that starts after the store subscription
 
 A projection whose handler registers after the store subscription's
 catch-up (every projection in an application that boots after the one that
-owns the store) gets its history through backfill, which runs for each type
-separately, the whole history of one type and then the next. Backfilling the
-first type moves the checkpoint to that type's last position, and the second
-type's backfill then skips every event of its own below that position. Only
-the second type's events after the first type's last one are projected.
+owns the store) gets its history through backfill: one pass over the store,
+in global order, for all the types it registers that had no handler yet.
 
-Backfill also runs only for a type's first handler ever. A projection on a
-type another handler already covers gets no history of that type at all.
-
-Both are fixed in evoq 2.0.0. Until then, a multi-type projection that must
-see its whole history should register before the store subscription starts
-(in the application that owns the store) or call `evoq_projection:rebuild/1`
-once its handlers are registered.
+Backfill runs only for a type's first handler ever. A projection on a type
+another handler already covers gets no history of that type at all. This
+gap is left for evoq 2.0.0. Until then, such a projection should register
+before the store subscription starts (in the application that owns the
+store) or call `evoq_projection:rebuild/1` once it is registered.
 
 ## Rebuilding Projections
 
