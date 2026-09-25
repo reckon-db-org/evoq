@@ -190,8 +190,20 @@ initial_position(resume, #state{handler_module = HandlerModule,
                                 checkpoint_store = CheckpointStore}) ->
     load_position(CheckpointStore:load(HandlerModule)).
 
-load_position({ok, {Offset, Key}}) -> {Offset, Key};
-load_position(_) -> {0, undefined}.
+%% Accept only a well-formed handler checkpoint: {Offset, OrderKey} where
+%% OrderKey is undefined or a full {epoch_us, stream_id, version} key.
+%% A bare integer (a per-stream version) or a bare epoch_us cannot be
+%% loaded as a handler position -- it falls through and the handler starts
+%% from the beginning rather than trusting a mis-shaped checkpoint.
+load_position({ok, {Offset, undefined}}) when is_integer(Offset), Offset >= 0 ->
+    {Offset, undefined};
+load_position({ok, {Offset, {EpochUs, StreamId, Version}}})
+        when is_integer(Offset), Offset >= 0,
+             is_integer(EpochUs), is_binary(StreamId),
+             is_integer(Version), Version >= 0 ->
+    {Offset, {EpochUs, StreamId, Version}};
+load_position(_) ->
+    {0, undefined}.
 
 %% @private
 start_mode(HandlerModule) ->
@@ -358,10 +370,23 @@ process_batch([Event | Rest], LastBatch, State) ->
 consume_event(false, _Event, Rest, LastBatch, #state{offset = Offset} = State) ->
     process_batch(Rest, LastBatch, State#state{offset = Offset + 1});
 consume_event(true, Event, Rest, LastBatch, State) ->
+    process_or_skip(order_key(Event), Event, Rest, LastBatch, State).
+
+%% @private Idempotency guard on the global order key's total order (the
+%% same {epoch_us, stream_id, version} order reckon-db sorts by). An event
+%% at or below the checkpoint has already been processed, so a resume that
+%% re-reads it skips it rather than running it again -- the checkpoint is
+%% never crossed backwards. `undefined' (nothing processed yet) sorts below
+%% every real key, so nothing is skipped on a fresh start.
+process_or_skip(EventKey, _Event, Rest, LastBatch,
+                #state{ckpt_key = CkptKey, offset = Offset} = State)
+        when EventKey =< CkptKey ->
+    process_batch(Rest, LastBatch, State#state{offset = Offset + 1});
+process_or_skip(EventKey, Event, Rest, LastBatch, State) ->
     {EventType, EventMap, Metadata} = to_routable(Event),
     Context = attempt_context(State, EventMap),
     step_after(attempt_event(EventType, EventMap, Metadata, Context, State),
-               order_key(Event), Rest, LastBatch, State).
+               EventKey, Rest, LastBatch, State).
 
 %% @private Act on one interested event's outcome.
 %% done: persist the advanced checkpoint BEFORE taking the next event; if
