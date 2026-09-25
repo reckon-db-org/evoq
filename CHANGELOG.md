@@ -5,6 +5,62 @@ All notable changes to evoq will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.25.0] - 2026-09-25
+
+### Fixed — a projection's saved checkpoint pointed at a different event after a restart (evoq #1, part one)
+
+A projection checkpointed on `version` from the store subscription, a
+per-boot counter that restarts at 0 and counts only events with a handler.
+With a checkpoint store, a restart that added or removed a handler for any
+other type renumbered the same events: removing one skipped events appended
+while the node was down, adding one projected already-projected events
+again. Proved with a real two-boot test before the fix: `[1,2,3,4,5]` where
+`[1..7]` was due, and `[1,2,3,4,5,4,5,6]` where `[1..6]` was.
+
+The store subscription now puts `global_position` in the metadata of every
+event it routes, from catch-up, backfill and the live feed: the event's
+index in the store's global log, the same in every boot. A projection skips
+and checkpoints on it, falling back to `version` for events given to
+`notify/4` directly. A projection takes its events from one of the two, not
+both. `version` is unchanged for anything that reads it.
+
+### Fixed — a projection rebuild read one batch and checkpointed on the stream version
+
+`evoq_projection:rebuild/1,2` read the projection's types with one
+1000-event read, so a larger store rebuilt partially (the rebuild half of
+evoq #6), and checkpointed on each event's per-stream version, which repeats
+across streams. It now pages through the store's global log and checkpoints
+on `global_position`, the same number the live feed uses.
+
+A rebuild also handed `project/4` a different event shape from the live
+feed: the event's `data` flattened into the top level, and metadata of only
+`stream_id`, `version` and `replaying`. It now delivers exactly what the
+store subscription delivers, `data` nested and the event's own metadata,
+plus `global_position` and `replaying => true`. A projection written against
+the live feed crashed on rebuild before; one written against the old rebuild
+shape only must change.
+
+### Fixed — `evoq_event_store:read_all_global/3` ignored its offset on an adapter without the callback
+
+The fallback for an adapter without `read_all_global/3` returned the whole
+store for every offset, so a caller paging it (the store subscription's
+catch-up, and now rebuild) never saw a short page on a store of at least one
+batch. And it returned maps where the callback returns `#evoq_event{}`
+records, and the store subscription routes only records, so on such an
+adapter it routed nothing. It now returns the requested page of the
+adapter's records in `epoch_us` order. Found by the Dialyzer ratchet.
+
+### Known limit, fixed in 2.0.0, not here
+
+A projection on more than one type that registers after the store
+subscription's catch-up gets its history by backfill, one type at a time.
+The first type's backfill moves the checkpoint to that type's last position,
+and the second type's backfill skips its own events below it. Pinned by
+`a_late_multi_type_projection_loses_the_older_events_of_its_second_type_test_`.
+Backfill also runs only for a type's first handler ever, so a late projection
+on a type another handler already covers gets none of its history. See
+"Known limit" in `guides/projections.md` for the workaround.
+
 ## [1.24.2] - 2026-09-24
 
 ### Documentation — what "called during replay" means for `apply/2`

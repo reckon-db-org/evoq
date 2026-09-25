@@ -50,6 +50,7 @@
 -module(evoq_projection).
 
 -include("evoq.hrl").
+-include("evoq_types.hrl").
 -include("evoq_telemetry.hrl").
 
 %% Required callbacks
@@ -89,9 +90,10 @@
     projection_state :: term(),
     read_model :: evoq_read_model:read_model(),
     event_types :: [binary()],
-    %% Highest event version projected so far; -1 when nothing has been.
-    %% Versions start at 0, so "nothing yet" must sit below every one of
-    %% them or the first event reads as already covered.
+    %% Highest position projected so far; -1 when nothing has been.
+    %% Positions start at 0, so "nothing yet" must sit below every one of
+    %% them or the first event reads as already covered. See position/1
+    %% for what a position is.
     checkpoint :: integer(),
     checkpoint_store :: atom() | undefined,
     store_id :: atom() | undefined
@@ -120,8 +122,9 @@ start_link(ProjectionModule, Config, Opts) ->
 get_event_types(Pid) ->
     gen_server:call(Pid, get_event_types).
 
-%% @doc Get the current checkpoint position: the highest event version
-%% projected so far, or -1 when nothing has been projected yet.
+%% @doc Get the current checkpoint position: the highest position projected
+%% so far (the store's global position for events from the store
+%% subscription or a rebuild), or -1 when nothing has been projected yet.
 -spec get_checkpoint(pid()) -> integer().
 get_checkpoint(Pid) ->
     gen_server:call(Pid, get_checkpoint).
@@ -256,7 +259,7 @@ handle_event_internal(EventType, Event, Metadata, State) ->
     } = State,
 
     %% Check for idempotency - skip if already processed
-    EventVersion = maps:get(version, Metadata, 0),
+    EventVersion = position(Metadata),
     case EventVersion =< Checkpoint of
         true ->
             %% Already processed, skip
@@ -353,6 +356,25 @@ notify_on_error(true, ProjectionModule, Event, Reason, ProjectionState, Error) -
 notify_on_error(false, _ProjectionModule, _Event, _Reason, _ProjectionState, Error) ->
     Error.
 
+%% @private The number a projection checkpoints on, and so the number that
+%% decides "already projected" after a restart (evoq #1).
+%%
+%% Events from the store subscription and from a rebuild carry
+%% `global_position': the event's index in the store's global log, which
+%% names the same event in every boot. `version' there is the subscription's
+%% per-boot counter, which restarts at 0 and only counts events that have a
+%% handler, so a checkpoint saved from it pointed at a different event as
+%% soon as the set of handlers changed between boots: events appended while
+%% the node was down were skipped, or already-projected ones repeated.
+%%
+%% `version' remains the fallback for events delivered directly with
+%% notify/4. A projection must take its events from one of the two sources:
+%% the two numbers are not comparable, and a checkpoint of one skips the
+%% other wrongly.
+-spec position(map()) -> integer().
+position(#{global_position := Position}) -> Position;
+position(Metadata) -> maps:get(version, Metadata, 0).
+
 %% @private
 do_rebuild(#state{
     projection_module = ProjectionModule,
@@ -379,7 +401,11 @@ do_rebuild(#state{
     end.
 
 %% @private
-%% Replay all events of the specified types from the event store.
+%% Replay every event of the projection's types from the event store, page by
+%% page through the store's global log, so a rebuild is not capped at one
+%% batch and each event is checkpointed on the same global position the
+%% store subscription gives it (see position/1). A rebuild and the live feed
+%% then agree on which events the checkpoint covers.
 %% Uses store_id from Opts if provided, otherwise falls back to app env.
 replay_events(State, EventTypes) ->
     StoreId = case State#state.store_id of
@@ -387,21 +413,48 @@ replay_events(State, EventTypes) ->
         Id -> Id
     end,
     BatchSize = application:get_env(evoq, replay_batch_size, 1000),
+    replay_page(StoreId, EventTypes, 0, BatchSize, State).
 
-    case evoq_event_store:read_events_by_types(StoreId, EventTypes, BatchSize) of
+%% @private Read one page at Offset, project the matching events in it, and
+%% go on to the next page unless this one was short.
+replay_page(StoreId, EventTypes, Offset, BatchSize, State) ->
+    case evoq_event_store:read_all_global(StoreId, Offset, BatchSize) of
         {ok, Events} ->
-            replay_events_list(Events, State);
+            Matching = [{Position, Routable}
+                        || {Position, {Event, _} = Routable} <- positioned(Events, Offset),
+                           lists:member(maps:get(event_type, Event, undefined),
+                                        EventTypes)],
+            next_page(replay_events_list(Matching, State), length(Events) < BatchSize,
+                      StoreId, EventTypes, Offset + length(Events), BatchSize);
         {error, Reason} ->
             %% Log warning but don't fail - projection will catch up on new events
             logger:warning("Projection rebuild could not read events: ~p", [Reason]),
             {ok, State}
     end.
 
+next_page({ok, State}, true, _StoreId, _EventTypes, _Offset, _BatchSize) ->
+    {ok, State};
+next_page({ok, State}, false, StoreId, EventTypes, Offset, BatchSize) ->
+    replay_page(StoreId, EventTypes, Offset, BatchSize, State);
+next_page({error, _} = Error, _Last, _StoreId, _EventTypes, _Offset, _BatchSize) ->
+    Error.
+
+%% @private Pair each event of a page read at Offset with its global position,
+%% as the {Event, Metadata} the store subscription routes, so a projection
+%% sees the same event shape in a rebuild as from the live feed.
+positioned(Events, Offset) ->
+    lists:zip(lists:seq(Offset, Offset + length(Events) - 1),
+              [routable(E) || E <- Events]).
+
+%% @private The store subscription's shape for an adapter's event record.
+routable(#evoq_event{} = E) ->
+    evoq_store_subscription:evoq_event_to_routable(E).
+
 %% @private
-%% Replay a list of events through the projection
+%% Replay positioned events through the projection
 replay_events_list([], State) ->
     {ok, State};
-replay_events_list([Event | Rest], State) ->
+replay_events_list([{Position, {Event, EventMetadata}} | Rest], State) ->
     #state{
         projection_module = ProjectionModule,
         projection_state = ProjectionState,
@@ -410,38 +463,31 @@ replay_events_list([Event | Rest], State) ->
     } = State,
 
     EventType = maps:get(event_type, Event, <<"unknown">>),
-    StreamId = maps:get(stream_id, Event, <<"unknown">>),
-    Version = maps:get(version, Event, 0),
-
-    Metadata = #{
-        stream_id => StreamId,
-        version => Version,
-        replaying => true
-    },
+    Metadata = EventMetadata#{global_position => Position, replaying => true},
 
     %% Project the event
     FullEvent = Event#{event_type => EventType},
     case ProjectionModule:project(FullEvent, Metadata, ProjectionState, ReadModel) of
         {ok, NewProjectionState, NewReadModel} ->
             %% Update checkpoint
-            NewRM = evoq_read_model:set_checkpoint(Version, NewReadModel),
-            save_checkpoint(ProjectionModule, CheckpointStore, Version),
+            NewRM = evoq_read_model:set_checkpoint(Position, NewReadModel),
+            save_checkpoint(ProjectionModule, CheckpointStore, Position),
 
             NewState = State#state{
                 projection_state = NewProjectionState,
                 read_model = NewRM,
-                checkpoint = Version
+                checkpoint = Position
             },
             replay_events_list(Rest, NewState);
 
         {skip, NewProjectionState, NewReadModel} ->
-            NewRM = evoq_read_model:set_checkpoint(Version, NewReadModel),
-            save_checkpoint(ProjectionModule, CheckpointStore, Version),
+            NewRM = evoq_read_model:set_checkpoint(Position, NewReadModel),
+            save_checkpoint(ProjectionModule, CheckpointStore, Position),
 
             NewState = State#state{
                 projection_state = NewProjectionState,
                 read_model = NewRM,
-                checkpoint = Version
+                checkpoint = Position
             },
             replay_events_list(Rest, NewState);
 

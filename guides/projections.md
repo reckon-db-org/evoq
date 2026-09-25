@@ -220,45 +220,72 @@ list(State) -> {ok, [Key]}.
 
 ## Checkpointing
 
-Projections checkpoint their position in the event stream:
+A projection records the position of the last event it projected, after
+every event, and skips any event at or below it as already projected. With
+no checkpoint store the position lives in the process and starts at -1 on
+every boot, which suits an in-memory read model rebuilt from the store on
+each start. A read model that survives a restart needs a checkpoint store
+that survives it too:
 
 ```erlang
-%% Automatic checkpointing (default: every 100 events)
-init(Config) ->
-    {ok, RM} = evoq_read_model:new(evoq_read_model_ets, #{}),
-    {ok, #{}, RM, #{checkpoint_interval => 100}}.
-
-%% Manual checkpointing
-project(Event, Metadata, State, ReadModel) ->
-    %% Do work...
-
-    %% Checkpoint after expensive operations
-    case should_checkpoint(State) of
-        true ->
-            evoq_projection:checkpoint(self()),
-            {ok, reset_checkpoint_state(State), NewRM};
-        false ->
-            {ok, State, NewRM}
-    end.
+evoq_projection:start_link(order_summary_projection, #{},
+                           #{checkpoint_store => my_checkpoint_store}).
 ```
 
-On restart, projections resume from their last checkpoint.
+The store implements `evoq_checkpoint_store` (`load/1`, `save/2`,
+`delete/1`). `evoq_checkpoint_store_ets` keeps it in ETS, which does not
+survive a restart either.
+
+### What the position is
+
+Events from the store subscription carry `global_position` in their
+metadata: the event's index in the store's global log. It names the same
+event in every boot, whatever handlers exist, and it is what the checkpoint
+holds. A rebuild delivers the same `global_position`, so a checkpoint saved
+by a rebuild and one saved from the live feed agree.
+
+Before 1.25.0 the checkpoint held the subscription's per-boot counter,
+`version` in the metadata, which restarts at 0 and counts only events that
+have a handler. When the set of handlers changed between boots, a saved
+checkpoint pointed at a different event: events appended while the node was
+down were skipped, or projected events were projected again. `version` is
+still there for anything that reads it; do not persist it.
+
+Events handed to `evoq_projection:notify/4` directly have no
+`global_position` and are checkpointed on `version`. The two numbers are not
+comparable, so a projection takes its events from one source, never both.
+
+### Known limit: a late projection on several new types
+
+A projection whose handler registers after the store subscription's
+catch-up (every projection in an application that boots after the one that
+owns the store) gets its history through backfill, which runs for each type
+separately, the whole history of one type and then the next. Backfilling the
+first type moves the checkpoint to that type's last position, and the second
+type's backfill then skips every event of its own below that position. Only
+the second type's events after the first type's last one are projected.
+
+Backfill also runs only for a type's first handler ever. A projection on a
+type another handler already covers gets no history of that type at all.
+
+Both are fixed in evoq 2.0.0. Until then, a multi-type projection that must
+see its whole history should register before the store subscription starts
+(in the application that owns the store) or call `evoq_projection:rebuild/1`
+once its handlers are registered.
 
 ## Rebuilding Projections
 
-Read models can be rebuilt from events:
+A rebuild clears the read model, sets the checkpoint back to -1, and
+replays every event of the projection's types from the store, page by page
+through the global log, so it is not capped at one read batch:
 
 ```erlang
-%% Rebuild a specific projection
-evoq_projection:rebuild(order_summary_projection).
-
-%% Rebuild with options
-evoq_projection:rebuild(order_summary_projection, #{
-    from => origin,        %% Start from beginning
-    batch_size => 1000,    %% Process in batches
-    parallel => 4          %% Use 4 workers
-}).
+ok = evoq_projection:rebuild(ProjectionPid).
 ```
+
+The page size is the `replay_batch_size` application setting (default 1000).
+The events and metadata a rebuild hands to `project/4` have the same shape
+as the store subscription's, with `replaying => true` added.
 
 This is powerful:
 - Fix bugs in projection logic

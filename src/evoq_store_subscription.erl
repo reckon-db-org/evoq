@@ -311,7 +311,10 @@ handle_info({new_event_type, EventType}, #state{store_id = StoreId, seq = Seq0,
 handle_info({events, Events}, #state{store_id = StoreId, seq = Seq0,
                                       offset = Offset0,
                                       last_acked = LastAcked} = State) when is_list(Events) ->
-    Seq1 = route_events_with_seq(Events, Seq0),
+    %% Live events carry their global position too: the offset this
+    %% subscription has counted is where they sit in the store's global log.
+    %% Nothing live is replay, so SeenUpTo is 0.
+    Seq1 = route_positioned(positioned(Events, Offset0), Seq0, 0),
     Offset1 = Offset0 + length(Events),
     NewLastAcked = maybe_ack(StoreId, Offset1, LastAcked),
     {noreply, State#state{seq = Seq1, offset = Offset1, last_acked = NewLastAcked}};
@@ -578,18 +581,34 @@ positioned(Events, Offset) ->
 route_positioned([], Seq, _SeenUpTo) ->
     Seq;
 route_positioned([{Position, E} | Rest], Seq, SeenUpTo) ->
-    route_positioned(Rest, route_event_with_seq(E, Seq, Position < SeenUpTo), SeenUpTo).
+    route_positioned(Rest, route_event_at(E, Seq, Position, Position < SeenUpTo), SeenUpTo).
 
-%% @private Route a single live event with sequence-based version override.
+%% @private Route a single event with sequence-based version override and no
+%% global position. Kept for route_events_with_seq/2; every path the
+%% subscription itself routes goes through route_event_at/4.
 -spec route_event_with_seq(evoq_event() | term(), non_neg_integer()) -> non_neg_integer().
 route_event_with_seq(E, Seq) ->
     route_event_with_seq(E, Seq, false).
+
+%% @private Route an event at its global position in the store: the index of
+%% the event in the store's global log, the same in every boot, whatever
+%% handlers exist. It goes into metadata as `global_position', which is what
+%% a projection checkpoints on (evoq #1). `version' stays the per-boot `Seq'
+%% for anything that already reads it, but nothing may persist `Seq': it
+%% restarts at 0 on every boot and counts only events that have a handler.
+-spec route_event_at(evoq_event() | term(), non_neg_integer(), non_neg_integer(), boolean()) ->
+    non_neg_integer().
+route_event_at(E, Seq, Position, Replaying) ->
+    route_event_with_seq(E, Seq, Replaying, #{global_position => Position}).
 
 %% @private Replay carries `replaying => true'; a new event carries no
 %% such key, so metadata of live delivery is exactly what it always was.
 -spec route_event_with_seq(evoq_event() | term(), non_neg_integer(), boolean()) ->
     non_neg_integer().
-route_event_with_seq(#evoq_event{event_type = EventType} = E, Seq, Replaying) ->
+route_event_with_seq(E, Seq, Replaying) ->
+    route_event_with_seq(E, Seq, Replaying, #{}).
+
+route_event_with_seq(#evoq_event{event_type = EventType} = E, Seq, Replaying, Extra) ->
     case evoq_event_type_registry:get_handlers(EventType) of
         [] ->
             Seq;
@@ -600,13 +619,14 @@ route_event_with_seq(#evoq_event{event_type = EventType} = E, Seq, Replaying) ->
             %% Preserve the original stream version as stream_version.
             StreamVersion = maps:get(version, Metadata0, 0),
             Metadata = mark_replay(Replaying,
-                                   Metadata0#{version => Seq,
-                                              stream_version => StreamVersion}),
+                                   maps:merge(Metadata0#{version => Seq,
+                                                         stream_version => StreamVersion},
+                                              Extra)),
             evoq_event_router:route_event(Event, Metadata),
             evoq_pm_router:route_event(Event, Metadata),
             Seq + 1
     end;
-route_event_with_seq(_Other, Seq, _Replaying) ->
+route_event_with_seq(_Other, Seq, _Replaying, _Extra) ->
     Seq.
 
 mark_replay(true, Metadata) -> Metadata#{replaying => true};

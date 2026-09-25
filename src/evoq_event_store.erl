@@ -268,8 +268,12 @@ read_events_by_types(StoreId, EventTypes, BatchSize) ->
 %%
 %% Returns events sorted by epoch_us, starting from Offset.
 %% Used for catch-up subscriptions and global event replay.
-%% Falls back to read_all_events/2 if adapter does not implement
-%% the optional read_all_global/3 callback.
+%% Falls back to reading every stream if the adapter does not implement the
+%% optional read_all_global/3 callback, and takes the requested page out of
+%% that. The fallback returned the whole store as maps for every Offset:
+%% maps, which the store subscription does not route, and the whole store,
+%% so a caller paging it (every caller does, stopping on a short page) never
+%% stopped on a store of at least one batch.
 -spec read_all_global(atom(), non_neg_integer(), pos_integer()) ->
     {ok, [evoq_event()]} | {error, term()}.
 read_all_global(StoreId, Offset, BatchSize) ->
@@ -278,8 +282,30 @@ read_all_global(StoreId, Offset, BatchSize) ->
         true ->
             Adapter:read_all_global(StoreId, Offset, BatchSize);
         false ->
-            read_all_events(StoreId, BatchSize)
+            page(global_records(Adapter, StoreId), Offset, BatchSize)
     end.
+
+%% @private Every event of every stream as the adapter's records, in epoch_us
+%% order (a stable sort, so events with the same epoch_us keep stream order).
+global_records(Adapter, StoreId) ->
+    global_records(Adapter:list_streams(StoreId), Adapter, StoreId).
+
+global_records({ok, StreamIds}, Adapter, StoreId) ->
+    Events = lists:flatmap(fun(Sid) -> stream_records(Adapter:read_all(StoreId, Sid, forward)) end,
+                           StreamIds),
+    {ok, lists:keysort(#evoq_event.epoch_us, Events)};
+global_records({error, _} = Error, _Adapter, _StoreId) ->
+    Error.
+
+stream_records({ok, Events}) -> Events;
+stream_records({error, _}) -> [].
+
+page({ok, Events}, Offset, _BatchSize) when Offset >= length(Events) ->
+    {ok, []};
+page({ok, Events}, Offset, BatchSize) ->
+    {ok, lists:sublist(Events, Offset + 1, BatchSize)};
+page({error, _} = Error, _Offset, _BatchSize) ->
+    Error.
 
 %%====================================================================
 %% Internal Functions
