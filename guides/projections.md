@@ -257,6 +257,12 @@ overlaps its live trigger) would move every later one. The store
 subscription drops an event whose id it consumed among the last 2000
 before counting it.
 
+What dropping duplicates does not cover is order. An event appended after
+catch-up's last read and before reckon-db arms its live trigger arrives
+through reckon-db's catch-up, possibly after an event appended just after
+arming. The two are numbered in the wrong order, and a crash between
+projecting them skips one and repeats the other on the next boot.
+
 Before 1.25.0 the checkpoint held the subscription's per-boot counter,
 `version` in the metadata, which restarts at 0 and counts only events that
 have a handler. When the set of handlers changed between boots, a saved
@@ -278,10 +284,20 @@ owns the store) gets its history through backfill: one pass over the store,
 in global order, for all the types it registers that had no handler yet.
 
 Backfill runs only for a type's first handler ever. A projection on a type
-another handler already covers gets no history of that type at all. This
-gap is left for evoq 2.0.0. Until then, such a projection should register
-before the store subscription starts (in the application that owns the
-store) or call `evoq_projection:rebuild/1` once it is registered.
+another handler already covers gets no history of that type at all.
+
+Worse, a projection on a covered type and a new one can lose history it
+would have got on 1.24.2. Handler H on [B] registers, then projection P on
+[B, C]: H's pass over B delivers B's history to P too and moves P's
+checkpoint to B's last position, and P's own pass over C then skips every
+C event below it. The same happens when a projection registers during
+catch-up for a type catch-up already delivers.
+
+Both are left for evoq 2.0.0 (evoq #4), which backfills per registrant, all
+its types, to it alone. Until then, start the store subscription after every
+handler has registered (from the application listed last in the release),
+so catch-up delivers everything in store order and no backfill runs, or
+call `evoq_projection:rebuild/1` once the projection is registered.
 
 ## Rebuilding Projections
 

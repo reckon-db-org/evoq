@@ -85,11 +85,12 @@ run a large store on.
 
 ### Upgrading a projection with a persisted checkpoint
 
-A checkpoint saved by 1.24.x is the old per-boot counter, which is never
-above the global position of the event it was saved for. On the first boot
-of 1.25.0 nothing is skipped, but every event of the projection's types with
-a global position above the old number is projected once more, which for a
-type that is a small part of the store is most of its history. A projection
+A checkpoint saved by 1.24.x is the old per-boot counter, which is always
+below the length of the store at the boot that saved it. On the first boot
+of 1.25.0 nothing appended while the node was down is skipped, but every
+event of the projection's types with a global position above the old number
+is projected once more, which for a type that is a small part of the store
+can be most of its history. A projection
 that is not idempotent (counters, appended lists) is corrupted by that.
 Delete its checkpoint before upgrading and let it rebuild, or call
 `evoq_projection:rebuild/1` after. Projections without a checkpoint store
@@ -107,11 +108,33 @@ by one or more, and a restart then skips or repeats that many events. The
 `$all` checkpoint acked since 1.23.3 carries the same assumption. A commit
 sequence number in the store is what would make it exact.
 
-### Known gap, for 2.0.0
+Live positions are counted by the store subscription, not read from the
+store. An event appended after catch-up's last read and before reckon-db
+arms its live trigger reaches evoq through reckon-db's own catch-up, and
+can arrive after an event appended just after arming. The two are then
+numbered in the wrong order, and a crash between projecting them skips one
+and repeats the other on the next boot. Dropping duplicates does not cover
+this.
+
+### Known gaps, for 2.0.0 (evoq #4)
 
 Backfill runs only for a type's first handler ever. A handler that
 registers late for a type another handler already covers gets none of that
-type's history. Unchanged by this release; see `guides/projections.md`.
+type's history.
+
+And one shape is worse than in 1.24.2: a late projection on a covered type
+and a new one. Handler H on [B] registers, then projection P on [B, C]. H's
+backfill pass over B delivers B's history to P too and moves P's
+checkpoint to B's last position; P's own pass over C then skips every C
+event below that. On 1.24.2 P got them, because the per-boot counter kept
+rising across passes. It needs the subscription to start before the
+handlers' applications and one handler per type set to overlap another's;
+the same happens when a projection registers during catch-up for a type
+catch-up already delivers. The 2.0.0 fix backfills per registrant, all its
+types, to it alone. Until then, start the store subscription after every
+handler has registered (from the application listed last), which makes
+catch-up deliver everything in store order and no backfill run, or call
+`evoq_projection:rebuild/1` once registered. See `guides/projections.md`.
 
 ## [1.24.2] - 2026-09-24
 
