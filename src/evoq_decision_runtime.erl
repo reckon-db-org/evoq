@@ -39,7 +39,13 @@
 -define(DEFAULT_RETRY_BUDGET, 3).
 -define(DEFAULT_BASE_BACKOFF_MS, 5).
 -define(DEFAULT_MAX_BACKOFF_MS, 100).
--define(DEFAULT_BATCH_SIZE, 1000).
+%% The most matching events a decision context may hold. The store's reads
+%% by tag, event type and payload return at most their limit, the OLDEST
+%% matching events, and cannot page (evoq #6), so a context is read with one
+%% event more than this and refused when that one comes back: a decision
+%% folding only the oldest events of its context decides on a history that
+%% is not the store's.
+-define(CONTEXT_LIMIT, 1000).
 
 %% The DCB pseudo-stream id. v1 runtime considers only events from
 %% this stream for the consistency check. (Backend-defined; if this
@@ -68,11 +74,17 @@ dispatch(Mod, StoreId, Command) ->
 
 %% @doc Read the DCB-scoped context for Filter and its seq cutoff.
 %% Shared by the stateless loop and the stateful actor.
+%%
+%% Refuses with `{error, {context_truncated, Filter, Limit}}' when any read
+%% behind Filter matches more than Limit (1000) events: the store returns
+%% only the oldest of them and cannot page yet, and a decision on a partial
+%% context would be wrong without a word.
 -spec load_context(atom(), evoq_decision:context_filter()) ->
     {ok, [map()], integer()} | {error, term()}.
 load_context(StoreId, Filter) ->
     case read_context(StoreId, Filter) of
         {ok, Events} -> {ok, Events, compute_cutoff(Events)};
+        {error, context_truncated} -> {error, {context_truncated, Filter, ?CONTEXT_LIMIT}};
         {error, _} = Error -> Error
     end.
 
@@ -148,7 +160,7 @@ read_context(StoreId, {all_of, Tags}) when is_list(Tags) ->
 read_context(StoreId, {event_type, EventType}) when is_binary(EventType) ->
     %% Hit the [by_event_type] index directly (reckon-db 5.2.0+).
     dcb_filter(evoq_event_store:read_events_by_types(
-                 StoreId, [EventType], ?DEFAULT_BATCH_SIZE));
+                 StoreId, [EventType], ?CONTEXT_LIMIT + 1));
 read_context(StoreId, {payload_match, Key, Value} = Filter)
         when is_binary(Key), is_binary(Value) ->
     %% CCC: hit the {payload, Key} index directly. Fail loudly if the
@@ -175,7 +187,7 @@ dedupe_and_match({ok, Events}, Filter) ->
 dedupe_by_id(E, Acc) -> maps:put(event_id(E), E, Acc).
 
 read_filtered_to_dcb(StoreId, Tags, Match) ->
-    dcb_filter(evoq_event_store:read_by_tags(StoreId, Tags, Match, ?DEFAULT_BATCH_SIZE)).
+    dcb_filter(evoq_event_store:read_by_tags(StoreId, Tags, Match, ?CONTEXT_LIMIT + 1)).
 
 %% CCC payload read with up-front declared-index check. An undeclared
 %% (or unintrospectable) index surfaces as
@@ -185,7 +197,7 @@ read_payload(StoreId, {payload_match, Key, Value} = Filter) ->
     case payload_index_declared(StoreId, Key) of
         true ->
             dcb_filter(evoq_event_store:ccc_read_by_payload(
-                         StoreId, Key, Value, ?DEFAULT_BATCH_SIZE));
+                         StoreId, Key, Value, ?CONTEXT_LIMIT + 1));
         false ->
             {error, {payload_index_unavailable, Filter}}
     end;
@@ -193,7 +205,7 @@ read_payload(StoreId, {payload_hash_match, Keys, Values} = Filter) ->
     case payload_hash_index_declared(StoreId, Keys) of
         true ->
             dcb_filter(evoq_event_store:ccc_read_by_payload_hash(
-                         StoreId, Keys, Values, ?DEFAULT_BATCH_SIZE));
+                         StoreId, Keys, Values, ?CONTEXT_LIMIT + 1));
         false ->
             {error, {payload_index_unavailable, Filter}}
     end.
@@ -213,7 +225,12 @@ declared_hash({ok, KeySets}, Wanted) ->
 declared_hash({error, _}, _Wanted) ->
     false.
 
-%% Keep only DCB-stream events from a read result, propagating errors.
+%% Keep only DCB-stream events from a read result, propagating errors. A
+%% read that came back with more than ?CONTEXT_LIMIT events was cut off by
+%% the store (it was asked for one more); counted before the DCB filter,
+%% which is what the store's limit applied to.
+dcb_filter({ok, Events}) when length(Events) > ?CONTEXT_LIMIT ->
+    {error, context_truncated};
 dcb_filter({ok, Events}) ->
     {ok, [E || E <- Events, is_dcb_event(E)]};
 dcb_filter({error, _} = Error) ->

@@ -37,7 +37,7 @@ Add to your `rebar.config`:
 
 | Component | Version |
 |---|---|
-| `evoq` (this repo) | 1.25.0 |
+| `evoq` (this repo) | 1.25.1 |
 | `telemetry` (dep) | 1.3.0 |
 | Erlang/OTP | 27+ |
 

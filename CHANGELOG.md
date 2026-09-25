@@ -5,6 +5,25 @@ All notable changes to evoq will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.25.1] - 2026-09-26
+
+### Fixed — a decision over more than 1000 matching events decided on the oldest 1000 (evoq #6, part one)
+
+`evoq_decision_runtime` read a decision's context with one store read by
+tag, event type or payload, limited to 1000, and the store returns the
+oldest matching events and cannot page. A context with more folded only
+the oldest 1000 and never saw the recent ones, and the decision went
+through. It now reads 1001 and refuses with
+`{error, {context_truncated, Filter, 1000}}` when the read comes back
+full, for the stateless loop and the stateful actor alike. Exactly 1000
+matching events is still a whole context. The limit counts every event the
+read returns, before the `_dcb` filter, and applies per leaf of a compound
+filter.
+
+This refuses rather than pages. Paging needs a resumable position on the
+store's reads by tag, type and payload (reckon-gater, reckon-db,
+reckon-evoq), which is part two of #6.
+
 ## [1.25.0] - 2026-09-25
 
 ### Fixed — a projection's saved checkpoint pointed at a different event after a restart (evoq #1, part one)
