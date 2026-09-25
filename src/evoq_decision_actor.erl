@@ -148,8 +148,14 @@ append_result({error, _} = BackendError, _Command, State, _Retries, _Events) ->
 
 reload_result({ok, State2}, Command, _State, Retries) ->
     decide_loop(Command, State2, Retries - 1);
+%% A refused reload leaves a model the store has already moved past (the
+%% append was refused as context_changed). Drop it, so the next command
+%% reads the store first instead of deciding on a context known to be
+%% stale: a rejection decided on it would reach the caller as truth. A
+%% context_truncated refusal makes this a steady state, not a blip, since a
+%% context only grows.
 reload_result({error, _} = ReloadError, _Command, State, _Retries) ->
-    {ReloadError, State}.
+    {ReloadError, State#st{model = undefined, cutoff = -1}}.
 
 %% Fold just-appended events into the cache and advance the cutoff to the
 %% store's reported high-water — no re-read.

@@ -374,12 +374,17 @@ happen in this filter?", not "is the domain rule satisfied?"
   by tag, event type and payload return at most their limit, the oldest
   matching events, and cannot page yet (evoq #6). Since 1.25.1 the
   runtime asks for 1001 and refuses the command with
-  `{error, {context_truncated, Filter, 1000}}` when it gets them,
-  instead of deciding on the oldest 1000 without a word. The limit
-  counts events of every stream the read returns, before the `_dcb`
-  filter, and applies to each leaf of a compound filter. A stateful
-  actor already running keeps its in-memory model; the refusal comes on
-  its next load. Narrow the context (a more specific tag or payload
+  `{error, {context_truncated, Leaf, 1000}}` when it gets them, where
+  `Leaf` is the filter whose read was cut. Before, a decision that
+  rejected did so on the oldest 1000, and one that produced events
+  mostly ended in `retry_budget_exhausted` (the store's append check
+  sees every event). The limit counts events of every stream the read
+  returns, before the `_dcb` filter, and applies to each leaf of a
+  compound filter, so `{and_, [Wide, Narrow]}` is refused when `Wide`
+  is over the limit even if the intersection is small. A stateful actor
+  keeps its in-memory model until a command's append is refused and its
+  reload fails; it then drops the model and refuses until the context
+  can be read whole. Narrow the context (a more specific tag or payload
   key) until reads can page.
 
 ---

@@ -71,13 +71,31 @@
                    Direction :: forward | backward) ->
     {ok, [evoq_event()]} | {error, term()}.
 
+%% The limited reads (read_by_event_types/3, read_by_tags/4 and the two
+%% ccc_read_by_payload reads) share one contract, which evoq's decision
+%% runtime relies on to refuse a truncated context: return at most
+%% BatchSize matching events, in global order, oldest first, and never cap
+%% below BatchSize. A result of exactly BatchSize may have been cut. An
+%% adapter that caps lower truncates a decision's context without a word;
+%% one that ignores the limit only makes evoq refuse more than it must.
+
 %% Read events by event types across all streams.
 %%
 %% Uses native filtering capabilities to efficiently query events
-%% by their type without loading all events into memory.
+%% by their type without loading all events into memory. BatchSize: see
+%% the limited-read contract above.
 -callback read_by_event_types(StoreId :: atom(),
                               EventTypes :: [binary()],
                               BatchSize :: pos_integer()) ->
+    {ok, [evoq_event()]} | {error, term()}.
+
+%% Read events across streams carrying any (Match = any) or all
+%% (Match = all) of Tags. BatchSize: see the limited-read contract above.
+%% Optional: needed for evoq_decision contexts on tags.
+-callback read_by_tags(StoreId :: atom(),
+                       Tags :: [binary()],
+                       Match :: any | all,
+                       BatchSize :: pos_integer()) ->
     {ok, [evoq_event()]} | {error, term()}.
 
 %% Get current version of a stream.
@@ -115,7 +133,8 @@
 %% undeclared, so a payload-conditioned decision never runs blind.
 
 %% Read DCB events whose payload field Key equals Value.
-%% Requires the store to declare the {payload, Key} index.
+%% Requires the store to declare the {payload, Key} index. BatchSize: see
+%% the limited-read contract above.
 -callback ccc_read_by_payload(StoreId :: atom(),
                               Key :: binary(),
                               Value :: binary(),
@@ -123,7 +142,8 @@
     {ok, [evoq_event()]} | {error, term()}.
 
 %% Read DCB events matching a composite payload field set.
-%% Requires the store to declare the {payload_hash, Keys} index.
+%% Requires the store to declare the {payload_hash, Keys} index. BatchSize:
+%% see the limited-read contract above.
 -callback ccc_read_by_payload_hash(StoreId :: atom(),
                                    Keys :: [binary()],
                                    Values :: [binary()],
@@ -138,6 +158,6 @@
 -callback payload_hash_indexes(StoreId :: atom()) ->
     {ok, [[binary()]]} | {error, term()}.
 
--optional_callbacks([read_all_global/3,
+-optional_callbacks([read_all_global/3, read_by_tags/4,
                      ccc_read_by_payload/4, ccc_read_by_payload_hash/4,
                      payload_indexes/1, payload_hash_indexes/1]).

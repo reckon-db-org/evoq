@@ -75,16 +75,16 @@ dispatch(Mod, StoreId, Command) ->
 %% @doc Read the DCB-scoped context for Filter and its seq cutoff.
 %% Shared by the stateless loop and the stateful actor.
 %%
-%% Refuses with `{error, {context_truncated, Filter, Limit}}' when any read
+%% Refuses with `{error, {context_truncated, Leaf, Limit}}' when a read
 %% behind Filter matches more than Limit (1000) events: the store returns
 %% only the oldest of them and cannot page yet, and a decision on a partial
-%% context would be wrong without a word.
+%% context would be wrong without a word. Leaf is the filter whose read was
+%% cut: Filter itself when it is flat, one of its leaves when compound.
 -spec load_context(atom(), evoq_decision:context_filter()) ->
     {ok, [map()], integer()} | {error, term()}.
 load_context(StoreId, Filter) ->
     case read_context(StoreId, Filter) of
         {ok, Events} -> {ok, Events, compute_cutoff(Events)};
-        {error, context_truncated} -> {error, {context_truncated, Filter, ?CONTEXT_LIMIT}};
         {error, _} = Error -> Error
     end.
 
@@ -153,14 +153,14 @@ attempt_append(Mod, StoreId, Command, Filter, Cutoff, NewEvents, Retries) ->
 %% before: mixed-mode (aggregate streams + DCB sharing tags) is
 %% unsupported by evoq_decision; the cutoff calculation needs the
 %% consistency check's view of events.
-read_context(StoreId, {any_of, Tags}) when is_list(Tags) ->
-    read_filtered_to_dcb(StoreId, Tags, any);
-read_context(StoreId, {all_of, Tags}) when is_list(Tags) ->
-    read_filtered_to_dcb(StoreId, Tags, all);
-read_context(StoreId, {event_type, EventType}) when is_binary(EventType) ->
+read_context(StoreId, {any_of, Tags} = Leaf) when is_list(Tags) ->
+    read_filtered_to_dcb(StoreId, Tags, any, Leaf);
+read_context(StoreId, {all_of, Tags} = Leaf) when is_list(Tags) ->
+    read_filtered_to_dcb(StoreId, Tags, all, Leaf);
+read_context(StoreId, {event_type, EventType} = Leaf) when is_binary(EventType) ->
     %% Hit the [by_event_type] index directly (reckon-db 5.2.0+).
     dcb_filter(evoq_event_store:read_events_by_types(
-                 StoreId, [EventType], ?CONTEXT_LIMIT + 1));
+                 StoreId, [EventType], ?CONTEXT_LIMIT + 1), Leaf);
 read_context(StoreId, {payload_match, Key, Value} = Filter)
         when is_binary(Key), is_binary(Value) ->
     %% CCC: hit the {payload, Key} index directly. Fail loudly if the
@@ -186,8 +186,8 @@ dedupe_and_match({ok, Events}, Filter) ->
 
 dedupe_by_id(E, Acc) -> maps:put(event_id(E), E, Acc).
 
-read_filtered_to_dcb(StoreId, Tags, Match) ->
-    dcb_filter(evoq_event_store:read_by_tags(StoreId, Tags, Match, ?CONTEXT_LIMIT + 1)).
+read_filtered_to_dcb(StoreId, Tags, Match, Leaf) ->
+    dcb_filter(evoq_event_store:read_by_tags(StoreId, Tags, Match, ?CONTEXT_LIMIT + 1), Leaf).
 
 %% CCC payload read with up-front declared-index check. An undeclared
 %% (or unintrospectable) index surfaces as
@@ -197,7 +197,7 @@ read_payload(StoreId, {payload_match, Key, Value} = Filter) ->
     case payload_index_declared(StoreId, Key) of
         true ->
             dcb_filter(evoq_event_store:ccc_read_by_payload(
-                         StoreId, Key, Value, ?CONTEXT_LIMIT + 1));
+                         StoreId, Key, Value, ?CONTEXT_LIMIT + 1), Filter);
         false ->
             {error, {payload_index_unavailable, Filter}}
     end;
@@ -205,7 +205,7 @@ read_payload(StoreId, {payload_hash_match, Keys, Values} = Filter) ->
     case payload_hash_index_declared(StoreId, Keys) of
         true ->
             dcb_filter(evoq_event_store:ccc_read_by_payload_hash(
-                         StoreId, Keys, Values, ?CONTEXT_LIMIT + 1));
+                         StoreId, Keys, Values, ?CONTEXT_LIMIT + 1), Filter);
         false ->
             {error, {payload_index_unavailable, Filter}}
     end.
@@ -225,15 +225,15 @@ declared_hash({ok, KeySets}, Wanted) ->
 declared_hash({error, _}, _Wanted) ->
     false.
 
-%% Keep only DCB-stream events from a read result, propagating errors. A
-%% read that came back with more than ?CONTEXT_LIMIT events was cut off by
+%% Keep only DCB-stream events from the read for Leaf, propagating errors.
+%% A read that came back with more than ?CONTEXT_LIMIT events was cut off by
 %% the store (it was asked for one more); counted before the DCB filter,
 %% which is what the store's limit applied to.
-dcb_filter({ok, Events}) when length(Events) > ?CONTEXT_LIMIT ->
-    {error, context_truncated};
-dcb_filter({ok, Events}) ->
+dcb_filter({ok, Events}, Leaf) when length(Events) > ?CONTEXT_LIMIT ->
+    {error, {context_truncated, Leaf, ?CONTEXT_LIMIT}};
+dcb_filter({ok, Events}, _Leaf) ->
     {ok, [E || E <- Events, is_dcb_event(E)]};
-dcb_filter({error, _} = Error) ->
+dcb_filter({error, _} = Error, _Leaf) ->
     Error.
 
 %% Read the union (by event_id) of every leaf's events under a compound
