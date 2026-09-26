@@ -122,7 +122,7 @@ init({AggregateModule, AggregateId, StoreId}) ->
         state = InitialState,
         version = Version,
         lifespan_module = LifespanModule,
-        last_activity = erlang:system_time(millisecond),
+        last_activity = erlang:monotonic_time(millisecond),
         snapshot_count = 0
     },
 
@@ -149,11 +149,11 @@ handle_call({execute, Command}, _From, State) ->
         lifespan_module = LifespanModule
     } = State,
 
-    StartTime = erlang:system_time(microsecond),
+    StartTime = evoq_telemetry:monotonic_start(),
 
     %% Emit start telemetry
     telemetry:execute(?TELEMETRY_AGGREGATE_EXECUTE_START, #{
-        system_time => StartTime
+        system_time => erlang:system_time()
     }, #{
         aggregate_id => StreamId,
         aggregate_module => Module,
@@ -186,10 +186,10 @@ handle_call({execute_with_state, Command}, _From, State) ->
         lifespan_module = LifespanModule
     } = State,
 
-    StartTime = erlang:system_time(microsecond),
+    StartTime = evoq_telemetry:monotonic_start(),
 
     telemetry:execute(?TELEMETRY_AGGREGATE_EXECUTE_START, #{
-        system_time => StartTime
+        system_time => erlang:system_time()
     }, #{
         aggregate_id => StreamId,
         aggregate_module => Module,
@@ -250,7 +250,7 @@ commit_new_state(State, NewAggState, NewVersion, Events) ->
     NewState = State#evoq_aggregate_state{
         state = NewAggState,
         version = NewVersion,
-        last_activity = erlang:system_time(millisecond),
+        last_activity = erlang:monotonic_time(millisecond),
         snapshot_count = State#evoq_aggregate_state.snapshot_count + length(Events)
     },
     maybe_snapshot(NewState).
@@ -258,7 +258,7 @@ commit_new_state(State, NewAggState, NewVersion, Events) ->
 stream_id(State) -> State#evoq_aggregate_state.stream_id.
 
 emit_execute_stop(StreamId, NewVersion, Events, StartTime) ->
-    Duration = erlang:system_time(microsecond) - StartTime,
+    Duration = evoq_telemetry:duration_since(StartTime),
     telemetry:execute(?TELEMETRY_AGGREGATE_EXECUTE_STOP, #{
         duration => Duration,
         event_count => length(Events)
@@ -268,7 +268,7 @@ emit_execute_stop(StreamId, NewVersion, Events, StartTime) ->
     }).
 
 emit_execute_exception(StreamId, Reason, StartTime) ->
-    Duration = erlang:system_time(microsecond) - StartTime,
+    Duration = evoq_telemetry:duration_since(StartTime),
     telemetry:execute(?TELEMETRY_AGGREGATE_EXECUTE_EXCEPTION, #{
         duration => Duration
     }, #{
@@ -445,7 +445,7 @@ wrong_version_or_other(false) -> other.
 emit_integrity_telemetry(StoreId, StreamId, Error, Stage) ->
     telemetry:execute(
         [evoq, aggregate, integrity, violation],
-        #{system_time => erlang:system_time(millisecond)},
+        #{system_time => erlang:system_time()},
         #{store_id => StoreId,
           stream_id => StreamId,
           stage => Stage,
@@ -663,7 +663,7 @@ get_remaining_timeout(#evoq_aggregate_state{
     last_activity = LastActivity
 }) ->
     IdleTimeout = application:get_env(evoq, idle_timeout, ?DEFAULT_IDLE_TIMEOUT),
-    Elapsed = erlang:system_time(millisecond) - LastActivity,
+    Elapsed = erlang:monotonic_time(millisecond) - LastActivity,
     Remaining = max(0, IdleTimeout - Elapsed),
     case Remaining of
         0 -> 0;

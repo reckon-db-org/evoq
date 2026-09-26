@@ -263,11 +263,11 @@ handle_event_with_retry(EventType, Event, Metadata, State, FailureContext) ->
         checkpoint = Checkpoint
     } = State,
 
-    StartTime = erlang:system_time(microsecond),
+    StartTime = evoq_telemetry:monotonic_start(),
 
     %% Emit start telemetry
     telemetry:execute(?TELEMETRY_HANDLER_EVENT_START, #{
-        system_time => StartTime
+        system_time => erlang:system_time()
     }, #{
         handler => HandlerModule,
         event_type => EventType,
@@ -277,7 +277,7 @@ handle_event_with_retry(EventType, Event, Metadata, State, FailureContext) ->
     %% Call the handler
     case HandlerModule:handle_event(EventType, Event, Metadata, HandlerState) of
         {ok, NewHandlerState} ->
-            Duration = erlang:system_time(microsecond) - StartTime,
+            Duration = evoq_telemetry:duration_since(StartTime),
 
             %% Emit success telemetry
             telemetry:execute(?TELEMETRY_HANDLER_EVENT_STOP, #{
@@ -297,7 +297,7 @@ handle_event_with_retry(EventType, Event, Metadata, State, FailureContext) ->
             {ok, NewState};
 
         {error, Reason} ->
-            Duration = erlang:system_time(microsecond) - StartTime,
+            Duration = evoq_telemetry:duration_since(StartTime),
 
             %% Emit failure telemetry
             telemetry:execute(?TELEMETRY_HANDLER_EVENT_EXCEPTION, #{

@@ -273,11 +273,11 @@ handle_event_internal(EventType, Event, Metadata, State) ->
 do_project(EventType, Event, Metadata, EventVersion,
            ProjectionModule, ProjectionState, ReadModel,
            CheckpointStore, State) ->
-    StartTime = erlang:system_time(microsecond),
+    StartTime = evoq_telemetry:monotonic_start(),
 
     %% Emit start telemetry
     telemetry:execute(?TELEMETRY_PROJECTION_EVENT, #{
-        system_time => StartTime
+        system_time => erlang:system_time()
     }, #{
         projection => ProjectionModule,
         event_type => EventType
@@ -287,7 +287,7 @@ do_project(EventType, Event, Metadata, EventVersion,
     FullEvent = Event#{event_type => EventType},
     case ProjectionModule:project(FullEvent, Metadata, ProjectionState, ReadModel) of
         {ok, NewProjectionState, NewReadModel} ->
-            Duration = erlang:system_time(microsecond) - StartTime,
+            Duration = evoq_telemetry:duration_since(StartTime),
 
             %% Update checkpoint
             NewRM = evoq_read_model:set_checkpoint(EventVersion, NewReadModel),
@@ -323,7 +323,7 @@ do_project(EventType, Event, Metadata, EventVersion,
             {ok, NewState};
 
         {error, Reason} = Error ->
-            Duration = erlang:system_time(microsecond) - StartTime,
+            Duration = evoq_telemetry:duration_since(StartTime),
 
             %% Emit failure telemetry
             telemetry:execute(?TELEMETRY_PROJECTION_EXCEPTION, #{

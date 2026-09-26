@@ -5,6 +5,30 @@ All notable changes to evoq will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.26.1] - 2026-09-26
+
+### Fixed — telemetry durations came from the wall clock, in microseconds (evoq #7)
+
+Every `duration` (aggregate execute, command dispatch, event handler,
+projection, `evoq_telemetry:span/3`) was the difference of two
+`erlang:system_time(microsecond)` readings. That is the wall clock, which an
+NTP step or a time warp moves, so a duration could be wrong or negative; and
+it is microseconds, where telemetry's convention, and any consumer that
+follows it with `erlang:convert_time_unit(D, native, _)`, expects native
+units: a 1000x misreading on Linux. reckon-db had the same unit bug in its log
+handler, fixed in 5.11.10.
+
+Durations now come from the monotonic clock in native units, through
+`evoq_telemetry:monotonic_start/0` and `duration_since/1`. A start event's
+`system_time`, and the integrity-violation event's, is native wall-clock time
+(`erlang:system_time()`), where it was microseconds (milliseconds for the
+integrity event). The aggregate's idle-timeout arithmetic runs on the
+monotonic clock too.
+
+**A consumer that read `duration` or `system_time` as microseconds or
+milliseconds must convert from native now.** Nothing in our services
+attaches to evoq telemetry.
+
 ## [1.26.0] - 2026-09-26
 
 ### Fixed — two process managers correlating on the same id reached each other's instance

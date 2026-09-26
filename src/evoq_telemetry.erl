@@ -25,6 +25,7 @@
 
 %% API
 -export([attach/3, attach/4]).
+-export([monotonic_start/0, duration_since/1]).
 -export([detach/1]).
 -export([attach_aggregate_handlers/2]).
 -export([attach_handler_handlers/2]).
@@ -140,20 +141,33 @@ attach_all_handlers(HandlerIdPrefix, HandlerFun) ->
 list_handlers() ->
     telemetry:list_handlers([evoq]).
 
+%% @doc The start of a duration: monotonic time in native units. Pair with
+%% duration_since/1. A duration is elapsed time, so it comes from the
+%% monotonic clock, which an NTP step or a time warp cannot move, and it is
+%% in native units, telemetry's convention for `duration' (evoq #7).
+-spec monotonic_start() -> integer().
+monotonic_start() ->
+    erlang:monotonic_time().
+
+%% @doc The native-unit duration since a monotonic_start/0 reading.
+-spec duration_since(integer()) -> integer().
+duration_since(Start) ->
+    erlang:monotonic_time() - Start.
+
 %% @doc Execute a function within a telemetry span.
 %% Emits start and stop (or exception) events.
 -spec span([atom()], map(), fun(() -> term())) -> term().
 span(EventPrefix, Metadata, Fun) ->
-    StartTime = erlang:system_time(microsecond),
+    StartTime = evoq_telemetry:monotonic_start(),
 
     %% Emit start event
     telemetry:execute(EventPrefix ++ [start], #{
-        system_time => StartTime
+        system_time => erlang:system_time()
     }, Metadata),
 
     try Fun() of
         Result ->
-            StopDuration = erlang:system_time(microsecond) - StartTime,
+            StopDuration = evoq_telemetry:duration_since(StartTime),
 
             %% Emit stop event
             telemetry:execute(EventPrefix ++ [stop], #{
@@ -163,7 +177,7 @@ span(EventPrefix, Metadata, Fun) ->
             Result
     catch
         Class:Reason:Stacktrace ->
-            ExceptionDuration = erlang:system_time(microsecond) - StartTime,
+            ExceptionDuration = evoq_telemetry:duration_since(StartTime),
 
             %% Emit exception event
             telemetry:execute(EventPrefix ++ [exception], #{

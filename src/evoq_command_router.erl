@@ -74,7 +74,7 @@ dispatch_with_state(Command0, Opts) ->
 
 %% @private
 dispatch_internal(Command, Opts) ->
-    StartTime = erlang:system_time(microsecond),
+    StartTime = evoq_telemetry:monotonic_start(),
 
     %% Create execution context
     Context = evoq_execution_context:new(Command, Opts),
@@ -95,7 +95,7 @@ dispatch_internal(Command, Opts) ->
 
     %% Emit start telemetry
     telemetry:execute(?TELEMETRY_DISPATCH_START, #{
-        system_time => StartTime
+        system_time => erlang:system_time()
     }, #{
         command_id => Command#evoq_command.command_id,
         command_type => Command#evoq_command.command_type,
@@ -118,7 +118,7 @@ dispatch_internal(Command, Opts) ->
 
 %% @private
 dispatch_internal_with_state(Command, Opts) ->
-    StartTime = erlang:system_time(microsecond),
+    StartTime = evoq_telemetry:monotonic_start(),
     Context = evoq_execution_context:new(Command, Opts),
     Pipeline = #evoq_pipeline{
         command = Command,
@@ -132,7 +132,7 @@ dispatch_internal_with_state(Command, Opts) ->
     Middleware = DefaultMiddleware ++ ExtraMiddleware,
 
     telemetry:execute(?TELEMETRY_DISPATCH_START, #{
-        system_time => StartTime
+        system_time => erlang:system_time()
     }, #{
         command_id => Command#evoq_command.command_id,
         command_type => Command#evoq_command.command_type,
@@ -273,7 +273,7 @@ handle_failure(Pipeline, Error, Middleware, StartTime) ->
     Pipeline4 = evoq_middleware:chain(Pipeline3, after_failure, Middleware),
 
     %% Emit exception telemetry
-    Duration = erlang:system_time(microsecond) - StartTime,
+    Duration = evoq_telemetry:duration_since(StartTime),
     telemetry:execute(?TELEMETRY_DISPATCH_EXCEPTION, #{
         duration => Duration
     }, #{
@@ -313,7 +313,7 @@ consistency_outcome({error, timeout}, _Response) -> {error, consistency_timeout}
 
 %% @private
 emit_stop_telemetry(StartTime, Command, Response) ->
-    Duration = erlang:system_time(microsecond) - StartTime,
+    Duration = evoq_telemetry:duration_since(StartTime),
     EventCount = case Response of
         {ok, _, Events} -> length(Events);
         _ -> 0

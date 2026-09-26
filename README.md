@@ -37,7 +37,7 @@ Add to your `rebar.config`:
 
 | Component | Version |
 |---|---|
-| `evoq` (this repo) | 1.26.0 |
+| `evoq` (this repo) | 1.26.1 |
 | `telemetry` (dep) | 1.3.0 |
 | Erlang/OTP | 27+ |
 
@@ -372,6 +372,11 @@ The memory monitor adjusts aggregate TTLs based on system memory usage:
 ## Telemetry Events
 
 All events follow the pattern: `[evoq, component, action, stage]`
+
+Units follow telemetry's convention (since 1.26.1): a `duration` is elapsed
+time from the monotonic clock in **native** units, and a `system_time` is
+wall-clock time in native units. Convert with
+`erlang:convert_time_unit(D, native, millisecond)`.
 
 ### Aggregate Events
 - `[evoq, aggregate, execute, start | stop | exception]`
