@@ -59,11 +59,8 @@ init({PMModule, ProcessId, _Config}) ->
     PMState = init_pm_state(erlang:function_exported(PMModule, init, 1),
                             PMModule, ProcessId),
 
-    %% Register with PM router
-    EventTypes = PMModule:interested_in(),
-    lists:foreach(fun(EventType) ->
-        evoq_pm_router:register_instance(EventType, ProcessId, self())
-    end, EventTypes),
+    %% Register with PM router, as PMModule's instance for ProcessId
+    ok = evoq_pm_router:register_instance(PMModule, ProcessId, self()),
 
     %% Emit start telemetry
     telemetry:execute(?TELEMETRY_PM_START, #{}, #{
@@ -121,10 +118,7 @@ terminate(_Reason, #evoq_pm_state{
     process_id = ProcessId
 }) ->
     %% Unregister from PM router
-    EventTypes = PMModule:interested_in(),
-    lists:foreach(fun(EventType) ->
-        evoq_pm_router:unregister_instance(EventType, ProcessId)
-    end, EventTypes),
+    evoq_pm_router:unregister_instance(PMModule, ProcessId),
 
     %% Emit stop telemetry
     telemetry:execute(?TELEMETRY_PM_STOP, #{}, #{

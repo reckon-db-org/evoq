@@ -114,6 +114,17 @@ correlate(_, _) ->
     false.
 ```
 
+A process instance belongs to its process manager: the ProcessId names an
+instance of THIS process manager only. Two process managers that correlate
+on the same id (both on an order id, say) each get their own instance and
+their own state. Before 1.26.0 instances were found by event type and id
+alone, so they could reach each other's instance.
+
+Every event of a PM's types is delivered to it as long as some event
+handler also consumes that type: the store subscription routes a type only
+when a handler holds it (evoq #2). A type only a process manager declares is
+not delivered yet; until that is fixed, give such a type a handler.
+
 ### handle/3
 
 React to events and optionally dispatch commands:

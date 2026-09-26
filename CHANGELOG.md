@@ -5,6 +5,44 @@ All notable changes to evoq will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.26.0] - 2026-09-26
+
+### Fixed — two process managers correlating on the same id reached each other's instance
+
+`evoq_pm_router` found a process manager's instance by event type and
+process id, with no process manager module in the key, and every instance
+registered under each of its types. Two process managers on the same event
+type correlating on the same id (two process managers keyed on an order id,
+the common case) shared that key: the second one's `{continue, Id}` found the
+first one's instance, and the first handled, and folded into its own state,
+events meant for the second, which never saw them. Instances are now keyed
+by process manager module and process id, one registration per instance.
+
+**Behaviour change** for anyone running two process managers that correlate
+on the same id: each now gets its own instance and state. Code that relied
+on reaching the other's instance was depending on the defect.
+`evoq_pm_router:register_instance/3`, `unregister_instance/2` and
+`get_instance/2` take the process manager module where they took an event
+type; nothing outside evoq calls them.
+
+### Fixed — module-handler registration answered ok and registered nothing (evoq #3)
+
+`evoq_event_type_registry:register_handler/2` and `unregister_handler/2`
+stored nothing and replied `ok`, so a caller believed a module registered
+that would never receive an event. They now return `{error, not_supported}`.
+A handler is a process started with `evoq_event_handler:start_link/2`, which
+registers itself. Both functions, and the event router's unreachable clause
+for module handlers, go in 2.0.0.
+
+### Known, not in this release
+
+A type only a process manager declares is still not delivered (evoq #2):
+the store subscription routes a type only when an event handler consumes it.
+The fix has to come with per-registrant backfill (evoq #4), because making a
+process manager a type's consumer on its own lets a handler that registers
+just after it on the same type miss history. Both land together in 1.27.0.
+Until then, give such a type an event handler.
+
 ## [1.25.1] - 2026-09-26
 
 ### Fixed — a decision over more than 1000 matching events read only the oldest 1000 (evoq #6, part one)

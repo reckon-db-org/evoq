@@ -62,13 +62,15 @@ register_all(EventTypes, HandlerPid) ->
 unregister(EventType, HandlerPid) ->
     gen_server:call(?SERVER, {unregister, EventType, HandlerPid}).
 
-%% @doc Register a handler module for an event type (legacy API).
--spec register_handler(binary(), atom()) -> ok.
+%% @doc Refused: {error, not_supported}. A module is never registered as
+%% a handler; start one with evoq_event_handler:start_link/2 (evoq #3).
+-spec register_handler(binary(), atom()) -> {error, not_supported}.
 register_handler(EventType, HandlerModule) ->
     gen_server:call(?SERVER, {register_module, EventType, HandlerModule}).
 
-%% @doc Unregister a handler module from an event type (legacy API).
--spec unregister_handler(binary(), atom()) -> ok.
+%% @doc Refused: {error, not_supported}. A module is never registered as
+%% a handler; start one with evoq_event_handler:start_link/2 (evoq #3).
+-spec unregister_handler(binary(), atom()) -> {error, not_supported}.
 unregister_handler(EventType, HandlerModule) ->
     gen_server:call(?SERVER, {unregister_module, EventType, HandlerModule}).
 
@@ -129,13 +131,15 @@ handle_call({unregister, EventType, HandlerPid}, _From, State) ->
     _ = pg:leave(?PG_SCOPE, Group, HandlerPid),
     {reply, ok, State};
 
+%% Module registration never stored anything and answered ok, so a caller
+%% believed a module registered that would never receive an event (evoq
+%% #3). It refuses; a handler is a process started with
+%% evoq_event_handler:start_link/2, which registers itself.
 handle_call({register_module, _EventType, _HandlerModule}, _From, State) ->
-    %% Module registration is handled by the handler supervisor
-    %% which starts the handler process and calls register/2
-    {reply, ok, State};
+    {reply, {error, not_supported}, State};
 
 handle_call({unregister_module, _EventType, _HandlerModule}, _From, State) ->
-    {reply, ok, State};
+    {reply, {error, not_supported}, State};
 
 handle_call({get_handlers, EventType}, _From, State) ->
     Group = event_type_group(EventType),

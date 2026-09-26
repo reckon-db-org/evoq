@@ -58,20 +58,25 @@ register_pm(PMModule) ->
 unregister_pm(PMModule) ->
     gen_server:call(?SERVER, {unregister_pm, PMModule}).
 
-%% @doc Register a PM instance for an event type.
--spec register_instance(binary(), binary(), pid()) -> ok.
-register_instance(EventType, ProcessId, Pid) ->
-    Group = instance_group(EventType, ProcessId),
+%% @doc Register the instance of PMModule for ProcessId.
+%%
+%% Keyed by the process manager module, not by event type: two process
+%% managers correlating on the same id (an order id, say) keep separate
+%% instances and separate state. Keyed by event type they found each
+%% other's instance, and one of them handled the other's events.
+-spec register_instance(atom(), binary(), pid()) -> ok.
+register_instance(PMModule, ProcessId, Pid) ->
+    Group = instance_group(PMModule, ProcessId),
     case pg:start(?PG_SCOPE) of
         {ok, _} -> ok;
         {error, {already_started, _}} -> ok
     end,
     ok = pg:join(?PG_SCOPE, Group, Pid).
 
-%% @doc Unregister a PM instance.
--spec unregister_instance(binary(), binary()) -> ok.
-unregister_instance(EventType, ProcessId) ->
-    Group = instance_group(EventType, ProcessId),
+%% @doc Unregister the instance of PMModule for ProcessId.
+-spec unregister_instance(atom(), binary()) -> ok.
+unregister_instance(PMModule, ProcessId) ->
+    Group = instance_group(PMModule, ProcessId),
     leave_all(pg:get_members(?PG_SCOPE, Group), Group),
     ok.
 
@@ -81,10 +86,10 @@ leave_all([], _Group) ->
 leave_all(Members, Group) ->
     lists:foreach(fun(Pid) -> _ = pg:leave(?PG_SCOPE, Group, Pid) end, Members).
 
-%% @doc Get a PM instance by event type and process ID.
--spec get_instance(binary(), binary()) -> {ok, pid()} | {error, not_found}.
-get_instance(EventType, ProcessId) ->
-    Group = instance_group(EventType, ProcessId),
+%% @doc The instance of PMModule for ProcessId.
+-spec get_instance(atom(), binary()) -> {ok, pid()} | {error, not_found}.
+get_instance(PMModule, ProcessId) ->
+    Group = instance_group(PMModule, ProcessId),
     case pg:get_members(?PG_SCOPE, Group) of
         [Pid | _] -> {ok, Pid};
         [] -> {error, not_found}
@@ -161,8 +166,8 @@ terminate(_Reason, _State) ->
 %%====================================================================
 
 %% @private
-instance_group(EventType, ProcessId) ->
-    {pm_instance, EventType, ProcessId}.
+instance_group(PMModule, ProcessId) ->
+    {pm_instance, PMModule, ProcessId}.
 
 %% @private
 route_to_pm(PMModule, Event, Metadata) ->
@@ -198,8 +203,7 @@ start_and_route(PMModule, ProcessId, Event, Metadata) ->
 
 %% @private
 route_or_start(PMModule, ProcessId, Event, Metadata) ->
-    EventType = maps:get(event_type, Event, <<"unknown">>),
-    case get_instance(EventType, ProcessId) of
+    case get_instance(PMModule, ProcessId) of
         {ok, Pid} ->
             evoq_pm_instance:handle_event(Pid, Event, Metadata);
         {error, not_found} ->
@@ -208,9 +212,8 @@ route_or_start(PMModule, ProcessId, Event, Metadata) ->
     end.
 
 %% @private
-route_and_stop(_PMModule, ProcessId, Event, Metadata) ->
-    EventType = maps:get(event_type, Event, <<"unknown">>),
-    case get_instance(EventType, ProcessId) of
+route_and_stop(PMModule, ProcessId, Event, Metadata) ->
+    case get_instance(PMModule, ProcessId) of
         {ok, Pid} ->
             %% Route the final event
             _ = evoq_pm_instance:handle_event(Pid, Event, Metadata),
