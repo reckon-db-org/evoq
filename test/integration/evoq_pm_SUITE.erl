@@ -242,8 +242,7 @@ pm_router_correlation_start_test(_Config) ->
     timer:sleep(100),
 
     %% Verify instance was created
-    EventType = <<"OrderPlaced">>,
-    case evoq_pm_router:get_instance(EventType, ProcessId) of
+    case evoq_pm_router:get_instance(?MODULE, ProcessId) of
         {ok, Pid} ->
             ?assert(is_pid(Pid)),
             ?assert(is_process_alive(Pid)),

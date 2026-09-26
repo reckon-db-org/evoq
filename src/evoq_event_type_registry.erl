@@ -17,6 +17,7 @@
 %% API
 -export([start_link/0]).
 -export([register/2, register_all/2, unregister/2]).
+-export([register_interest/2, unregister_interest/2, has_consumers/1]).
 -export([register_handler/2, unregister_handler/2]).
 -export([get_handlers/1]).
 -export([get_all_event_types/0]).
@@ -57,18 +58,45 @@ register(EventType, HandlerPid) ->
 register_all(EventTypes, HandlerPid) ->
     gen_server:call(?SERVER, {register_all, EventTypes, HandlerPid}).
 
+%% @doc Register Pid's interest in EventTypes without making it a handler.
+%%
+%% For consumers the event router must not deliver to, above all the PM
+%% router, which routes events to process manager instances itself. An
+%% interest counts wherever the store subscription asks whether a type has
+%% a consumer (has_consumers/1, the catch-up snapshot, backfill), but not in
+%% get_handlers/1. Types that had neither a handler nor an interest before
+%% are announced to store subscription listeners in one {new_event_types, _}
+%% message, exactly as a handler's register_all/2 announces them.
+-spec register_interest([binary()], pid()) -> ok.
+register_interest(EventTypes, Pid) ->
+    gen_server:call(?SERVER, {register_interest, EventTypes, Pid}).
+
+%% @doc Withdraw Pid's interest in EventTypes.
+-spec unregister_interest([binary()], pid()) -> ok.
+unregister_interest(EventTypes, Pid) ->
+    gen_server:call(?SERVER, {unregister_interest, EventTypes, Pid}).
+
+%% @doc Whether anything consumes EventType: a handler or an interest.
+%% What the store subscription routes on.
+-spec has_consumers(binary()) -> boolean().
+has_consumers(EventType) ->
+    pg:get_members(?PG_SCOPE, event_type_group(EventType)) =/= [] orelse
+        pg:get_members(?PG_SCOPE, interest_group(EventType)) =/= [].
+
 %% @doc Unregister a handler pid from an event type.
 -spec unregister(binary(), pid()) -> ok.
 unregister(EventType, HandlerPid) ->
     gen_server:call(?SERVER, {unregister, EventType, HandlerPid}).
 
-%% @doc Register a handler module for an event type (legacy API).
--spec register_handler(binary(), atom()) -> ok.
+%% @doc Refused: {error, not_supported}. A module is never registered as
+%% a handler; start one with evoq_event_handler:start_link/2 (evoq #3).
+-spec register_handler(binary(), atom()) -> {error, not_supported}.
 register_handler(EventType, HandlerModule) ->
     gen_server:call(?SERVER, {register_module, EventType, HandlerModule}).
 
-%% @doc Unregister a handler module from an event type (legacy API).
--spec unregister_handler(binary(), atom()) -> ok.
+%% @doc Refused: {error, not_supported}. A module is never registered as
+%% a handler; start one with evoq_event_handler:start_link/2 (evoq #3).
+-spec unregister_handler(binary(), atom()) -> {error, not_supported}.
 unregister_handler(EventType, HandlerModule) ->
     gen_server:call(?SERVER, {unregister_module, EventType, HandlerModule}).
 
@@ -119,8 +147,18 @@ init([]) ->
 %% @private
 handle_call({register_all, EventTypes, HandlerPid}, _From, State) ->
     NewTypes = [EventType || EventType <- lists:usort(EventTypes),
-                             join_group(EventType, HandlerPid)],
+                             join_group(event_type_group(EventType), EventType, HandlerPid)],
     notify_listeners(NewTypes),
+    {reply, ok, State};
+
+handle_call({register_interest, EventTypes, Pid}, _From, State) ->
+    NewTypes = [EventType || EventType <- lists:usort(EventTypes),
+                             join_group(interest_group(EventType), EventType, Pid)],
+    notify_listeners(NewTypes),
+    {reply, ok, State};
+
+handle_call({unregister_interest, EventTypes, Pid}, _From, State) ->
+    lists:foreach(fun(T) -> _ = pg:leave(?PG_SCOPE, interest_group(T), Pid) end, EventTypes),
     {reply, ok, State};
 
 handle_call({unregister, EventType, HandlerPid}, _From, State) ->
@@ -129,13 +167,15 @@ handle_call({unregister, EventType, HandlerPid}, _From, State) ->
     _ = pg:leave(?PG_SCOPE, Group, HandlerPid),
     {reply, ok, State};
 
+%% Module registration never stored anything and answered ok, so a caller
+%% believed a module registered that would never receive an event (evoq
+%% #3). It refuses; a handler is a process started with
+%% evoq_event_handler:start_link/2, which registers itself.
 handle_call({register_module, _EventType, _HandlerModule}, _From, State) ->
-    %% Module registration is handled by the handler supervisor
-    %% which starts the handler process and calls register/2
-    {reply, ok, State};
+    {reply, {error, not_supported}, State};
 
 handle_call({unregister_module, _EventType, _HandlerModule}, _From, State) ->
-    {reply, ok, State};
+    {reply, {error, not_supported}, State};
 
 handle_call({get_handlers, EventType}, _From, State) ->
     Group = event_type_group(EventType),
@@ -143,17 +183,14 @@ handle_call({get_handlers, EventType}, _From, State) ->
     {reply, Handlers, State};
 
 handle_call(get_all_event_types, _From, State) ->
-    Groups = pg:which_groups(?PG_SCOPE),
-    Types = [extract_event_type(G) || G <- Groups, is_event_type_group(G)],
-    {reply, Types, State};
+    {reply, consumed_types(), State};
 
 handle_call({register_listener, ListenerPid}, _From, State) ->
     %% Add listener to notification group
     ok = pg:join(?PG_SCOPE, store_subscription_listeners, ListenerPid),
-    %% Return current types atomically (same gen_server call)
-    Groups = pg:which_groups(?PG_SCOPE),
-    Types = [extract_event_type(G) || G <- Groups, is_event_type_group(G)],
-    {reply, {ok, Types}, State};
+    %% Return current types atomically (same gen_server call): every type
+    %% with a handler or an interest, the types catch-up routes.
+    {reply, {ok, consumed_types()}, State};
 
 handle_call({unregister_listener, ListenerPid}, _From, State) ->
     _ = pg:leave(?PG_SCOPE, store_subscription_listeners, ListenerPid),
@@ -182,19 +219,24 @@ terminate(_Reason, _State) ->
 event_type_group(EventType) ->
     {event_type, EventType}.
 
-%% @private
-is_event_type_group({event_type, _}) -> true;
-is_event_type_group(_) -> false.
+%% @private The group of pids interested in EventType without being its
+%% handlers (see register_interest/2).
+interest_group(EventType) ->
+    {interest, EventType}.
 
-%% @private
-extract_event_type({event_type, EventType}) -> EventType.
+%% @private Every type with a handler or an interest, once each.
+consumed_types() ->
+    lists:usort([T || G <- pg:which_groups(?PG_SCOPE), {ok, T} <- [consumed_type(G)]]).
 
-%% @private Join HandlerPid to EventType's group; true when the type had no
-%% handler before (its first handler ever).
-join_group(EventType, HandlerPid) ->
-    Group = event_type_group(EventType),
-    IsNew = pg:get_members(?PG_SCOPE, Group) =:= [],
-    ok = pg:join(?PG_SCOPE, Group, HandlerPid),
+consumed_type({event_type, T}) -> {ok, T};
+consumed_type({interest, T}) -> {ok, T};
+consumed_type(_) -> none.
+
+%% @private Join Pid to Group; true when EventType had no consumer at all
+%% before, neither a handler nor an interest: its first consumer ever.
+join_group(Group, EventType, Pid) ->
+    IsNew = not has_consumers(EventType),
+    ok = pg:join(?PG_SCOPE, Group, Pid),
     IsNew.
 
 %% @private Notify store subscription listeners about new event types, in

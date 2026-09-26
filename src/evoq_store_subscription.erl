@@ -628,16 +628,17 @@ route_events_with_seq([E | Rest], Seq) ->
     route_events_with_seq(Rest, NextSeq).
 
 %% @private Route a single evoq event to both event router and PM router.
-%% Only routes events that have registered handlers — others are skipped.
+%% Only routes events that something consumes (a handler, or a process
+%% manager through the PM router's interest) — others are skipped.
 %% Metadata carries the event's own stream version; the subscription's own
 %% routing (route_event_at/4) adds `global_position', which is what a
 %% projection checkpoints on.
 -spec route_event(evoq_event() | term()) -> ok.
 route_event(#evoq_event{event_type = EventType} = E) ->
-    case evoq_event_type_registry:get_handlers(EventType) of
-        [] ->
+    case evoq_event_type_registry:has_consumers(EventType) of
+        false ->
             ok;
-        _Handlers ->
+        true ->
             {Event, Metadata} = evoq_event_to_routable(E),
             evoq_event_router:route_event(Event, Metadata),
             evoq_pm_router:route_event(Event, Metadata),
@@ -687,10 +688,10 @@ route_event_with_seq(E, Seq, Replaying) ->
     route_event_with_seq(E, Seq, Replaying, #{}).
 
 route_event_with_seq(#evoq_event{event_type = EventType} = E, Seq, Replaying, Extra) ->
-    case evoq_event_type_registry:get_handlers(EventType) of
-        [] ->
+    case evoq_event_type_registry:has_consumers(EventType) of
+        false ->
             Seq;
-        _Handlers ->
+        true ->
             {Event, Metadata0} = evoq_event_to_routable(E),
             %% Override version with global sequence so projections
             %% using $all subscriptions get monotonic checkpoints.
