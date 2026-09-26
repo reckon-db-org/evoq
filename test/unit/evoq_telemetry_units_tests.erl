@@ -34,8 +34,8 @@ an_event_handler_reports_a_native_duration_test_() ->
      fun(_) -> ?_test(begin
          {ok, Pid} = evoq_event_handler:start_link(evoq_slow_probe_handler, #{}),
          Events = capture([[evoq, handler, event, stop]], fun() ->
-             ok = evoq_event_handler:notify(Pid, <<"slow_probe_v1">>, #{}, #{version => 0}),
-             timer:sleep(?SLEEP_MS * 4)
+             %% notify/4 is a call; the stop event is emitted before it returns.
+             ok = evoq_event_handler:notify(Pid, <<"slow_probe_v1">>, #{}, #{version => 0})
          end),
          unlink(Pid), exit(Pid, shutdown),
          #{duration := D} = measurements([evoq, handler, event, stop], Events),
@@ -47,8 +47,7 @@ a_projection_reports_a_native_duration_test_() ->
      fun(_) -> ?_test(begin
          {ok, Pid} = evoq_projection:start_link(evoq_slow_probe_projection, #{}),
          Events = capture([[evoq, projection, stop]], fun() ->
-             evoq_projection:notify(Pid, <<"slow_probe_v1">>, #{}, #{version => 0}),
-             timer:sleep(?SLEEP_MS * 4)
+             evoq_projection:notify(Pid, <<"slow_probe_v1">>, #{}, #{version => 0})
          end),
          unlink(Pid), exit(Pid, shutdown),
          #{duration := D} = measurements([evoq, projection, stop], Events),
@@ -61,10 +60,22 @@ a_projection_reports_a_native_duration_test_() ->
 %% drifting back.
 no_duration_is_taken_from_the_wall_clock_test() ->
     {ok, Files} = file:list_dir(src_dir()),
+    %% It read the real source, not an empty or wrong directory.
+    ?assert(lists:member("evoq_telemetry.erl", Files)),
     Offenders = [F || F <- Files, filename:extension(F) =:= ".erl",
                       {ok, Bin} <- [file:read_file(filename:join(src_dir(), F))],
-                      re:run(Bin, "system_time\\(microsecond\\)\\s*-", []) =/= nomatch],
+                      subtracts_wall_clock(code_only(Bin))],
     ?assertEqual([], Offenders).
+
+%% A system_time reading, in any unit, with a subtraction after it: the
+%% form every fixed site had, and the millisecond idle-timeout one.
+subtracts_wall_clock(Code) ->
+    re:run(Code, "system_time\\([a-z_]*\\)\\s*-", []) =/= nomatch.
+
+%% The source without comments, so a comment quoting the old form is fine.
+code_only(Bin) ->
+    Lines = binary:split(Bin, <<"\n">>, [global]),
+    iolist_to_binary([[re:replace(L, "%.*$", "", [{return, binary}]), $\n] || L <- Lines]).
 
 %%====================================================================
 
@@ -98,6 +109,7 @@ collect(Acc) ->
     end.
 
 measurements(Name, Events) ->
+    ?assertMatch({Name, _}, lists:keyfind(Name, 1, Events)),
     {Name, M} = lists:keyfind(Name, 1, Events),
     M.
 

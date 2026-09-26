@@ -361,15 +361,20 @@ handle_user_registered_test() ->
 
 ## Telemetry Events
 
-Event handlers emit telemetry:
+Event handlers emit telemetry, per event handled:
 
 | Event | Measurements | Metadata |
 |-------|--------------|----------|
-| `[evoq, handler, start]` | system_time | handler, event_type |
-| `[evoq, handler, stop]` | duration | handler, event_type |
-| `[evoq, handler, exception]` | duration | handler, error, stacktrace |
-| `[evoq, handler, retry]` | attempt | handler, event_type, reason |
-| `[evoq, handler, dead_letter]` | system_time | handler, event_type, reason |
+| `[evoq, handler, event, start]` | system_time | handler, event_type, attempt |
+| `[evoq, handler, event, stop]` | duration | handler, event_type |
+| `[evoq, handler, event, exception]` | duration | handler, event_type, error |
+| `[evoq, handler, retry]` | attempt, delay (immediate retry: attempt only) | handler, action |
+| `[evoq, handler, dead_letter]` | (none), or count when stored | handler, action, error, reason; or handler, id, reason |
+
+Units: `duration` is monotonic elapsed time and `system_time` is wall-clock
+time, both in native units (convert with
+`erlang:convert_time_unit(V, native, millisecond)`); `delay` is
+milliseconds.
 
 ## Best Practices
 

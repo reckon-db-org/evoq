@@ -456,12 +456,20 @@ Projections emit telemetry:
 
 | Event | Measurements | Metadata |
 |-------|--------------|----------|
-| `[evoq, projection, start]` | system_time | name |
-| `[evoq, projection, stop]` | duration | name |
-| `[evoq, projection, event]` | duration | name, event_type |
-| `[evoq, projection, checkpoint]` | position | name |
-| `[evoq, projection, rebuild, start]` | system_time | name |
-| `[evoq, projection, rebuild, stop]` | duration, events_processed | name |
+| `[evoq, projection, start]` | (none) | projection |
+| `[evoq, projection, event]` | system_time | projection, event_type |
+| `[evoq, projection, stop]` | duration | projection, event_type |
+| `[evoq, projection, stop]` | (none) | projection (the projection process stopping) |
+| `[evoq, projection, exception]` | duration | projection, event_type, error |
+
+`[evoq, projection, stop]` is emitted both per projected event (with a
+duration) and when the projection process stops (without); tell them apart
+by the `duration` measurement or the `event_type` metadata. A rebuild emits
+no events of its own.
+
+Units: `duration` is monotonic elapsed time and `system_time` is wall-clock
+time, both in native units (convert with
+`erlang:convert_time_unit(V, native, millisecond)`).
 
 ## Best Practices
 

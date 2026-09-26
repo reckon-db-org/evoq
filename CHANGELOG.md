@@ -19,15 +19,24 @@ units: a 1000x misreading on Linux. reckon-db had the same unit bug in its log
 handler, fixed in 5.11.10.
 
 Durations now come from the monotonic clock in native units, through
-`evoq_telemetry:monotonic_start/0` and `duration_since/1`. A start event's
-`system_time`, and the integrity-violation event's, is native wall-clock time
+`evoq_telemetry:monotonic_start/0` and `duration_since/1`. Every
+`system_time` measurement (the start events, `[evoq, projection, event]` and
+the integrity-violation event) is native wall-clock time
 (`erlang:system_time()`), where it was microseconds (milliseconds for the
 integrity event). The aggregate's idle-timeout arithmetic runs on the
 monotonic clock too.
 
 **A consumer that read `duration` or `system_time` as microseconds or
 milliseconds must convert from native now.** Nothing in our services
-attaches to evoq telemetry.
+attaches to evoq telemetry. `delay` on `[evoq, handler, retry]` stays
+milliseconds.
+
+### Documentation — the telemetry tables match what is emitted
+
+The event handler and projection guides listed events evoq never emits
+(`[evoq, handler, start|stop|exception]`, projection `checkpoint` and
+`rebuild`) and wrong measurements, and left out the per-event handler events
+that are emitted. Both tables now come from the source, with the units.
 
 ## [1.26.0] - 2026-09-26
 
