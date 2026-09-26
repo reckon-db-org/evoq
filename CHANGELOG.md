@@ -21,7 +21,7 @@ by process manager module and process id, one registration per instance.
 **Behaviour change** for anyone running two process managers that correlate
 on the same id: each now gets its own instance and state. Code that relied
 on reaching the other's instance was depending on the defect.
-`evoq_pm_router:register_instance/3`, `unregister_instance/2` and
+`evoq_pm_router:register_instance/3`, `unregister_instance/3` and
 `get_instance/2` take the process manager module where they took an event
 type; nothing outside evoq calls them.
 
@@ -39,8 +39,10 @@ registration only (`evoq_pm_router:unregister_instance/3` takes the pid).
 stored nothing and replied `ok`, so a caller believed a module registered
 that would never receive an event. They now return `{error, not_supported}`.
 A handler is a process started with `evoq_event_handler:start_link/2`, which
-registers itself. Both are marked `-deprecated`, so `xref` flags callers, and
-they go in 2.0.0 with the event router's unreachable clause for module
+registers itself. Both are marked `-deprecated`, so an xref
+`deprecated_function_calls` check flags callers and the hexdocs show it (the
+compiler does not warn, and rebar3's default xref checks do not include it),
+and they go in 2.0.0 with the event router's unreachable clause for module
 handlers. `evoq_event_type_registry:get_handlers/1` is specced as returning
 pids only, which is all it ever returned.
 
@@ -62,8 +64,11 @@ every process needs a terminal event.
 ### Known, not in this release
 
 - The PM router has no isolation: one crash in a process manager's
-  callbacks, or one event its `correlate/2` does not match, silences every
-  process manager on the node until it restarts (evoq #9).
+  callbacks, or one event its `correlate/2` does not match, restarts the
+  router empty: every process manager on the node stays silent until the
+  node restarts or each is registered again with
+  `evoq_process_manager:start/2` (evoq #9). The router's own restart is not
+  recovery.
 - Process-manager instance routing is cluster-wide, unlike handler routing
   (evoq #10).
 

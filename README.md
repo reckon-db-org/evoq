@@ -123,13 +123,19 @@ handle_event(<<"LargeDeposit">>, Event, _Metadata, State) ->
 interested_in() ->
     [<<"OrderPlaced">>, <<"PaymentReceived">>, <<"ItemShipped">>].
 
+%% The last event of the process correlates as {stop, _}; anything else
+%% as false, so correlate/2 never raises.
+correlate(#{event_type := <<"ItemShipped">>, data := #{order_id := OrderId}}, _Meta) ->
+    {stop, OrderId};
 correlate(#{data := #{order_id := OrderId}}, _Meta) ->
-    {continue, OrderId}.
+    {continue, OrderId};
+correlate(_Event, _Meta) ->
+    false.
 
-handle(State, #{event_type := <<"OrderPlaced">>} = Event, _Meta) ->
+handle(State, #{event_type := <<"OrderPlaced">>, data := #{order_id := OrderId}}, _Meta) ->
     Cmd = evoq_command:new(process_payment, payment, OrderId, #{}),
     {ok, State, [Cmd]};
-handle(State, #{event_type := <<"PaymentReceived">>}, _Meta) ->
+handle(State, #{event_type := <<"PaymentReceived">>, data := #{order_id := OrderId}}, _Meta) ->
     Cmd = evoq_command:new(ship_item, shipping, OrderId, #{}),
     {ok, State, [Cmd]};
 handle(State, #{event_type := <<"ItemShipped">>}, _Meta) ->

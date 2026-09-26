@@ -32,6 +32,7 @@ two_pms_on_one_id_keep_their_own_instances_test_() ->
 %% became unreachable.
 a_stopping_instance_leaves_only_itself_test_() ->
     pm_test(fun() ->
+        evoq_test_isolation:stop_leftover_evoq(),
         lists:foreach(fun(M) -> started(M:start_link()) end,
                       [evoq_event_type_registry, evoq_pm_router, evoq_pm_instance_sup]),
         {ok, First} = evoq_pm_instance_sup:start_instance(evoq_order_probe_pm, <<"o9">>, #{}),
@@ -46,7 +47,6 @@ a_stopping_instance_leaves_only_itself_test_() ->
 %% never receive an event. They refuse.
 module_handler_registration_refuses_test_() ->
     pm_test(fun() ->
-        started(evoq_event_type_registry:start_link()),
         ?assertEqual({error, not_supported},
                      evoq_event_type_registry:register_handler(?PLACED, some_module)),
         ?assertEqual({error, not_supported},

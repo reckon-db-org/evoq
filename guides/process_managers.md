@@ -30,9 +30,14 @@ Examples:
 interested_in() ->
     [<<"OrderPlaced">>, <<"PaymentReceived">>, <<"InventoryReserved">>, <<"ItemShipped">>].
 
-%% Route events to the correct process instance
+%% Route events to the correct process instance. The last event of the
+%% process stops it; anything else is false, so correlate/2 never raises.
+correlate(#{event_type := <<"ItemShipped">>, data := #{order_id := OrderId}}, _Metadata) ->
+    {stop, OrderId};
 correlate(#{data := #{order_id := OrderId}}, _Metadata) ->
-    {continue, OrderId}.
+    {continue, OrderId};
+correlate(_Event, _Metadata) ->
+    false.
 
 %% React to events by dispatching commands
 handle(State, #{event_type := <<"OrderPlaced">>} = Event, _Meta) ->
@@ -262,14 +267,17 @@ something (a scheduled command, another aggregate's event) produces it.
 
 - `{start, Id}` always starts a new instance, even when one exists for that
   id; use `{continue, Id}` unless the event genuinely begins a new process.
+  The earlier instance keeps running, and receives that id's events again
+  once the newer one stops.
 - `{stop, Id}` hands the event to the running instance and stops it. When no
   instance exists for the id, the event is dropped: a process whose first
   event would be a stop never sees it.
 - Run a process manager on one node only for now: instance routing is
   cluster-wide (evoq #10). A crash in one process manager's `correlate/2`,
-  `handle/3` or `apply/2` restarts the router and silences every process
-  manager on the node until it restarts (evoq #9); keep those callbacks total
-  (a catch-all `correlate(_, _) -> false`) until that is fixed.
+  `handle/3` or `apply/2` restarts the router empty, and every process
+  manager on the node stays silent until the node restarts or each is
+  registered again (evoq #9); keep those callbacks total (a catch-all
+  `correlate(_, _) -> false`) until that is fixed.
 
 ## Correlation Strategies
 
