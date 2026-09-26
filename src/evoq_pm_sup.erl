@@ -10,7 +10,6 @@
 
 %% API
 -export([start_link/0]).
--export([start_pm_instance/2]).
 
 %% Supervisor callbacks
 -export([init/1]).
@@ -23,11 +22,6 @@
 -spec start_link() -> {ok, pid()} | {error, term()}.
 start_link() ->
     supervisor:start_link({local, ?MODULE}, ?MODULE, []).
-
-%% @doc Start a process manager instance.
--spec start_pm_instance(atom(), binary()) -> {ok, pid()} | {error, term()}.
-start_pm_instance(PMModule, ProcessId) ->
-    supervisor:start_child(evoq_pm_instance_sup, [PMModule, ProcessId]).
 
 %%====================================================================
 %% Supervisor callbacks

@@ -238,20 +238,11 @@ pm_router_correlation_start_test(_Config) ->
     %% Route the event
     ok = evoq_pm_router:route_event(Event, Metadata),
 
-    %% Give it time to process
-    timer:sleep(100),
-
-    %% Verify instance was created
-    case evoq_pm_router:get_instance(?MODULE, ProcessId) of
-        {ok, Pid} ->
-            ?assert(is_pid(Pid)),
-            ?assert(is_process_alive(Pid)),
-            %% Cleanup
-            gen_server:stop(Pid);
-        {error, not_found} ->
-            %% Instance might not be registered yet, that's ok for async routing
-            ok
-    end,
+    %% Verify instance was created. Routing is a cast, so wait for it, but
+    %% an instance that never appears is a failure, not "async routing".
+    {ok, Pid} = wait_for_instance(?MODULE, ProcessId, 50),
+    ?assert(is_process_alive(Pid)),
+    gen_server:stop(Pid),
 
     %% Unregister PM
     ok = evoq_pm_router:unregister_pm(?MODULE),
@@ -368,3 +359,11 @@ compensation_build_chain_test(_Config) ->
     [RefundCmd] = RefundCmds,
     ?assertEqual(issue_refund, RefundCmd#evoq_command.command_type),
     ok.
+
+wait_for_instance(PMModule, ProcessId, 0) ->
+    evoq_pm_router:get_instance(PMModule, ProcessId);
+wait_for_instance(PMModule, ProcessId, N) ->
+    case evoq_pm_router:get_instance(PMModule, ProcessId) of
+        {ok, _} = Found -> Found;
+        {error, not_found} -> timer:sleep(20), wait_for_instance(PMModule, ProcessId, N - 1)
+    end.

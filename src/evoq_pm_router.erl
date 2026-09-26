@@ -20,7 +20,7 @@
 -export([start_link/0]).
 -export([route_event/2]).
 -export([register_pm/1, unregister_pm/1]).
--export([register_instance/3, unregister_instance/2]).
+-export([register_instance/3, unregister_instance/3]).
 -export([get_instance/2]).
 
 %% gen_server callbacks
@@ -73,18 +73,14 @@ register_instance(PMModule, ProcessId, Pid) ->
     end,
     ok = pg:join(?PG_SCOPE, Group, Pid).
 
-%% @doc Unregister the instance of PMModule for ProcessId.
--spec unregister_instance(atom(), binary()) -> ok.
-unregister_instance(PMModule, ProcessId) ->
-    Group = instance_group(PMModule, ProcessId),
-    leave_all(pg:get_members(?PG_SCOPE, Group), Group),
+%% @doc Unregister Pid as an instance of PMModule for ProcessId. Only Pid
+%% leaves: it left every member of the group, so a second instance for the
+%% same process manager and id (a second {start, Id}) stayed alive and
+%% unreachable when the first stopped.
+-spec unregister_instance(atom(), binary(), pid()) -> ok.
+unregister_instance(PMModule, ProcessId, Pid) ->
+    _ = pg:leave(?PG_SCOPE, instance_group(PMModule, ProcessId), Pid),
     ok.
-
-%% @private
-leave_all([], _Group) ->
-    ok;
-leave_all(Members, Group) ->
-    lists:foreach(fun(Pid) -> _ = pg:leave(?PG_SCOPE, Group, Pid) end, Members).
 
 %% @doc The instance of PMModule for ProcessId.
 -spec get_instance(atom(), binary()) -> {ok, pid()} | {error, not_found}.

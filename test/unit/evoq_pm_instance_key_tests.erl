@@ -26,6 +26,21 @@ two_pms_on_one_id_keep_their_own_instances_test_() ->
                      [X || {X, _} <- evoq_replay_probe:calls(audit_pm)])
     end).
 
+%% An instance that stops leaves its own registration only. It left every
+%% member of its group, so with a second instance for the same process
+%% manager and id (a second {start, Id}) the other one stayed alive and
+%% became unreachable.
+a_stopping_instance_leaves_only_itself_test_() ->
+    pm_test(fun() ->
+        lists:foreach(fun(M) -> started(M:start_link()) end,
+                      [evoq_event_type_registry, evoq_pm_router, evoq_pm_instance_sup]),
+        {ok, First} = evoq_pm_instance_sup:start_instance(evoq_order_probe_pm, <<"o9">>, #{}),
+        {ok, Second} = evoq_pm_instance_sup:start_instance(evoq_order_probe_pm, <<"o9">>, #{}),
+        ok = gen_server:stop(Second),
+        ?assert(is_process_alive(First)),
+        ?assertEqual({ok, First}, evoq_pm_router:get_instance(evoq_order_probe_pm, <<"o9">>))
+    end).
+
 %% evoq #3: register_handler/2 and unregister_handler/2 stored nothing and
 %% answered ok, so a caller believed a module was registered that would
 %% never receive an event. They refuse.
@@ -103,8 +118,6 @@ stop(Pid) ->
 %% What the order process manager handled: {Type, Order, types seen before}.
 order_pm_seen() ->
     [{Type, Id, Seen} || {{Type, Id, #{seen := Seen}}, _} <- evoq_replay_probe:calls(order_pm)].
-
-ns(Who) -> [N || {N, _} <- evoq_replay_probe:calls(Who)].
 
 placed(Order, Pos) -> event(?PLACED, Order, Pos).
 paid(Order, Pos) -> event(?PAID, Order, Pos).

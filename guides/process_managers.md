@@ -92,9 +92,9 @@ Route events to the correct process instance:
 
 ```erlang
 -spec correlate(Event :: map(), Metadata :: map()) ->
-    {start, ProcessId :: term()} |
-    {continue, ProcessId :: term()} |
-    {stop, ProcessId :: term()} |
+    {start, ProcessId :: binary()} |
+    {continue, ProcessId :: binary()} |
+    {stop, ProcessId :: binary()} |
     false.
 
 %% Start a new process
@@ -147,7 +147,9 @@ handle(State, #{event_type := <<"PaymentReceived">>}, _Meta) ->
 
 ### apply/2
 
-Update process state from events (called before `handle/3`):
+Update process state from events. The runtime calls `handle/3` first, then
+`apply/2` on the state `handle/3` returned, so `handle/3` sees the state as it
+was before this event:
 
 ```erlang
 -spec apply(State :: term(), Event :: map()) -> NewState :: term().
@@ -250,26 +252,24 @@ handle(State, _Event, _Meta) ->
     {ok, State}.
 ```
 
-## Timeout Handling
+## Instance Lifetime
 
-Handle timeouts for long-running processes:
+An instance lives in memory until a `{stop, Id}` event ends it. There is no
+timeout callback: the instance's idle timer only logs. A process that never
+reaches a `{stop, Id}` keeps one process per id for the life of the node, so
+give every process a terminal event, and design ones that can stall so that
+something (a scheduled command, another aggregate's event) produces it.
 
-```erlang
--module(booking_pm).
--behaviour(evoq_process_manager).
-
--export([interested_in/0, correlate/2, handle/3, apply/2, timeout/0]).
-
-timeout() ->
-    15 * 60 * 1000.  %% 15 minute timeout
-
-handle(#{status := awaiting_confirmation, started_at := Started} = State, timeout, _Meta) ->
-    %% Timeout triggered - cancel the booking
-    Cmd = evoq_command:new(cancel_booking, booking, BookingId, #{
-        reason => timeout
-    }),
-    {ok, State#{status => timed_out}, [Cmd]}.
-```
+- `{start, Id}` always starts a new instance, even when one exists for that
+  id; use `{continue, Id}` unless the event genuinely begins a new process.
+- `{stop, Id}` hands the event to the running instance and stops it. When no
+  instance exists for the id, the event is dropped: a process whose first
+  event would be a stop never sees it.
+- Run a process manager on one node only for now: instance routing is
+  cluster-wide (evoq #10). A crash in one process manager's `correlate/2`,
+  `handle/3` or `apply/2` restarts the router and silences every process
+  manager on the node until it restarts (evoq #9); keep those callbacks total
+  (a catch-all `correlate(_, _) -> false`) until that is fixed.
 
 ## Correlation Strategies
 
@@ -297,7 +297,7 @@ When multiple entities involved:
 
 ```erlang
 correlate(#{data := #{source := Src, dest := Dst}}, _) ->
-    {continue, {transfer, Src, Dst}}.
+    {continue, <<"transfer:", Src/binary, ":", Dst/binary>>}.
 ```
 
 ## Testing Process Managers
@@ -313,23 +313,25 @@ full_workflow_test() ->
     State0 = #{},
 
     %% Order placed
+    %% The runtime's order: handle/3 on the state so far, then apply/2 on
+    %% the state it returned.
     {start, OrderId} = order_pm:correlate(order_placed_event(), #{}),
-    State1 = order_pm:apply(State0, order_placed_event()),
-    {ok, State2, [PaymentCmd]} = order_pm:handle(State1, order_placed_event(), #{}),
+    {ok, Handled1, [PaymentCmd]} = order_pm:handle(State0, order_placed_event(), #{}),
+    State2 = order_pm:apply(Handled1, order_placed_event()),
 
     ?assertEqual(awaiting_payment, maps:get(status, State2)),
     ?assertEqual(process_payment, maps:get(command_type, PaymentCmd)),
 
     %% Payment received
-    State3 = order_pm:apply(State2, payment_received_event()),
-    {ok, State4, [ShipCmd]} = order_pm:handle(State3, payment_received_event(), #{}),
+    {ok, Handled2, [ShipCmd]} = order_pm:handle(State2, payment_received_event(), #{}),
+    State4 = order_pm:apply(Handled2, payment_received_event()),
 
     ?assertEqual(awaiting_shipment, maps:get(status, State4)),
     ?assertEqual(ship_item, maps:get(command_type, ShipCmd)),
 
     %% Item shipped
-    State5 = order_pm:apply(State4, item_shipped_event()),
-    {ok, State6} = order_pm:handle(State5, item_shipped_event(), #{}),
+    {ok, Handled3} = order_pm:handle(State4, item_shipped_event(), #{}),
+    State6 = order_pm:apply(Handled3, item_shipped_event()),
 
     ?assertEqual(completed, maps:get(status, State6)).
 ```
@@ -340,10 +342,10 @@ Process managers emit telemetry:
 
 | Event | Measurements | Metadata |
 |-------|--------------|----------|
-| `[evoq, process_manager, start]` | system_time | name, process_id |
-| `[evoq, process_manager, stop]` | duration | name, process_id, final_state |
-| `[evoq, process_manager, command]` | system_time | name, command_type |
-| `[evoq, process_manager, compensate]` | system_time | name, failed_command |
+| `[evoq, process_manager, start]` | (none) | pm_module, process_id |
+| `[evoq, process_manager, stop]` | (none) | pm_module, process_id |
+| `[evoq, process_manager, command]` | (none) | pm_module, process_id, command_type |
+| `[evoq, process_manager, compensate]` | command_count | pm_module, process_id |
 
 ## Best Practices
 
@@ -352,7 +354,8 @@ Process managers emit telemetry:
 Long-running processes accumulate state and risk:
 - Design for completion in minutes/hours, not days
 - Split long workflows into smaller processes
-- Use timeouts to handle stuck processes
+- Give every process a terminal event that correlates as `{stop, Id}`
+  (see Instance Lifetime)
 
 ### 2. Make Steps Idempotent
 

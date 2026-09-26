@@ -25,16 +25,47 @@ on reaching the other's instance was depending on the defect.
 `get_instance/2` take the process manager module where they took an event
 type; nothing outside evoq calls them.
 
+### Fixed — a stopping instance unregistered its siblings
+
+`evoq_pm_instance:terminate/2` removed every member of its instance group,
+so after a second `{start, Id}` for the same process manager and id (which
+always starts a new instance) the first instance stayed alive but could no
+longer be found once the second stopped. An instance now leaves its own
+registration only (`evoq_pm_router:unregister_instance/3` takes the pid).
+
 ### Fixed — module-handler registration answered ok and registered nothing (evoq #3)
 
 `evoq_event_type_registry:register_handler/2` and `unregister_handler/2`
 stored nothing and replied `ok`, so a caller believed a module registered
 that would never receive an event. They now return `{error, not_supported}`.
 A handler is a process started with `evoq_event_handler:start_link/2`, which
-registers itself. Both functions, and the event router's unreachable clause
-for module handlers, go in 2.0.0.
+registers itself. Both are marked `-deprecated`, so `xref` flags callers, and
+they go in 2.0.0 with the event router's unreachable clause for module
+handlers. `evoq_event_type_registry:get_handlers/1` is specced as returning
+pids only, which is all it ever returned.
+
+### Removed — `evoq_pm_sup:start_pm_instance/2`
+
+It called `evoq_pm_instance:start_link/2`, which does not exist, so it failed
+with `undef` on first use; nothing called it. Instances start through the PM
+router.
+
+### Documentation — the process manager guide matches the runtime
+
+`handle/3` runs before `apply/2` (the guide said the reverse, and its test
+example did it that way); there is no timeout callback (the guide documented
+one); telemetry metadata is `pm_module` and `process_id`; process ids are
+binaries. New: an Instance Lifetime section on `{start, _}` always starting a
+new instance, `{stop, _}` dropping the event when no instance exists, and why
+every process needs a terminal event.
 
 ### Known, not in this release
+
+- The PM router has no isolation: one crash in a process manager's
+  callbacks, or one event its `correlate/2` does not match, silences every
+  process manager on the node until it restarts (evoq #9).
+- Process-manager instance routing is cluster-wide, unlike handler routing
+  (evoq #10).
 
 A type only a process manager declares is still not delivered (evoq #2):
 the store subscription routes a type only when an event handler consumes it.

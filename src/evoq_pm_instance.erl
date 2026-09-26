@@ -118,7 +118,7 @@ terminate(_Reason, #evoq_pm_state{
     process_id = ProcessId
 }) ->
     %% Unregister from PM router
-    evoq_pm_router:unregister_instance(PMModule, ProcessId),
+    evoq_pm_router:unregister_instance(PMModule, ProcessId, self()),
 
     %% Emit stop telemetry
     telemetry:execute(?TELEMETRY_PM_STOP, #{}, #{

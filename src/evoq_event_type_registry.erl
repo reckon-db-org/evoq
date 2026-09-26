@@ -18,6 +18,10 @@
 -export([start_link/0]).
 -export([register/2, register_all/2, unregister/2]).
 -export([register_handler/2, unregister_handler/2]).
+%% Module registration never stored anything and answered ok (evoq #3); both
+%% refuse now and go in 2.0.0.
+-deprecated([{register_handler, 2, "start a handler with evoq_event_handler:start_link/2"},
+             {unregister_handler, 2, "stop the handler process instead"}]).
 -export([get_handlers/1]).
 -export([get_all_event_types/0]).
 -export([register_listener/1, unregister_listener/1]).
@@ -65,18 +69,17 @@ unregister(EventType, HandlerPid) ->
 %% @doc Refused: {error, not_supported}. A module is never registered as
 %% a handler; start one with evoq_event_handler:start_link/2 (evoq #3).
 -spec register_handler(binary(), atom()) -> {error, not_supported}.
-register_handler(EventType, HandlerModule) ->
-    gen_server:call(?SERVER, {register_module, EventType, HandlerModule}).
+register_handler(_EventType, _HandlerModule) ->
+    {error, not_supported}.
 
 %% @doc Refused: {error, not_supported}. A module is never registered as
 %% a handler; start one with evoq_event_handler:start_link/2 (evoq #3).
 -spec unregister_handler(binary(), atom()) -> {error, not_supported}.
-unregister_handler(EventType, HandlerModule) ->
-    gen_server:call(?SERVER, {unregister_module, EventType, HandlerModule}).
+unregister_handler(_EventType, _HandlerModule) ->
+    {error, not_supported}.
 
-%% @doc Get all handlers registered for an event type.
-%% Returns both pids (from pg) and modules (from internal state).
--spec get_handlers(binary()) -> [pid() | atom()].
+%% @doc The handler processes registered for an event type (pg members).
+-spec get_handlers(binary()) -> [pid()].
 get_handlers(EventType) ->
     gen_server:call(?SERVER, {get_handlers, EventType}).
 
@@ -130,16 +133,6 @@ handle_call({unregister, EventType, HandlerPid}, _From, State) ->
     %% pg:leave returns ok | not_joined - both are acceptable
     _ = pg:leave(?PG_SCOPE, Group, HandlerPid),
     {reply, ok, State};
-
-%% Module registration never stored anything and answered ok, so a caller
-%% believed a module registered that would never receive an event (evoq
-%% #3). It refuses; a handler is a process started with
-%% evoq_event_handler:start_link/2, which registers itself.
-handle_call({register_module, _EventType, _HandlerModule}, _From, State) ->
-    {reply, {error, not_supported}, State};
-
-handle_call({unregister_module, _EventType, _HandlerModule}, _From, State) ->
-    {reply, {error, not_supported}, State};
 
 handle_call({get_handlers, EventType}, _From, State) ->
     Group = event_type_group(EventType),
