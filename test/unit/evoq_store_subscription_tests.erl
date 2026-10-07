@@ -103,6 +103,40 @@ init_does_not_block_on_catch_up_test() ->
     ?assertMatch({ok, _State, {continue, catch_up}}, Result),
     ?assert(TimeUs < 100000).
 
+%% @doc A clean stop must reach terminate/2, which acks the position the
+%% subscription has routed up to; otherwise the next boot redelivers up to
+%% ?ACK_EVERY_N_EVENTS - 1 handled events as new. A supervisor stops its
+%% children with exit(Pid, shutdown), and a gen_server runs terminate/2 on
+%% that only when it traps exits (macula-realm#64: every realm roll
+%% redelivered, even once the release received SIGTERM).
+init_traps_exits_so_a_supervisor_shutdown_acks_the_position_test() ->
+    ensure_routing_infrastructure(),
+    Parent = self(),
+    Pid = spawn(fun() ->
+        {ok, _State, {continue, catch_up}} =
+            evoq_store_subscription:init({a_store_never_read_here, #{}}),
+        {trap_exit, Trapping} = process_info(self(), trap_exit),
+        Parent ! {self(), Trapping}
+    end),
+    receive {Pid, Trapping} -> ?assert(Trapping)
+    after 1000 -> ?assert(false)
+    end.
+
+%% @doc Trapping exits must not hide a linked process's death: the
+%% subscription stops with that reason, as it did when it did not trap, so
+%% its supervisor restarts it.
+a_linked_process_exit_still_stops_the_subscription_test() ->
+    ensure_routing_infrastructure(),
+    Parent = self(),
+    Pid = spawn(fun() ->
+        {ok, State, {continue, catch_up}} =
+            evoq_store_subscription:init({a_store_never_read_here, #{}}),
+        Parent ! {self(), evoq_store_subscription:handle_info({'EXIT', self(), store_link_lost}, State)}
+    end),
+    receive {Pid, Reply} -> ?assertMatch({stop, store_link_lost, _}, Reply)
+    after 1000 -> ?assert(false)
+    end.
+
 %%====================================================================
 %% Sequence-based routing tests
 %%====================================================================

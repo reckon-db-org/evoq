@@ -5,6 +5,25 @@ All notable changes to evoq will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.26.2] - 2026-10-07
+
+### Fixed: a clean stop never acked the subscription's position (macula-realm#64)
+
+`evoq_store_subscription` acks its `$all` checkpoint every 200 events and,
+by its own documentation, on a clean stop, in `terminate/2`. But it did not
+trap exits, and a supervisor stops a child with `exit(Pid, shutdown)`: a
+gen_server that does not trap exits dies of that without running
+`terminate/2`. So no stop ever acked, and every restart, clean or not,
+delivered up to 199 already-handled events again, without the replay flag.
+In macula-realm that reran handlers a `replay_policy :skip` exists to hold
+back.
+
+`init/1` now traps exits, so a supervisor's shutdown runs `terminate/2` and
+acks the position routed so far. An exit from any other linked process still
+stops the subscription with that reason, as before, so its supervisor
+restarts it. A kill (`SIGKILL`, a brutal_kill shutdown) still skips
+`terminate/2`; that case is what the every-200 ack bounds.
+
 ## [1.26.1] - 2026-09-26
 
 ### Fixed — telemetry durations came from the wall clock, in microseconds (evoq #7)

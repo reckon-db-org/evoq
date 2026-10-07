@@ -152,6 +152,11 @@ start_link(StoreId, Opts) ->
 %% @private Registers with the type registry and returns immediately --
 %% see `handle_continue/2' for why catch-up moved out of here.
 init({StoreId, Opts}) ->
+    %% Trap exits so a supervisor's shutdown runs terminate/2, which acks the
+    %% position routed so far. Without it the "ack on a clean stop" never ran
+    %% and every restart redelivered up to ?ACK_EVERY_N_EVENTS - 1 handled
+    %% events (macula-realm#64).
+    process_flag(trap_exit, true),
     %% Register as a listener with the type registry.
     %% We still register so we know about new types, but we no longer
     %% need to create per-type subscriptions — we subscribe to $all.
@@ -349,6 +354,12 @@ handle_info({events, Events}, #state{store_id = StoreId, seq = Seq0,
     NewLastAcked = maybe_ack(StoreId, Offset1, LastAcked),
     {noreply, State#state{seq = Seq1, offset = Offset1, last_acked = NewLastAcked,
                           recent = Recent1}};
+
+%% Trapping exits (see init/1) must not swallow a linked process's death:
+%% stop with its reason, as the untrapped process used to die with it. The
+%% parent's exit never gets here; gen_server handles it and runs terminate/2.
+handle_info({'EXIT', _Pid, Reason}, State) ->
+    {stop, Reason, State};
 
 handle_info(_Info, State) ->
     {noreply, State}.
