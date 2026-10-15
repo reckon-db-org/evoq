@@ -47,7 +47,7 @@
 -export([execute_command/2, execute_command_with_state/2, get_state/1, get_version/1]).
 
 %% gen_server callbacks
--export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
+-export([init/1, handle_continue/2, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
 
 %% Events per store read when replaying a stream (see replay_events/5).
 -define(REPLAY_PAGE, 1000).
@@ -75,10 +75,16 @@ start_link(AggregateModule, AggregateId, StoreId) ->
     gen_server:start_link(?MODULE, {AggregateModule, AggregateId, StoreId}, []).
 
 %% @doc Execute a command against an aggregate.
+%%
+%% AN AGGREGATE THAT CANNOT ANSWER IS AN ERROR HERE, NOT AN EXIT FOR ITS
+%% CALLER. The store load runs after init (see handle_continue/2), so a store
+%% that cannot be read takes this process down while a caller is waiting on it.
+%% Without the catch below that caller exits with this process, and the
+%% dispatcher's own `{error, _}' clauses never see the failure.
 -spec execute_command(pid(), #evoq_command{}) ->
     {ok, integer(), [map()]} | {error, term()}.
 execute_command(Pid, Command) ->
-    gen_server:call(Pid, {execute, Command}, infinity).
+    called(Pid, {execute, Command}).
 
 %% @doc Execute a command and return the post-event aggregate state.
 %%
@@ -88,7 +94,24 @@ execute_command(Pid, Command) ->
 -spec execute_command_with_state(pid(), #evoq_command{}) ->
     {ok, integer(), [map()], term()} | {error, term()}.
 execute_command_with_state(Pid, Command) ->
-    gen_server:call(Pid, {execute_with_state, Command}, infinity).
+    called(Pid, {execute_with_state, Command}).
+
+%% Catching an exit is otherwise frowned on in this codebase. What it buys is a
+%% whole class of store failures arriving as a value the command router already
+%% knows how to report, instead of a caller exiting with a process it never
+%% owned. Nothing else changes: a successful call is returned untouched.
+called(Pid, Request) ->
+    try gen_server:call(Pid, Request, infinity) of
+        Reply -> Reply
+    catch
+        exit:{Reason, {gen_server, call, _}} -> {error, down(Reason)}
+    end.
+
+%% The two ordinary cases get names a caller can match on. Anything else keeps
+%% the reason it died with, because that reason is the evidence.
+down(noproc) -> not_running;
+down(normal) -> not_running;
+down(Reason) -> Reason.
 
 %% @doc Get the current state of an aggregate (for debugging).
 -spec get_state(pid()) -> {ok, term()}.
@@ -104,39 +127,58 @@ get_version(Pid) ->
 %% gen_server callbacks
 %%====================================================================
 
-%% @private
+%% @private LOADING MOVED OUT OF init/1, AND THAT IS THE POINT OF THIS SHAPE.
+%%
+%% Starting an aggregate is serialised through the registry (see
+%% evoq_aggregate_registry), so everything init/1 does happens on that path:
+%% loading here would make one stream's replay every other cold start's wait,
+%% and a store read that never answers would hold the whole node's starts. init
+%% therefore does the cheap half, join the registry and describe the stream, and
+%% asks for the load as a continue, which runs after init has answered.
+%%
+%% A command that arrives in the meantime is NOT lost and NOT served early: it
+%% queues in this process's mailbox, because a gen_server does not read its
+%% mailbox until the continue has finished. A caller sees either a loaded
+%% aggregate or an error, never a half-loaded one.
 init({AggregateModule, AggregateId, StoreId}) ->
-    %% Register with the registry
+    %% Register with the registry, before the state exists, so a racing caller
+    %% finds this process rather than starting a second one for the stream.
     evoq_aggregate_registry:register(AggregateId, self()),
 
-    %% Get lifespan configuration
-    LifespanModule = get_lifespan_module(),
+    {ok, #evoq_aggregate_state{
+            stream_id = AggregateId,
+            aggregate_module = AggregateModule,
+            store_id = StoreId,
+            state = undefined,
+            version = 0,
+            lifespan_module = get_lifespan_module(),
+            last_activity = erlang:monotonic_time(millisecond),
+            snapshot_count = 0
+        },
+     {continue, load}}.
 
-    %% Try to load from snapshot, otherwise initialize fresh
-    {InitialState, Version} = load_or_init(AggregateModule, AggregateId, StoreId),
+%% @private The load itself: snapshot, then replay. A failure here stops this
+%% process, and the dispatcher that was waiting on the stream finds out through
+%% execute_command/2, which answers `{error, Reason}' rather than letting the
+%% caller exit with this process.
+handle_continue(load, #evoq_aggregate_state{aggregate_module = Module,
+                                            stream_id = AggregateId,
+                                            store_id = StoreId} = State) ->
+    {InitialState, Version} = load_or_init(Module, AggregateId, StoreId),
 
-    State = #evoq_aggregate_state{
-        stream_id = AggregateId,
-        aggregate_module = AggregateModule,
-        store_id = StoreId,
-        state = InitialState,
-        version = Version,
-        lifespan_module = LifespanModule,
-        last_activity = erlang:monotonic_time(millisecond),
-        snapshot_count = 0
-    },
-
-    %% Emit telemetry
     telemetry:execute(?TELEMETRY_AGGREGATE_INIT, #{}, #{
         aggregate_id => AggregateId,
-        aggregate_module => AggregateModule,
+        aggregate_module => Module,
         store_id => StoreId,
         version => Version
     }),
 
-    %% Get initial timeout from lifespan
-    Timeout = get_timeout(LifespanModule, init),
-    {ok, State, Timeout}.
+    Loaded = State#evoq_aggregate_state{
+                 state = InitialState,
+                 version = Version,
+                 last_activity = erlang:monotonic_time(millisecond)},
+
+    {noreply, Loaded, get_timeout(Loaded#evoq_aggregate_state.lifespan_module, init)}.
 
 %% @private
 handle_call({execute, Command}, _From, State) ->

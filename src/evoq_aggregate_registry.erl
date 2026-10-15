@@ -18,6 +18,12 @@
 
 -define(PG_SCOPE, evoq_pg).
 
+%% How long the registry may take to answer a start before its caller is told
+%% so. The registry's own work is small now (a child loads itself in its own
+%% continue, see evoq_aggregate:handle_continue/2), so a wait past this is a
+%% wedged registry or a wedged supervisor rather than a slow replay.
+-define(START_TIMEOUT_MS, 15000).
+
 %%====================================================================
 %% API
 %%====================================================================
@@ -91,8 +97,20 @@ get_or_start(AggregateModule, AggregateId, StoreId) ->
         {ok, Pid} ->
             {ok, Pid};
         {error, not_found} ->
-            gen_server:call(?MODULE, {get_or_start, AggregateModule, AggregateId, StoreId},
-                            infinity)
+            asked(AggregateModule, AggregateId, StoreId)
+    end.
+
+%% @private A start, with a BOUNDED wait. An unbounded one would turn a wedged
+%% registry into callers that never return; a timeout that arrives as an exit
+%% would take those callers down instead. It is answered as `{error, timeout}',
+%% which is a value the command router already reports.
+asked(AggregateModule, AggregateId, StoreId) ->
+    try gen_server:call(?MODULE, {get_or_start, AggregateModule, AggregateId, StoreId},
+                        ?START_TIMEOUT_MS) of
+        Reply -> Reply
+    catch
+        exit:{timeout, _} -> {error, timeout};
+        exit:{noproc, _}  -> {error, not_running}
     end.
 
 %%====================================================================

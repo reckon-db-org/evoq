@@ -79,7 +79,9 @@
     aggregate_module :: atom(),
     store_id :: atom(),
     state :: term(),
-    version = 0 :: non_neg_integer(),
+    %% A stream's version is -1 until its first append, so this is an integer
+    %% and not a non_neg_integer: the same correction the reply specs carry.
+    version = 0 :: integer(),
     lifespan_module :: atom(),
     last_activity :: integer(),
     snapshot_count = 0 :: non_neg_integer()
