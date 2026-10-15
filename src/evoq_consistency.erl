@@ -41,7 +41,7 @@ start_pg() ->
     end.
 
 %% @doc Wait for handlers to process events up to the given version.
--spec wait_for(atom(), binary(), non_neg_integer(), map()) -> ok | {error, timeout}.
+-spec wait_for(atom(), binary(), integer(), map()) -> ok | {error, timeout}.
 wait_for(StoreId, AggregateId, Version, Opts) ->
     Timeout = maps:get(timeout, Opts, ?DEFAULT_TIMEOUT),
     RequiredHandlers = maps:get(handlers, Opts, all),
@@ -73,7 +73,7 @@ wait_for(StoreId, AggregateId, Version, Opts) ->
 
 %% @doc Acknowledge that a handler has processed events.
 %% Called by event handlers after processing.
--spec acknowledge(atom(), atom(), binary(), non_neg_integer()) -> ok.
+-spec acknowledge(atom(), atom(), binary(), integer()) -> ok.
 acknowledge(HandlerModule, StoreId, AggregateId, Version) ->
     WaiterKey = {consistency_waiter, StoreId, AggregateId, Version},
 

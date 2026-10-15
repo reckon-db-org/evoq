@@ -32,7 +32,7 @@
 %% If command_id is undefined, auto-generates one.
 %% If idempotency_key is set, uses it for deduplication cache.
 %% Otherwise, command_id is used (each dispatch is unique).
--spec dispatch(#evoq_command{}, map()) -> {ok, non_neg_integer(), [map()]} | {error, term()}.
+-spec dispatch(#evoq_command{}, map()) -> {ok, integer(), [map()]} | {error, term()}.
 dispatch(Command0, Opts) ->
     %% Auto-generate command_id if not provided
     Command = evoq_command:ensure_id(Command0),
@@ -54,7 +54,7 @@ dispatch(Command0, Opts) ->
 %% new events. Enables session-level consistency where the caller
 %% receives immediate truth about the resulting state.
 -spec dispatch_with_state(#evoq_command{}, map()) ->
-    {ok, non_neg_integer(), [map()], term()} | {error, term()}.
+    {ok, integer(), [map()], term()} | {error, term()}.
 dispatch_with_state(Command0, Opts) ->
     Command = evoq_command:ensure_id(Command0),
     TTL = application:get_env(evoq, idempotency_ttl, ?DEFAULT_IDEMPOTENCY_TTL),
@@ -293,6 +293,20 @@ handle_consistency(Pipeline, Context) ->
         {eventual, _} ->
             Response;
         {_, {error, _}} ->
+            Response;
+        %% A DECLINED COMMAND HAS NOTHING TO BE CONSISTENT WITH. The sanctioned
+        %% no-op (`execute/2' returning `{ok, []}', which is how a handler
+        %% refuses a command it has already honoured) appends nothing, so
+        %% `Version' is the stream's existing one and no handler will ever ack
+        %% it for this dispatch. Waiting could only ever end in the timeout,
+        %% answering `{error, consistency_timeout}' where the aggregate had said
+        %% `{ok, Version, []}'. Same defect as evoq#16, one layer up.
+        %%
+        %% Only an explicit handler list reaches the wait at all: `strong'
+        %% passes `#{}' to `evoq_consistency:wait_for/4', whose default `all'
+        %% becomes an EMPTY required list, and `wait_loop/4' answers that at
+        %% once. This clause covers both.
+        {_, {ok, _, []}} ->
             Response;
         {strong, {ok, Version, _Events}} ->
             AggregateId = Context#evoq_execution_context.aggregate_id,

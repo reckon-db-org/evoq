@@ -5,6 +5,55 @@ All notable changes to evoq will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.26.3] - 2026-10-15
+
+### Fixed: a declined command crashed the aggregate instead of answering (evoq#16)
+
+`execute/2` declining a command by returning the documented `{ok, []}`, the
+sanctioned no-op a handler uses for a command it has already honoured, killed
+the aggregate process with a `badarg` and gave the caller an exit instead of
+`{ok, Version, []}`. `append_events/5` has an explicit clause for the empty
+event list, so the outcome was intended; the reply path then called
+`hd/1` on it, at both `reply_after_append/5` and
+`reply_after_append_with_state/5`. Nothing produced an event, so nothing is
+what should reset the event timer: the timeout now comes from a shared helper
+with an `[]` clause that uses `after_command/1`, which is what this module
+already does for a read.
+
+`append_events/5` also answered a hardcoded version `0` for the empty list
+rather than the stream's own, which is a version the stream may never have
+been at. It answers the stream's version now, so a caller that reads a version
+off a no-op reads the truth. No working caller can have depended on the old
+value: the reply crashed before it was ever returned.
+
+A declined command is also not something to wait for. Under `{handlers, [...]}`
+consistency the router waited for handlers to acknowledge the version a command
+produced; a command that produced nothing has no such version and runs no
+handler, so the caller sat out the whole timeout and got
+`{error, consistency_timeout}` where the aggregate had said `{ok, Version, []}`.
+It answers at once now. `strong` never waited here for a different reason:
+`evoq_consistency:wait_for/4` turns its default `all` into an empty
+required-handler list and answers that immediately.
+
+Specs that said a version is `non_neg_integer()` were telling callers something
+false: a stream's version is `-1` until its first append, which is what
+`evoq_aggregate:rebuild_from_events/3` already reports for an empty stream.
+`execute_command/2`, `execute_command_with_state/2`, `get_version/1`,
+`evoq_command_router:dispatch/2`, `dispatch_with_state/2`,
+`evoq_consistency:wait_for/4` and `acknowledge/4` say `integer()` now.
+
+**Any consumer that uses `{ok, []}` as its refusal is affected and needs this
+release.** At least one deployed service does, for a redelivered event, so its
+aggregate crashes on redelivery today. It is a patch: `~> 1.26` floats here
+with no change in the consumer.
+
+No test in this repository had ever driven `execute/2` to `{ok, []}`, which is
+why a documented path could be broken in a released library.
+`test/unit/evoq_aggregate_noop_tests.erl` pins it now: the reply, the unchanged
+version, that the aggregate is still alive and still answering, and that an
+accepted command still produces its event, without which the test would pass on
+an aggregate that appends nothing at all.
+
 ## [1.26.2] - 2026-10-07
 
 ### Fixed: a clean stop never acked the subscription's position (macula-realm#64)

@@ -76,7 +76,7 @@ start_link(AggregateModule, AggregateId, StoreId) ->
 
 %% @doc Execute a command against an aggregate.
 -spec execute_command(pid(), #evoq_command{}) ->
-    {ok, non_neg_integer(), [map()]} | {error, term()}.
+    {ok, integer(), [map()]} | {error, term()}.
 execute_command(Pid, Command) ->
     gen_server:call(Pid, {execute, Command}, infinity).
 
@@ -86,7 +86,7 @@ execute_command(Pid, Command) ->
 %% all new events. Enables session-level consistency where the caller
 %% receives immediate truth about the resulting state.
 -spec execute_command_with_state(pid(), #evoq_command{}) ->
-    {ok, non_neg_integer(), [map()], term()} | {error, term()}.
+    {ok, integer(), [map()], term()} | {error, term()}.
 execute_command_with_state(Pid, Command) ->
     gen_server:call(Pid, {execute_with_state, Command}, infinity).
 
@@ -96,7 +96,7 @@ get_state(Pid) ->
     gen_server:call(Pid, get_state).
 
 %% @doc Get the current version of an aggregate.
--spec get_version(pid()) -> {ok, non_neg_integer()}.
+-spec get_version(pid()) -> {ok, integer()}.
 get_version(Pid) ->
     gen_server:call(Pid, get_version).
 
@@ -227,7 +227,7 @@ apply_events(Module, State, Events) ->
 reply_after_append({ok, NewVersion}, Events, NewAggState, State, StartTime) ->
     NewState2 = commit_new_state(State, NewAggState, NewVersion, Events),
     emit_execute_stop(stream_id(State), NewVersion, Events, StartTime),
-    Timeout = (State#evoq_aggregate_state.lifespan_module):after_event(hd(Events)),
+    Timeout = reply_timeout(State, Events),
     {reply, {ok, NewVersion, Events}, NewState2, Timeout};
 reply_after_append(AppendError, _Events, _NewAggState, State, _StartTime) ->
     reply_after_append_error(AppendError, State,
@@ -240,10 +240,27 @@ reply_after_append(AppendError, _Events, _NewAggState, State, _StartTime) ->
 reply_after_append_with_state({ok, NewVersion}, Events, NewAggState, State, StartTime) ->
     NewState2 = commit_new_state(State, NewAggState, NewVersion, Events),
     emit_execute_stop(stream_id(State), NewVersion, Events, StartTime),
-    Timeout = (State#evoq_aggregate_state.lifespan_module):after_event(hd(Events)),
+    Timeout = reply_timeout(State, Events),
     {reply, {ok, NewVersion, Events, NewAggState}, NewState2, Timeout};
 reply_after_append_with_state(AppendError, Events, NewAggState, State, StartTime) ->
     reply_after_append(AppendError, Events, NewAggState, State, StartTime).
+
+%% @private How long this aggregate should live after the events it just
+%% produced, or after a dispatch that produced none.
+%%
+%% ⚠ AN EMPTY EVENT LIST IS A REAL ANSWER. `execute/2' returning `{ok, []}' is
+%% the sanctioned no-op -- a handler declining a command it has already honoured
+%% -- and this used to reach for `hd(Events)' anyway, so the aggregate died with
+%% a `badarg' and the caller's dispatch got an exit instead of `{ok, V, []}'.
+%% Nothing produced an event, so nothing is what resets the event timer: the
+%% command timer governs the aggregate's life, which is exactly what this module
+%% already does for a read (`get_remaining_timeout/1' calls `after_command/1').
+%% Reported as evoq#16; found from a consumer whose deduplicated redelivery
+%% crashed in production code paths that had never been exercised.
+reply_timeout(State, [Event | _]) ->
+    (State#evoq_aggregate_state.lifespan_module):after_event(Event);
+reply_timeout(State, []) ->
+    (State#evoq_aggregate_state.lifespan_module):after_command(#{}).
 
 %% @private Build + maybe-snapshot the post-append aggregate state.
 commit_new_state(State, NewAggState, NewVersion, Events) ->
@@ -554,8 +571,18 @@ apply_replayed(Module, Event, {AccState, _Ver}) ->
     {Module:apply(AccState, Event), maps:get(version, Event, 0)}.
 
 %% @private
-append_events(_StoreId, _StreamId, _Version, [], _Command) ->
-    {ok, 0};
+%%
+%% NOTHING TO APPEND IS AN OUTCOME, NOT A MISSING ONE. `execute/2' returning
+%% `{ok, []}' is how a handler declines a command it has already honoured --
+%% "this stream already holds it" -- so this clause answers it with the stream's
+%% CURRENT version, which the no-op left exactly where it was. It used to answer
+%% a hardcoded 0, a version the stream may never have been at.
+%%
+%% The reply built from it then crashed anyway, on `hd/1' of the empty list
+%% (see reply_timeout/2), so no caller has ever seen either value; the correct
+%% one costs nothing to return instead.
+append_events(_StoreId, _StreamId, Version, [], _Command) ->
+    {ok, Version};
 append_events(StoreId, StreamId, Version, Events, Command) ->
     %% Build infrastructure metadata from command
     CmdMeta = Command#evoq_command.metadata,
