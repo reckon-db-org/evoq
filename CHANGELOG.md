@@ -5,6 +5,61 @@ All notable changes to evoq will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.26.4] - 2026-10-15
+
+### Fixed: one aggregate per stream, and a call that waits on a load answers instead of exiting (evoq#17)
+
+Two things a consumer can see change. No wire format and no on-disk format
+changes, and nothing a consumer has to do: it is a patch, and `~> 1.26` floats
+here with no change in the consumer.
+
+**One stream gets one aggregate, however many dispatches arrive together.**
+`evoq_aggregate_registry:get_or_start/2,3` looked the aggregate up in `pg` and,
+on a miss, started one. The two steps were not atomic, and the guard written to
+cover the gap could never run: the partition supervisors are
+`simple_one_for_one`, so `supervisor:start_child` always adds another child and
+never answers `{error, {already_started, Pid}}`. Two dispatches arriving
+together for one stream could therefore be handled by two processes. Both
+replayed the stream, and the second appended on the state it read before the
+first append landed, so a legitimate command came back as
+`{error, wrong_expected_version}`. The `pg` lookup stays the fast path; a miss
+goes through the registry's own gen_server, which re-checks before it starts
+anything. Supervision is untouched: the partition shape is what
+`evoq_memory_monitor` and every consumer's aggregate lifecycle sit on.
+
+**A store that cannot be read answers the caller rather than taking it down.**
+The snapshot read and the replay used to run inside `init/1`, on the path every
+start is serialised through, so one stream's replay was every other cold start's
+wait, and a store read that never answered held the whole node's starts with no
+timeout to end it. The load is a `handle_continue/2` now: `init/1` joins the
+registry and describes the stream, and the load runs after that has answered. A
+command that arrives in the meantime is neither lost nor served early: it queues
+in the aggregate's mailbox, because a gen_server does not read its mailbox until
+its continue has finished.
+
+That shape change is what made the calls that wait on a load unsafe, and all of
+them answer with a value now. Since the registry hands out its process before
+the stream is loaded, a caller of `execute_command/2`,
+`execute_command_with_state/2`, `get_state/1` or `get_version/1` is waiting on
+that load: a store read that fails kills the aggregate mid-call, and a cold
+stream whose replay outruns `gen_server`'s 5 s default ends the call with a
+timeout. Both used to end the caller with an exit, which the command router's
+own `{error, _}` clauses never see, so a store problem arrived as a crash in a
+service that was only reporting one. All four answer `{error, Reason}` now, and
+`get_state/1` and `get_version/1` say so in their specs. The shipped caller that
+had already written the right clause and could not receive it,
+`evoq_test_assertions:get_aggregate_state/2`, gets one now.
+
+The registry's own start call was the one wait with no bound at all: `infinity`
+meant a wedged registry or supervisor produced callers that never returned. It
+is bounded now and answers `{error, timeout}`.
+
+The tests pin the whole shape: ten concurrent callers for one stream get one
+pid, against a store that answers (with no store configured every start failed
+and the assertion held over an empty list), and a store that cannot be read
+gives `execute_command/2`, `get_state/1` and `get_version/1` an error rather
+than an exit, with the aggregate gone afterwards.
+
 ## [1.26.3] - 2026-10-15
 
 ### Fixed: a declined command crashed the aggregate instead of answering (evoq#16)
