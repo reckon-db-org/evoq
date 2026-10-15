@@ -74,13 +74,25 @@ get_or_start(AggregateModule, AggregateId) ->
     get_or_start(AggregateModule, AggregateId, StoreId).
 
 %% @doc Get an existing aggregate or start a new one with explicit store_id.
+%%
+%% The lookup below is a fast path only. A caller that misses it hands the
+%% start to this gen_server, which re-checks before it starts anything.
+%%
+%% The re-check has to live there because the partition supervisors are
+%% simple_one_for_one: start_child always adds another child and can never
+%% answer already_started, so two callers that both missed would put two
+%% aggregates on one stream. The second would append on the state it read
+%% before the first append landed, and a legitimate command would come back
+%% as a version conflict. By the time the first start replies, its child has
+%% registered itself in init, so the second caller finds it.
 -spec get_or_start(atom(), binary(), atom()) -> {ok, pid()} | {error, term()}.
 get_or_start(AggregateModule, AggregateId, StoreId) ->
     case lookup(AggregateId) of
         {ok, Pid} ->
             {ok, Pid};
         {error, not_found} ->
-            start_aggregate(AggregateModule, AggregateId, StoreId)
+            gen_server:call(?MODULE, {get_or_start, AggregateModule, AggregateId, StoreId},
+                            infinity)
     end.
 
 %%====================================================================
@@ -92,7 +104,12 @@ init([]) ->
     %% Monitor pg for membership changes
     {ok, #{}}.
 
-%% @private
+%% @private The start runs here, one at a time, so the re-check below is a
+%% real one: a start this registry has already made has registered its child
+%% by the time the previous call replied, so a racing caller finds it instead
+%% of starting a second aggregate for the same stream.
+handle_call({get_or_start, Module, AggregateId, StoreId}, _From, State) ->
+    {reply, get_or_start_serialised(Module, AggregateId, StoreId), State};
 handle_call(_Request, _From, State) ->
     {reply, {error, unknown_request}, State}.
 
@@ -112,14 +129,17 @@ terminate(_Reason, _State) ->
 %% Internal functions
 %%====================================================================
 
-%% @private
-start_aggregate(AggregateModule, AggregateId, StoreId) ->
-    case evoq_aggregates_sup:start_aggregate(AggregateModule, AggregateId, StoreId) of
+%% @private Reachable only from handle_call/3 above: nothing else starts an
+%% aggregate. There is no already_started clause here on purpose. The
+%% partitions are simple_one_for_one, so start_child always starts another
+%% child, and a clause handling a reply that cannot come would just hide a
+%% partition shape change that needs designing for instead. The registry
+%% test asserts no caller ever sees already_started, so such a change fails
+%% there rather than in production.
+get_or_start_serialised(AggregateModule, AggregateId, StoreId) ->
+    case lookup(AggregateId) of
         {ok, Pid} ->
             {ok, Pid};
-        {error, {already_started, Pid}} ->
-            %% Race: another caller started it between our lookup and start
-            {ok, Pid};
-        {error, _} = Error ->
-            Error
+        {error, not_found} ->
+            evoq_aggregates_sup:start_aggregate(AggregateModule, AggregateId, StoreId)
     end.
