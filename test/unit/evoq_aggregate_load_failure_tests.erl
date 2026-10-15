@@ -9,11 +9,15 @@
 %%%   2. a store read that fails therefore happens inside that process, while a
 %%%      caller is waiting on it, and execute_command/2 has to answer the caller
 %%%      with `{error, _}' rather than let it exit with a process it never owned
+%%%   3. the same pid is now what get_state/1 and get_version/1 are handed, so a
+%%%      READ waits on that load too: a read of a stream that cannot be read, or
+%%%      one whose replay outruns gen_server's 5 s default, answers `{error, _}'
+%%%      for the same reason, and has to keep doing so
 %%%
-%%% The second is the one a change could quietly break: drop the catch in
-%%% execute_command/2 and the caller exits, which the router's own `{error, _}'
-%%% clauses never see, and the failure comes back as a crash in a service that
-%%% was only reporting one.
+%%% The second and third are the ones a change could quietly break: drop the
+%%% catch in `called/2' and the caller exits, which the router's own
+%%% `{error, _}' clauses never see, and the failure comes back as a crash in a
+%%% service that was only reporting one.
 -module(evoq_aggregate_load_failure_tests).
 
 -include_lib("eunit/include/eunit.hrl").
@@ -41,6 +45,35 @@ unreadable_store() ->
     Result = evoq_aggregate:execute_command(Pid, command()),
     ?assertMatch({error, _}, Result),
     ?assertNot(is_process_alive(Pid)).
+
+a_read_of_a_stream_that_cannot_be_read_is_an_error_test_() ->
+    {setup, fun start_deps/0, fun stop_deps/1,
+     fun(_Started) -> [fun version_of_an_unreadable_stream/0,
+                       fun state_of_an_unreadable_stream/0] end}.
+
+%% The read that names the fix: the registry returned a pid for a stream whose
+%% load is about to fail, and this call is the one waiting on it. It must come
+%% back as the value it documents, whatever the load died of and whether it died
+%% before the call arrived or while the call was queued.
+version_of_an_unreadable_stream() ->
+    Pid = stream_that_cannot_be_read(),
+    ?assertMatch({error, _}, evoq_aggregate:get_version(Pid)),
+    ?assertNot(is_process_alive(Pid)).
+
+state_of_an_unreadable_stream() ->
+    Pid = stream_that_cannot_be_read(),
+    ?assertMatch({error, _}, evoq_aggregate:get_state(Pid)),
+    ?assertNot(is_process_alive(Pid)).
+
+%% A registry pid for a stream whose load is going to fail. get_or_start answers
+%% before that load has run, which is the whole shape this lives beside.
+stream_that_cannot_be_read() ->
+    ok = application:unset_env(evoq, event_store_adapter),
+    Module = evoq_aggregate_registry_test_agg,
+    Id = <<"load-failure-read-",
+           (integer_to_binary(erlang:unique_integer([positive])))/binary>>,
+    {ok, Pid} = evoq_aggregate_registry:get_or_start(Module, Id, load_failure_store),
+    Pid.
 
 command() ->
     evoq_command:new(test, evoq_aggregate_registry_test_agg, <<"load-failure">>,

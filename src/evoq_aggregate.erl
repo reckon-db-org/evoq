@@ -114,14 +114,27 @@ down(normal) -> not_running;
 down(Reason) -> Reason.
 
 %% @doc Get the current state of an aggregate (for debugging).
--spec get_state(pid()) -> {ok, term()}.
+%%
+%% A READ ANSWERS LIKE A COMMAND HERE, for the same reason
+%% execute_command/2 does: since the load moved off init/1 the registry hands
+%% out this pid BEFORE the stream is loaded, so a caller waiting here is
+%% waiting on that load. Two shapes of it used to end the caller instead of
+%% answering it: a store read that fails kills the process mid-call, and a
+%% cold stream whose replay outruns gen_server's 5 s default times the call
+%% out. Neither was reachable while the load ran inside init/1, before the pid
+%% existed. `called/2' bounds neither wait but turns both into the value this
+%% call always claimed to return.
+-spec get_state(pid()) -> {ok, term()} | {error, term()}.
 get_state(Pid) ->
-    gen_server:call(Pid, get_state).
+    called(Pid, get_state).
 
 %% @doc Get the current version of an aggregate.
--spec get_version(pid()) -> {ok, integer()}.
+%%
+%% Same contract as get_state/1. A caller that wants only the version of a
+%% stream it is willing to lose should still match `{error, _}'.
+-spec get_version(pid()) -> {ok, integer()} | {error, term()}.
 get_version(Pid) ->
-    gen_server:call(Pid, get_version).
+    called(Pid, get_version).
 
 %%====================================================================
 %% gen_server callbacks
