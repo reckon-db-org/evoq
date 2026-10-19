@@ -82,6 +82,12 @@ append(StoreId, StreamId, ExpectedVersion, Events) ->
 -spec new_stream_id(atom() | binary()) -> binary().
 new_stream_id(Prefix) ->
     Adapter = get_adapter(),
+    %% The module is loaded first: function_exported/3 answers false for a
+    %% module that is not loaded yet, and minting a new aggregate's id is the
+    %% call that comes BEFORE the first append, so under interactive code
+    %% loading the adapter can easily be unloaded at this moment. Without
+    %% this, an adapter that can mint is told it cannot.
+    _ = code:ensure_loaded(Adapter),
     case erlang:function_exported(Adapter, new_stream_id, 1) of
         true -> Adapter:new_stream_id(Prefix);
         false -> error({adapter_cannot_mint_stream_ids, Adapter})

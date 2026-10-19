@@ -38,9 +38,31 @@ an_adapter_without_minting_is_named_test() ->
                      evoq_event_store:new_stream_id(<<"game">>))
     end).
 
+%% An adapter that is configured but not loaded still mints. Minting a new
+%% game's id is the call that comes BEFORE the first append, so under
+%% interactive code loading (a shell, eunit, ct, a mix dev node) the adapter
+%% can easily be unloaded at that moment; function_exported/3 answers false
+%% for an unloaded module, and the caller would be told its adapter cannot
+%% mint when it can. A release in embedded mode hides this; a test node does
+%% not.
+an_adapter_is_loaded_before_it_is_asked_to_mint_test() ->
+    with_adapter(evoq_lazy_probe_adapter, fun() ->
+        unload(evoq_lazy_probe_adapter),
+        ?assertEqual(<<"lazy-game-0123456789abcdef0123456789abcdef">>,
+                     evoq_event_store:new_stream_id(<<"game">>))
+    end).
+
 %%====================================================================
 %% Helpers
 %%====================================================================
+
+%% Leave the module neither loaded nor on the code path's loaded set, so the
+%% next call has nothing but the module name to go on.
+unload(Module) ->
+    _ = code:purge(Module),
+    _ = code:delete(Module),
+    _ = code:purge(Module),
+    ?assertEqual(false, erlang:module_loaded(Module)).
 
 %% Set the adapter for one test and put back whatever was configured
 %% before, so this module cannot change what the rest of the suite sees.
