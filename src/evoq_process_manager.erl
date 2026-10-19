@@ -26,6 +26,16 @@
 %% - compensate(State, FailedCommand) -> compensation_result()
 %%   Generate compensating commands for saga rollback
 %%
+%% - handle_info(Info, State) -> handle_info_result()
+%%   Any other message this process manager's instance receives, most
+%%   usefully one it scheduled to itself from handle/3 (a clock deadline via
+%%   erlang:send_after). The instance ignored every such message, so a PM
+%%   with a deadline of its own had no way to be woken by it. Commands
+%%   returned here are dispatched exactly as handle/3's are. The atom
+%%   `timeout' is evoq's own idle timer and is never forwarded, so pick any
+%%   other tag. A PM without this callback that is sent a message logs a
+%%   warning naming itself and the message.
+%%
 %% == Example ==
 %%
 %% ```
@@ -64,7 +74,17 @@
     {ok, CompensatingCommands :: [#evoq_command{}]} |
     skip.
 
--export_type([correlation_result/0, handle_result/0, compensation_result/0]).
+%% Same shape as gen_server's, with the PM's own state in place of the
+%% gen_server state: the commands are dispatched as handle/3's are, and
+%% stop ends the instance (the process has reached its end, or found that
+%% it cannot continue).
+-type handle_info_result() ::
+    {noreply, NewState :: term()} |
+    {noreply, NewState :: term(), Commands :: [#evoq_command{}]} |
+    {stop, Reason :: term(), NewState :: term()}.
+
+-export_type([correlation_result/0, handle_result/0, compensation_result/0,
+              handle_info_result/0]).
 
 %% Required callbacks
 -callback interested_in() -> [EventType :: binary()].
@@ -80,7 +100,9 @@
 
 -callback init(ProcessId :: binary()) -> {ok, State :: term()}.
 
--optional_callbacks([compensate/2, init/1]).
+-callback handle_info(Info :: term(), State :: term()) -> handle_info_result().
+
+-optional_callbacks([compensate/2, init/1, handle_info/2]).
 
 %% API
 -export([start/2, start/3]).

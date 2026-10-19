@@ -159,6 +159,18 @@
 -callback payload_hash_indexes(StoreId :: atom()) ->
     {ok, [[binary()]]} | {error, term()}.
 
+%% Mint a fresh, valid stream id with the given prefix.
+%%
+%% A stream id's format is the backend's contract (in reckon-db it is
+%% `<prefix>-<32 lowercase hex>', time-sortable), so evoq asks the adapter
+%% rather than minting one itself and guessing at the format. Call it
+%% through evoq_event_store:new_stream_id/1; nothing above evoq should
+%% reach for the store's own generator. Optional: an adapter written before
+%% this callback existed keeps working, and the caller that asks it to mint
+%% gets {adapter_cannot_mint_stream_ids, Adapter} naming it.
+-callback new_stream_id(Prefix :: atom() | binary()) -> binary().
+
 -optional_callbacks([read_all_global/3,
                      ccc_read_by_payload/4, ccc_read_by_payload_hash/4,
-                     payload_indexes/1, payload_hash_indexes/1]).
+                     payload_indexes/1, payload_hash_indexes/1,
+                     new_stream_id/1]).

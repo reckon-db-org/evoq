@@ -53,7 +53,31 @@ Core event operations:
 -callback exists(StoreId, StreamId) -> boolean().
 -callback list_streams(StoreId) -> {ok, [StreamId]} | {error, Reason}.
 -callback delete_stream(StoreId, StreamId) -> ok | {error, Reason}.
+%% Optional: see "Minting a stream id" below.
+-callback new_stream_id(Prefix) -> StreamId.
 ```
+
+### Minting a stream id
+
+A stream id's format is the store's contract, not evoq's, so evoq does not
+mint one itself. `new_stream_id/1` is an **optional** `evoq_adapter`
+callback: an adapter that can mint implements it (in reckon-db it
+delegates to `reckon_gater_stream_id:new/1`, producing a time-sortable
+`<prefix>-<32 lowercase hex>` id), and callers reach it through one evoq
+call:
+
+```erlang
+GameId = evoq_event_store:new_stream_id(game).
+```
+
+Use it rather than reaching past evoq to the store layer for an id: the
+format then has one definition, in the adapter, and a service that needs a
+fresh aggregate id touches evoq and nothing below it.
+
+An adapter written before this callback existed keeps working. A caller
+that asks one to mint gets `{adapter_cannot_mint_stream_ids, Adapter}`,
+naming the adapter that cannot, rather than an `undef` somewhere under the
+caller's command handler.
 
 ### evoq_snapshot_adapter
 

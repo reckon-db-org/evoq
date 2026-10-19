@@ -30,6 +30,9 @@
 -export([ccc_read_by_payload/4, ccc_read_by_payload_hash/4]).
 -export([payload_indexes/1, payload_hash_indexes/1]).
 
+%% Id minting
+-export([new_stream_id/1]).
+
 %% Event conversion
 -export([event_to_map/1]).
 
@@ -64,6 +67,25 @@ set_adapter(Adapter) ->
 append(StoreId, StreamId, ExpectedVersion, Events) ->
     Adapter = get_adapter(),
     Adapter:append(StoreId, StreamId, ExpectedVersion, Events).
+
+%% @doc Mint a fresh, valid stream id with the given prefix.
+%%
+%% The format is the backend's contract, so this asks the adapter and hands
+%% its answer back unchanged. A service that needs an id for a new
+%% aggregate (a game, a session) calls this instead of reaching past evoq
+%% to the store's own generator, where the format would be a second copy to
+%% keep in step.
+%%
+%% Raises {adapter_cannot_mint_stream_ids, Adapter} when the configured
+%% adapter does not implement the optional callback, rather than failing as
+%% an undef under the caller's command handler.
+-spec new_stream_id(atom() | binary()) -> binary().
+new_stream_id(Prefix) ->
+    Adapter = get_adapter(),
+    case erlang:function_exported(Adapter, new_stream_id, 1) of
+        true -> Adapter:new_stream_id(Prefix);
+        false -> error({adapter_cannot_mint_stream_ids, Adapter})
+    end.
 
 %% @doc Read events across streams by tag match.
 %% Match is the atom any (union) or all (intersection).

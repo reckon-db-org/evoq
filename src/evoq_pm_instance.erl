@@ -109,8 +109,13 @@ handle_info(timeout, #evoq_pm_state{pm_module = PMModule, process_id = ProcessId
     logger:debug("PM instance ~p:~p idle timeout", [PMModule, ProcessId]),
     {noreply, State, ?PM_IDLE_TIMEOUT};
 
-handle_info(_Info, State) ->
-    {noreply, State, ?PM_IDLE_TIMEOUT}.
+%% @private Everything else goes to the process manager module. This used
+%% to drop every message, so a PM that scheduled one to itself (a clock
+%% deadline via send_after, the reason this callback exists) never saw it
+%% and the deadline never fired. The atom `timeout' is matched above: it is
+%% evoq's own idle timer, not a message for the PM.
+handle_info(Info, #evoq_pm_state{pm_module = PMModule} = State) ->
+    forward_info(pm_has_info_handler(PMModule), Info, State).
 
 %% @private
 terminate(_Reason, #evoq_pm_state{
@@ -130,6 +135,39 @@ terminate(_Reason, #evoq_pm_state{
 %%====================================================================
 %% Internal functions
 %%====================================================================
+
+%% @private A PM that exports handle_info/2 handles its own messages. One
+%% that does not is named, with the message, rather than losing it quietly:
+%% that silence is what hid the gap this callback closes.
+%%
+%% The module is loaded first: function_exported/3 answers false for a
+%% module that is not loaded yet, and an instance can be sent a message
+%% before it has handled its first event (nothing else would have loaded
+%% it), which would read as "no handle_info/2" for a PM that has one.
+pm_has_info_handler(PMModule) ->
+    _ = code:ensure_loaded(PMModule),
+    erlang:function_exported(PMModule, handle_info, 2).
+
+forward_info(true, Info, #evoq_pm_state{pm_module = PMModule, state = PMState} = State) ->
+    info_result(PMModule:handle_info(Info, PMState), PMModule, State);
+forward_info(false, Info, #evoq_pm_state{pm_module = PMModule} = State) ->
+    logger:warning(#{what => evoq_pm_has_no_handle_info,
+                     pm => PMModule,
+                     message => Info}),
+    {noreply, State, ?PM_IDLE_TIMEOUT}.
+
+%% @private Commands returned from handle_info/2 are dispatched exactly as
+%% the ones from handle/3 are, so a deadline can be a command without the
+%% PM reaching for a router of its own.
+info_result({noreply, NewPMState}, _PMModule, State) ->
+    {noreply, State#evoq_pm_state{state = NewPMState}, ?PM_IDLE_TIMEOUT};
+info_result({noreply, NewPMState, Commands}, _PMModule, State) when is_list(Commands) ->
+    _ = dispatch_commands(Commands, State),
+    {noreply, State#evoq_pm_state{state = NewPMState}, ?PM_IDLE_TIMEOUT};
+info_result({stop, Reason, NewPMState}, _PMModule, State) ->
+    {stop, Reason, State#evoq_pm_state{state = NewPMState}};
+info_result(Other, PMModule, _State) ->
+    error({bad_handle_info_return, PMModule, Other}).
 
 %% @private Replay (`replaying => true': an event this node had already
 %% consumed before it restarted) still runs through handle/3 and apply/2,

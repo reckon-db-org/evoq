@@ -211,6 +211,51 @@ compensate(_, _) ->
     skip.
 ```
 
+## A Deadline of Your Own: handle_info/2
+
+A process manager that has a deadline to keep (a clock that flags a player
+who ran out of time, a bid that expires) schedules a message to itself,
+and until this callback existed the instance dropped it: the deadline was
+scheduled and never arrived. Declare the optional callback and the message
+lands:
+
+```erlang
+-module(game_clock_pm).
+-behaviour(evoq_process_manager).
+
+-export([interested_in/0, correlate/2, handle/3, apply/2, handle_info/2]).
+
+handle(State, #{event_type := <<"game_started_v1">>, data := Data}, _Meta) ->
+    %% What is left on the mover's clock, from the event, not from a read model.
+    erlang:send_after(maps:get(mover_ms, Data), self(), {deadline, maps:get(mover, Data)}),
+    {ok, State#{mover => maps:get(mover, Data)}};
+
+handle(State, _Event, _Meta) ->
+    {ok, State}.
+
+handle_info({deadline, Player}, State) ->
+    %% Commands returned here are dispatched exactly as handle/3's are.
+    {noreply, State#{flagged => Player}, [flag_clock_cmd(Player)]};
+handle_info(Other, State) ->
+    %% Keep it total: an unmatched message must not take the instance down.
+    {noreply, State#{last_ignored => Other}}.
+```
+
+The return shape is `{noreply, NewState}`, `{noreply, NewState, Commands}`
+or `{stop, Reason, NewState}`. Three things about it:
+
+- **The atom `timeout` is evoq's own idle timer and is never forwarded.**
+  It is matched before the callback, so pick any other tag for your own
+  timer.
+- **A PM without `handle_info/2` that is sent a message logs a warning
+  naming itself and the message**, rather than losing it quietly. Silence
+  is what hid this gap for so long.
+- **Check `replaying` before scheduling.** Replay runs `handle/3` again,
+  and a `send_after` there schedules a second timer. The deadline itself
+  must still be rebuilt from the events' own timestamps, and the resulting
+  command must be safe to arrive twice: an instance whose `apply/2` state
+  says the game already ended ignores a deadline that fires again.
+
 ## Restarts and Replay
 
 Process manager instances live in memory, so after a restart they are
@@ -259,11 +304,13 @@ handle(State, _Event, _Meta) ->
 
 ## Instance Lifetime
 
-An instance lives in memory until a `{stop, Id}` event ends it. There is no
-timeout callback: the instance's idle timer only logs. A process that never
-reaches a `{stop, Id}` keeps one process per id for the life of the node, so
-give every process a terminal event, and design ones that can stall so that
-something (a scheduled command, another aggregate's event) produces it.
+An instance lives in memory until a `{stop, Id}` event ends it. The idle
+timer only logs; it is not a timeout callback, and `timeout` is never
+forwarded to your `handle_info/2` (see "A Deadline of Your Own"). A process
+that never reaches a `{stop, Id}` keeps one process per id for the life of
+the node, so give every process a terminal event, and design ones that can
+stall so that something (a scheduled message to your own `handle_info/2`,
+another aggregate's event) produces it.
 
 - `{start, Id}` always starts a new instance, even when one exists for that
   id; use `{continue, Id}` unless the event genuinely begins a new process.
