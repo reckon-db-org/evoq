@@ -5,6 +5,43 @@ All notable changes to evoq will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.27.0] - 2026-10-19
+
+### Added: a process manager instance can be woken by its own message, and evoq can mint a stream id (mcl-chess#1)
+
+Two additive hooks, both optional callbacks. No wire format, no on-disk
+format and no existing process manager, adapter or consumer changes:
+`~> 1.26` floats here and nothing in a consumer has to move.
+
+**A PM instance dropped every message it was sent.** `handle_info(_Info,
+State)` ignored all of them, so a process manager that scheduled a message
+to itself from `handle/3` (a clock deadline via `erlang:send_after`, which
+is exactly what a per game chess clock is) scheduled it and never heard it.
+`handle_info/2` is an optional `evoq_process_manager` callback now, the
+same shape `evoq_event_handler` has had since 1.24.0. It answers
+`{noreply, State}`, `{noreply, State, Commands}` or `{stop, Reason, State}`;
+commands are dispatched exactly as `handle/3`'s are. The atom `timeout`
+stays evoq's own idle timer and is never forwarded, so the existing idle
+behaviour is unchanged for every PM written before this release. A PM
+without the callback that is sent a message logs a warning naming itself
+and the message, because that silence is what hid the gap.
+
+**evoq had no way to mint a stream id.** A service that needed a fresh
+aggregate id (a game, a session) had to reach past evoq to the store layer
+and hand-roll an id in the store's private format, a second copy of a
+contract that belongs to the backend. `new_stream_id/1` is an optional
+`evoq_adapter` callback, exposed as `evoq_event_store:new_stream_id/1`, so
+the format keeps one definition, in the adapter; `reckon_evoq` implements
+it by delegating to `reckon_gater_stream_id:new/1` from 2.8.0 on. An
+adapter written before the callback keeps working, and a caller that asks
+it to mint gets `{adapter_cannot_mint_stream_ids, Adapter}` naming it
+rather than an `undef` under the caller's command handler.
+
+Both hooks are red-first in `test/unit/evoq_pm_instance_info_tests.erl`
+and `test/unit/evoq_event_store_new_stream_id_tests.erl`, and the how and
+the why are in `guides/process_managers.md` (A Deadline of Your Own) and
+`guides/adapters.md` (Minting a stream id).
+
 ## [1.26.4] - 2026-10-15
 
 ### Fixed: one aggregate per stream, and a call that waits on a load answers instead of exiting (evoq#17)
