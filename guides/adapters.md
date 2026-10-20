@@ -15,16 +15,16 @@ evoq doesn't include any specific event store implementation. Instead, it define
 
 ## Available Adapters
 
-### reckon-db-gater (Recommended)
+### reckon_evoq (Recommended)
 
-The `evoq_esdb_gater_adapter` connects to reckon-db via the gateway protocol.
+The `reckon_evoq_adapter` (from [reckon_evoq](https://hex.pm/packages/reckon_evoq)) connects to reckon-db through reckon_gater.
 
 Add to your dependencies:
 
 ```erlang
 {deps, [
-    {evoq, "0.2.0"},
-    {reckon_db_gater, "0.4.3"}
+    {evoq, "~> 1.27"},
+    {reckon_evoq, "~> 2.8"}
 ]}.
 ```
 
@@ -32,7 +32,7 @@ Configure in `sys.config`:
 
 ```erlang
 {evoq, [
-    {event_store_adapter, evoq_esdb_gater_adapter},
+    {event_store_adapter, reckon_evoq_adapter},
     {store_id, my_store}
 ]}
 ```
@@ -143,14 +143,14 @@ Full adapter configuration options:
 ```erlang
 {evoq, [
     %% Required: which adapter to use
-    {event_store_adapter, evoq_esdb_gater_adapter},
+    {event_store_adapter, reckon_evoq_adapter},
 
     %% Store identifier (passed to adapter)
     {store_id, my_store},
 
     %% Optional: separate adapters for snapshots/subscriptions
-    {snapshot_adapter, evoq_esdb_gater_snapshot_adapter},
-    {subscription_adapter, evoq_esdb_gater_subscription_adapter}
+    {snapshot_store_adapter, reckon_evoq_adapter},
+    {subscription_adapter, reckon_evoq_adapter}
 ]}
 ```
 
@@ -160,7 +160,7 @@ For local development, use `_checkouts` to link adapters:
 
 ```bash
 mkdir -p _checkouts
-ln -s /path/to/reckon-db-gater _checkouts/reckon_db_gater
+ln -s /path/to/reckon-evoq _checkouts/reckon_evoq
 ```
 
 This allows modifying the adapter code alongside your application.
@@ -171,19 +171,19 @@ Use `meck` to mock adapters in tests:
 
 ```erlang
 my_test() ->
-    meck:new(evoq_esdb_gater_adapter, [passthrough]),
-    meck:expect(evoq_esdb_gater_adapter, append, fun(_, _, _, Events) ->
+    meck:new(reckon_evoq_adapter, [passthrough]),
+    meck:expect(reckon_evoq_adapter, append, fun(_, _, _, Events) ->
         {ok, length(Events)}
     end),
 
     %% Run your test
     ok = my_module:do_something(),
 
-    meck:unload(evoq_esdb_gater_adapter).
+    meck:unload(reckon_evoq_adapter).
 ```
 
 ## See Also
 
 - [Architecture](architecture.md) - How adapters fit into the overall system
-- [reckon-db-gater](https://hex.pm/packages/reckon_db_gater) - Gateway adapter for reckon-db
+- [reckon_evoq](https://hex.pm/packages/reckon_evoq) - Adapter from evoq to reckon-db
 - [reckon-db](https://hex.pm/packages/reckon_db) - BEAM-native event store
