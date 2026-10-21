@@ -1,6 +1,6 @@
 %% @doc Responder behaviour for evoq.
 %%
-%% Responders receive hopes (via mesh or hecate:// API), dispatch commands
+%% Responders receive hopes (over the mesh, or an HTTP API), dispatch commands
 %% to the local aggregate, and return feedback containing the post-event
 %% aggregate state. This enables session-level consistency for RPC.
 %%

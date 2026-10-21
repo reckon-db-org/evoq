@@ -22,8 +22,8 @@
 %% atom-only spec described neither this library's own runtime nor anything
 %% it writes to.
 %%
-%% In practice Erlang implementations return atoms, which is what the
-%% hecate-sdk code generator emits, and Elixir implementations return
+%% In practice Erlang implementations return atoms, which is what our SDK
+%% code generators emit, and Elixir implementations return
 %% strings. Both converge on the same stored discriminator, so the two
 %% conventions interoperate rather than compete. The "atom keys, Erlang
 %% terms" note above is about an event's PAYLOAD, which does stay inside

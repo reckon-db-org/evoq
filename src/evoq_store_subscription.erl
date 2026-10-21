@@ -215,10 +215,9 @@ init({StoreId, Opts}) ->
 %% == Why subscribe_to_all/3 is handed Offset0, and why handle_info/2 acks ==
 %%
 %% `evoq_subscriptions:ack/4' exists and used to go entirely unused here.
-%% Two consequences, confirmed live in production (hecate-tube,
-%% hecate-victron, hecate-sentinel each have a real `evoq_event_handler'
-%% with an unconditional mesh-publish side effect and no dedup of their
-%% own -- this was not a theoretical gap):
+%% Two consequences, confirmed live in production (three services each had
+%% a real `evoq_event_handler' with an unconditional mesh-publish side
+%% effect and no dedup of their own -- this was not a theoretical gap):
 %%
 %% 1. `subscribe_to_all's underlying persisted subscription
 %%    (reckon_db_subscriptions) runs its OWN catch-up on every FRESH
@@ -301,8 +300,8 @@ handle_continue(catch_up, #state{store_id = StoreId, opts = Opts,
 %% backfill, a handler in an OTP application that boots after whichever
 %% application owns this store's catch-up call — the normal shape for a
 %% multi-app vertical-slice umbrella, not an edge case — silently never
-%% receives ANY event appended before it registered. Confirmed live in
-%% hecate-whiteboard 2026-08-25: a restart with real history logged
+%% receives ANY event appended before it registered. Confirmed live in a
+%% service on 2026-08-25: a restart with real history logged
 %% "Catch-up ... handlers=0" for all 13 events, then this exact
 %% "(already covered by $all)" message once its projection handlers
 %% registered ~0.8s later — the read model came back completely empty.
