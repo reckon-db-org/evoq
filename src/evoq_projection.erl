@@ -294,7 +294,11 @@ handle_call({rebuild, _Opts}, _From, State) ->
             %% Keep what the replay reached: the old state no longer
             %% matches the empty read model, and replying ok would serve a
             %% partial read model as a complete one. The projection stays
-            %% halted, now on what the rebuild hit.
+            %% halted, now on what the rebuild hit - and says so, with the
+            %% same log line and telemetry event a boot halt produces: the
+            %% 5.12-era promise is that a halt is visible, and a rebuild is
+            %% the other way into one.
+            report_halt(NewState#state.projection_module, Reason),
             {reply, {error, Reason}, NewState#state{halted = Reason}};
         {init_failed, Reason} ->
             %% init/1 could not give us a state to match the cleared read

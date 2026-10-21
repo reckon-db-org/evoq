@@ -58,6 +58,13 @@ for the length of the catch-up. Replaying first, registering, then replaying
 again from the position reached closes the gap without that stall; the
 checkpoint dedupe makes the overlap free.
 
+**A rebuild that halts says so.** A rebuild whose replay stops part-way
+already kept `halted` and answered `{error, Reason}`; it did not log the halt
+or emit `[evoq, projection, halted]`, though the guide and the CHANGELOG
+promised both. It reports through the same path a boot halt uses now, once
+per rebuild, so an operator cannot be looking at a halted projection whose
+halt was never announced.
+
 **A projection never refuses to boot, and a halted one stays halted.** One
 that cannot catch up - a poison event whose `on_error/4` answers `stop`, a
 store it cannot read - comes up halted and behind: the state carries the

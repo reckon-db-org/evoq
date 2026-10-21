@@ -399,6 +399,9 @@ retry backoff.
 ### Projection Events
 - `[evoq, projection, start | stop | exception]`
 - `[evoq, projection, event]` - one event handed to the projection
+- `[evoq, projection, halted]` - the projection could not catch up (or a
+  rebuild could not finish) and is now refusing events until it is rebuilt;
+  the `error` metadata says why
 - `[evoq, projection, checkpoint]` - a checkpoint was saved; its position is
   the projection's progress, so a stalled projection is visible here
 

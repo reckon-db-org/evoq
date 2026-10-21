@@ -194,6 +194,58 @@ a_poison_event_on_resume_boots_halted_and_behind_test_() ->
               ?assertEqual(0, evoq_projection:get_checkpoint(Pid))
       end).
 
+%% The way out, tested: a rebuild that finishes clears the halt and the
+%% projection starts projecting live events again.
+a_successful_rebuild_clears_the_halt_test_() ->
+    with_prepared_projection(
+      ?MODULE, [evoq_event_store],
+      #{checkpoint_store => evoq_projection_resume_checkpoint},
+      fun() ->
+              %% One poison event at position 0, then nothing left to read:
+              %% the boot halt leaves the projection behind with nothing to
+              %% replay, and the rebuild (which clears the script first) gets
+              %% through.
+              one_poison_at_the_first_offset(),
+              fail_times(2, 1),
+              set_action(stop)
+      end,
+      fun(Pid) ->
+              ?assertMatch({error, {halted, _}},
+                           evoq_projection:notify(Pid, ?TYPE, event(7),
+                                                  #{global_position => 5})),
+              reset_script(),
+              ?assertEqual(ok, evoq_projection:rebuild(Pid)),
+              %% Not halted any more: the next live event is projected.
+              ?assertEqual(ok, evoq_projection:notify(Pid, ?TYPE, event(8),
+                                                      #{global_position => 6})),
+              %% The rebuild replayed the event at position 0 (n = 2), then
+              %% the live event above lands after it.
+              ?assertEqual([2, 8], projected(Pid))
+      end).
+
+%% A rebuild that halts on the SAME poison says so - log line and telemetry -
+%% and stays halted: the operator must be able to see that the rebuild did
+%% not fix anything.
+a_rebuild_that_halts_reports_and_stays_halted_test_() ->
+    with_prepared_projection(
+      ?MODULE, [evoq_event_store],
+      #{checkpoint_store => evoq_projection_resume_checkpoint},
+      fun() ->
+              one_poison_at_the_first_offset(),
+              fail_times(2, 10),
+              set_action(stop),
+              attach_halted_telemetry()
+      end,
+      fun(Pid) ->
+              %% The boot halt is one report.
+              ?assertEqual(1, halted_telemetry_count()),
+              ?assertMatch({error, _}, evoq_projection:rebuild(Pid)),
+              ?assertEqual(1, halted_telemetry_count()),
+              ?assertMatch({error, {halted, _}},
+                           evoq_projection:notify(Pid, ?TYPE, event(7),
+                                                  #{global_position => 5}))
+      end).
+
 %% A raise in project/4 during the resume is a failure like any other, not
 %% an exit: it goes through on_error/4, which here says stop, and the
 %% projection halts instead of refusing to boot. Before this, the raise
@@ -374,6 +426,22 @@ with_prepared_projection(Module, Mecked, Opts, Prepare, Fun) ->
             [meck:unload(M) || M <- Mecked]
         end
     end}.
+
+%% One event at whatever offset the replay asks for first, and nothing after
+%% it: a store with a single poison event in it, whichever position the
+%% checkpoint says to resume from. The mark lives in the projection's own
+%% process dictionary, which is where the replay runs.
+one_poison_at_the_first_offset() ->
+    meck:expect(evoq_event_store, read_all_global,
+                fun(_Store, Offset, _Batch) ->
+                        case erlang:get({read_at, Offset}) of
+                            undefined ->
+                                erlang:put({read_at, Offset}, done),
+                                {ok, [stored_event(2, Offset)]};
+                            _ ->
+                                {ok, []}
+                        end
+                end).
 
 %% Count [evoq, projection, halted] events for the current test.
 attach_halted_telemetry() ->
