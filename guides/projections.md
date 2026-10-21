@@ -374,6 +374,33 @@ from and needs `evoq_projection:rebuild/1`.
 so a silent gap is not possible: a check that the read model is behind shows
 up in the log.
 
+### A projection that comes up halted and behind
+
+A projection never refuses to boot. If the catch-up at start (or the second
+pass after it registers) stops on an event - the `stop` action above, or a
+`raise` in `project/4`, which is reported the same way - the projection comes
+up **halted and behind**: its state carries the checkpoint it actually
+reached, it serves nothing past that point, and it says so twice:
+
+- a log line with `what => evoq_projection_halted_behind`, the `projection`
+  module and the `error`;
+- the `[evoq, projection, halted]` telemetry event, same metadata.
+
+Refusing to start would turn one poison event into a restart loop and, for a
+statically supervised projection, into a failed application boot. Coming up
+behind keeps the failure where the event is.
+
+The way out is a rebuild, once the cause is fixed - repair the data, or ship
+the projection fix:
+
+```erlang
+ok = evoq_projection:rebuild(ProjectionPid).
+```
+
+That clears the read model, sets the checkpoint back to -1 and replays
+everything (see the next section). Until then the projection's checkpoint
+does not advance, which is visible in `[evoq, projection, checkpoint]`.
+
 ## Rebuilding Projections
 
 A rebuild clears the read model, sets the checkpoint back to -1, and
@@ -550,6 +577,7 @@ Projections emit telemetry:
 | `[evoq, projection, stop]` | duration | projection, event_type |
 | `[evoq, projection, stop]` | (none) | projection (the projection process stopping) |
 | `[evoq, projection, exception]` | duration | projection, event_type, error |
+| `[evoq, projection, halted]` | (none) | projection, error |
 | `[evoq, projection, checkpoint]` | (none) | projection, position |
 
 `[evoq, projection, stop]` is emitted both per projected event (with a
