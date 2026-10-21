@@ -254,13 +254,13 @@ reckon-db uses optimistic concurrency with expected versions:
 
 ```erlang
 %% First write to new stream
-append(StoreId, StreamId, -1, Events)  %% -1 = stream must not exist
+evoq_event_store:append(StoreId, StreamId, -1, Events).  %% -1 = stream must not exist
 
 %% Append to existing stream
-append(StoreId, StreamId, 5, Events)   %% Must be at version 5
+evoq_event_store:append(StoreId, StreamId, 5, Events).   %% Must be at version 5
 
 %% Append without version check
-append(StoreId, StreamId, -2, Events)  %% -2 = any version
+evoq_event_store:append(StoreId, StreamId, -2, Events).  %% -2 = any version
 ```
 
 If another process appended events, you get:
@@ -333,12 +333,12 @@ Events represent what happened, not what will happen:
 
 ```erlang
 %% Good - past tense, immutable fact
-<<"MoneyDeposited">>
-<<"AccountClosed">>
+<<"MoneyDeposited">>.
+<<"AccountClosed">>.
 
 %% Bad - future/present tense
-<<"DepositMoney">>
-<<"CloseAccount">>
+<<"DepositMoney">>.
+<<"CloseAccount">>.
 ```
 
 ### 4. Validate Early

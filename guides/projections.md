@@ -27,12 +27,11 @@ delivered metadata as its second. The event is a flat map:
         order_id => <<"ord-123">>,
         customer_id => <<"cust-456">>,
         total => 99.99,
-        items => [...]
+        items => [<<"item-1">>, <<"item-2">>]
     },
     tags => [<<"tenant:acme">>],
-    timestamp => 1703001234567,            %% ← read the time from here
-    ...
-}
+    timestamp => 1703001234567             %% ← read the time from here
+}.
 ```
 
 and the metadata is the routing envelope:
@@ -45,9 +44,8 @@ and the metadata is the routing envelope:
     global_position => 412,                %% its index in the store's global log
     event_id => <<"01J8...">>,
     correlation_id => <<"req-abc">>,       %% lineage, see evoq_lineage
-    causation_id => <<"cmd-xyz">>,
-    ...
-}
+    causation_id => <<"cmd-xyz">>
+}.
 ```
 
 **Key fields:**
@@ -226,16 +224,35 @@ Implement the `evoq_read_model` behavior:
 
 -export([init/1, get/2, put/3, delete/2, list/2, clear/1]).
 
-%% Required
-init(Config) -> {ok, State}.
-get(Key, State) -> {ok, Value} | {error, not_found}.
-put(Key, Value, State) -> {ok, NewState}.
-delete(Key, State) -> {ok, NewState}.
+%% A read model's state is whatever the store keeps; here, one map of
+%% key to value.
+init(Config) ->
+    {ok, #{config => Config, data => #{}}}.
+
+get(Key, #{data := Data}) ->
+    case maps:find(Key, Data) of
+        {ok, Value} -> {ok, Value};
+        error -> {error, not_found}
+    end.
+
+put(Key, Value, #{data := Data} = State) ->
+    {ok, State#{data => Data#{Key => Value}}}.
+
+delete(Key, #{data := Data} = State) ->
+    {ok, State#{data => maps:remove(Key, Data)}}.
 
 %% Optional: without them a rebuild cannot clear, and list returns
 %% {error, not_implemented}
-list(Prefix, State) -> {ok, [{Key, Value}]}.
-clear(State) -> {ok, NewState}.
+list(Prefix, #{data := Data}) ->
+    {ok, [{K, V} || {K, V} <- maps:to_list(Data), under(Prefix, K)]}.
+
+clear(State) ->
+    {ok, State#{data => #{}}}.
+
+under(Prefix, Key) when is_binary(Prefix), is_binary(Key) ->
+    binary:longest_common_prefix([Prefix, Key]) =:= byte_size(Prefix);
+under(Prefix, Key) ->
+    Prefix =:= Key.
 ```
 
 ## Checkpointing
@@ -523,6 +540,12 @@ project(#{event_type := <<"OrderPlaced">>, data := Data} = Event, Meta, State, R
 
     {ok, NewRM} = evoq_read_model:put(Date, Updated, RM),
     {ok, State, NewRM}.
+
+%% The event's timestamp is milliseconds since the epoch; the day is the
+%% key this read model groups by.
+date_from_timestamp(Ms) ->
+    {{Y, M, D}, _Time} = calendar:system_time_to_universal_time(Ms, millisecond),
+    {Y, M, D}.
 ```
 
 ## Querying Read Models
@@ -618,6 +641,7 @@ time, both in native units (convert with
 
 Think about how the data will be queried:
 
+<!-- doc_snippets: skip a sketch: the shape of a projection clause, not a complete one -->
 ```erlang
 %% Good - optimized for "get orders by customer"
 project(Event, Meta, State, RM) ->
@@ -631,6 +655,7 @@ project(Event, Meta, State, RM) ->
 
 Events may arrive out of order or reference missing entities:
 
+<!-- doc_snippets: skip a sketch: ParentId and NewRM come from the clause this one sits in -->
 ```erlang
 project(Event, _Meta, State, RM) ->
     case evoq_read_model:get(ParentId, RM) of
@@ -647,6 +672,7 @@ project(Event, _Meta, State, RM) ->
 
 Track how far behind projections are:
 
+<!-- doc_snippets: skip a sketch: NewRM comes from the clause this one sits in -->
 ```erlang
 project(Event, Meta, State, RM) ->
     EventTime = maps:get(timestamp, Event),
@@ -664,6 +690,7 @@ project(Event, Meta, State, RM) ->
 
 Support schema evolution:
 
+<!-- doc_snippets: skip a sketch: Key and the migration helper come from the clause this one sits in -->
 ```erlang
 project(Event, Meta, State, RM) ->
     {ok, Existing} = evoq_read_model:get(Key, RM),

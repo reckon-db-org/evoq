@@ -121,7 +121,13 @@ A counter aggregate that supports increment and decrement operations.
 -module(counter_state).
 -behaviour(evoq_state).
 
--include("counter_state.hrl").
+%% The record lives in include/counter_state.hrl in your own project; it is
+%% written out here so the example compiles as it stands.
+-record(counter_state, {
+    id        :: binary(),
+    value = 0 :: integer(),
+    status = 0 :: non_neg_integer()  %% bit flags
+}).
 
 -export([new/1, apply_event/2, to_map/1, from_map/1]).
 
@@ -159,7 +165,13 @@ from_map(_) ->
 -module(counter_aggregate).
 -behaviour(evoq_aggregate).
 
--include("counter_state.hrl").
+%% include/counter_state.hrl, written out so the example compiles as it
+%% stands.
+-record(counter_state, {
+    id        :: binary(),
+    value = 0 :: integer(),
+    status = 0 :: non_neg_integer()  %% bit flags
+}).
 
 -export([state_module/0, init/1, execute/2, apply/2]).
 
@@ -214,6 +226,7 @@ State modules follow the pattern: the noun that the aggregate manages, suffixed 
 
 The state record is defined in a header file named after the state module. Both the aggregate and the state module include it:
 
+<!-- doc_snippets: skip a fragment: two include lines, one from each module, not a file on its own -->
 ```erlang
 %% In counter_state.erl
 -include("counter_state.hrl").
@@ -258,6 +271,10 @@ Status fields in state records MUST be integers treated as bit flags. Use evoq_b
 -define(SUSPENDED,  4).  %% 2^2
 -define(ARCHIVED,   8).  %% 2^3
 
+%% include/counter_state.hrl, written out so the example compiles as it
+%% stands.
+-record(counter_state, {id :: binary(), value = 0 :: integer(), status = 0 :: non_neg_integer()}).
+
 apply_event(State, #{event_type := <<"CounterInitiated">>} = _Event) ->
     State#counter_state{
         status = evoq_bit_flags:set(0, ?INITIATED)
@@ -271,7 +288,10 @@ State modules are easy to test in isolation since they are pure functions:
 ```erlang
 -module(counter_state_tests).
 -include_lib("eunit/include/eunit.hrl").
--include("counter_state.hrl").
+
+%% include/counter_state.hrl, written out so the example compiles as it
+%% stands.
+-record(counter_state, {id :: binary(), value = 0 :: integer(), status = 0 :: non_neg_integer()}).
 
 new_test() ->
     State = counter_state:new(<<"test-1">>),
@@ -294,6 +314,12 @@ roundtrip_serialization_test() ->
 Because apply_event/2 is pure, you can test every event type without standing up any infrastructure. Compose events to test complex state transitions:
 
 ```erlang
+-include_lib("eunit/include/eunit.hrl").
+
+%% include/counter_state.hrl, written out so the example compiles as it
+%% stands.
+-record(counter_state, {id :: binary(), value = 0 :: integer(), status = 0 :: non_neg_integer()}).
+
 full_lifecycle_test() ->
     State0 = counter_state:new(<<"test-1">>),
     Events = [

@@ -153,9 +153,9 @@ Binary string identifying the event type: `{subject}_{verb_past}_v{N}`.
 
 **Examples:**
 ```erlang
-<<"order_placed_v1">>
-<<"user_registered_v2">>
-<<"payment_processed_v1">>
+<<"order_placed_v1">>.
+<<"user_registered_v2">>.
+<<"payment_processed_v1">>.
 ```
 
 **Best practices:**
@@ -174,9 +174,9 @@ Identifier for the event stream (aggregate instance).
 
 **Examples:**
 ```erlang
-<<"order-ord-123">>
-<<"user-usr-456">>
-<<"cart-cart-789">>
+<<"order-ord-123">>.
+<<"user-usr-456">>.
+<<"cart-cart-789">>.
 ```
 
 ### version
@@ -271,13 +271,13 @@ Array of binary tags for cross-stream querying.
 **Examples:**
 ```erlang
 %% Multi-tenant
-tags => [<<"tenant:acme">>, <<"region:us-east">>]
+#{tags => [<<"tenant:acme">>, <<"region:us-east">>]}.
 
 %% Categorization
-tags => [<<"plugin:weather">>, <<"realm:production">>]
+#{tags => [<<"plugin:weather">>, <<"realm:production">>]}.
 
 %% Entity references
-tags => [<<"user:usr-123">>, <<"order:ord-456">>]
+#{tags => [<<"user:usr-123">>, <<"order:ord-456">>]}.
 ```
 
 **Query by tag:**
@@ -309,30 +309,28 @@ When the event was created.
 ### Always Include
 
 ```erlang
-metadata => #{
+#{metadata => #{
     correlation_id => generate_or_get_correlation_id(),
     causation_id => get_causation_id(),
     timestamp => erlang:system_time(millisecond)
-}
+}}.
 ```
 
 ### Context-Specific
 
 ```erlang
 %% User-triggered actions
-metadata => #{
-    ...,
+#{metadata => #{
     user_id => get_user_id(),
     ip_address => get_client_ip(),
     user_agent => get_user_agent()
-}
+}}.
 
 %% System-triggered actions
-metadata => #{
-    ...,
+#{metadata => #{
     triggered_by => <<"system">>,
     reason => <<"scheduled_task">>
-}
+}}.
 ```
 
 ## Event Versioning
@@ -347,7 +345,7 @@ Support schema evolution using version suffixes:
         order_id => <<"ord-123">>,
         amount => 99.99
     }
-}
+}.
 
 %% Version 2 (added currency)
 #{
@@ -357,7 +355,7 @@ Support schema evolution using version suffixes:
         amount => 99.99,
         currency => <<"USD">>  %% New field
     }
-}
+}.
 ```
 
 **Handle in projections:**
@@ -377,55 +375,55 @@ project(#{event_type := <<"OrderPlaced.v2">>, data := D}, _, State, RM) ->
 
 ```erlang
 %% WRONG - envelope fields in data
-data => #{
+#{data => #{
     event_id => <<"evt-123">>,           %% NO - envelope field
     event_type => <<"OrderPlaced">>,     %% NO - envelope field
     correlation_id => <<"req-abc">>,     %% NO - belongs in metadata
     order_id => <<"ord-123">>,           %% OK
     amount => 99.99                      %% OK
-}
+}}.
 ```
 
 **Correct:**
 ```erlang
 %% RIGHT - clean separation
-data => #{
+#{data => #{
     order_id => <<"ord-123">>,
     amount => 99.99
 },
 metadata => #{
     correlation_id => <<"req-abc">>
-}
+}}.
 ```
 
 ### ❌ Using event_type as Atom
 
 ```erlang
 %% WRONG - atom
-event_type => order_placed
+#{event_type => order_placed}.
 
 %% RIGHT - binary
-event_type => <<"OrderPlaced.v1">>
+#{event_type => <<"OrderPlaced.v1">>}.
 ```
 
 ### ❌ Putting User Context in data
 
 ```erlang
 %% WRONG
-data => #{
+#{data => #{
     order_id => <<"ord-123">>,
     user_id => <<"usr-456">>,        %% NO - belongs in metadata
     amount => 99.99
-}
+}}.
 
 %% RIGHT
-data => #{
+#{data => #{
     order_id => <<"ord-123">>,
     amount => 99.99
 },
 metadata => #{
     user_id => <<"usr-456">>         %% YES - user context
-}
+}}.
 ```
 
 ## Visual Reference

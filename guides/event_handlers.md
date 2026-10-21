@@ -37,19 +37,31 @@ init(_Config) ->
 %% Handle each event
 handle_event(<<"UserRegistered">>, Event, _Metadata, State) ->
     #{email := Email, name := Name} = maps:get(data, Event),
-    send_welcome_email(Email, Name, State),
+    notify(welcome, [Email, Name]),
     {ok, State};
 
 handle_event(<<"PasswordReset">>, Event, _Metadata, State) ->
     #{email := Email, token := Token} = maps:get(data, Event),
-    send_password_reset_email(Email, Token, State),
+    notify(password_reset, [Email, Token]),
     {ok, State};
 
 handle_event(<<"OrderShipped">>, Event, Metadata, State) ->
     #{order_id := OrderId, tracking := Tracking} = maps:get(data, Event),
     CustomerEmail = lookup_customer_email(OrderId),
-    send_shipping_notification(CustomerEmail, Tracking, State),
+    notify(shipping, [CustomerEmail, Tracking]),
     {ok, State}.
+
+%% The side effects are yours: hand these to the mail service you keep in
+%% the handler's state. A log line stands in, so the example runs as it
+%% stands.
+notify(What, Args) ->
+    logger:notice("~p: ~p", [What, Args]),
+    ok.
+
+lookup_customer_email(OrderId) ->
+    %% Your read model, or the customer service's API.
+    logger:notice("email for ~p", [OrderId]),
+    undefined.
 ```
 
 ## Required Callbacks
@@ -182,6 +194,12 @@ Event handlers can fail (network issues, service unavailable). evoq supports ret
 
 -export([interested_in/0, init/1, handle_event/4, on_error/4]).
 
+interested_in() ->
+    [<<"OrderShipped">>].
+
+init(_Config) ->
+    {ok, #{}}.
+
 %% Optional: decide what happens on a failure.
 %%
 %% This REPLACES the framework's default policy, including its retry cap:
@@ -200,6 +218,11 @@ handle_event(EventType, Event, _Meta, State) ->
         {error, temporary} -> {error, temporary};  %% on_error/4 decides
         {error, permanent} -> {ok, State}          %% Don't retry, mark as handled
     end.
+
+%% Your call to the outside world: the answer is what on_error/4 acts on.
+call_external_api(Event) ->
+    logger:notice("calling out for ~p", [Event]),
+    {ok, Event}.
 ```
 
 `on_error/4` returns the action: `retry`, `{retry, DelayMs}`, `skip`,
@@ -225,13 +248,12 @@ Two of those actions are worth thinking about before you pick one:
 Events that fail after all retries go to the dead letter queue:
 
 ```erlang
-%% Handle dead letters
-evoq_dead_letter:list(HandlerName) -> [FailedEvent].
-evoq_dead_letter:retry(HandlerName, EventId) -> ok | {error, Reason}.
-evoq_dead_letter:discard(HandlerName, EventId) -> ok.
-
-%% Monitor dead letters
-evoq_dead_letter:count(HandlerName) -> non_neg_integer().
+%% An operator reads the queue, retries one entry, or lets it go. A retry
+%% puts the event back on its store and answers what it dispatched.
+Failed = evoq_dead_letter:list(),
+Pending = evoq_dead_letter:count(),
+{ok, _Dispatched, _Handler} = evoq_dead_letter:retry(EventId),
+ok = evoq_dead_letter:delete(EventId).
 ```
 
 Dead letters include:
@@ -365,6 +387,7 @@ handle_event(<<"PaymentProcessed">>, Event, _Meta, State) ->
 
 Different handlers can process the same event type:
 
+<!-- doc_snippets: skip a fragment: three separate modules shown side by side, not one file -->
 ```erlang
 %% Handler 1: Send email
 -module(email_handler).
@@ -449,6 +472,7 @@ milliseconds.
 
 One handler = one responsibility:
 
+<!-- doc_snippets: skip a fragment: module names compared, not a file -->
 ```erlang
 %% Good - focused
 -module(order_email_handler).      %% Just emails
@@ -492,13 +516,12 @@ handle_event(EventType, Event, Metadata, State) ->
 Set up alerts for dead letter growth:
 
 ```erlang
-%% In your monitoring system
+%% In your monitoring system. The dead letter queue is the node's, not a
+%% handler's, so count/0 is one number; list/1 takes filters when you want
+%% to know which handler the entries came from.
 check_dead_letters() ->
-    Handlers = [email_handler, analytics_handler],
-    lists:foreach(fun(Handler) ->
-        Count = evoq_dead_letter:count(Handler),
-        telemetry:execute([my_app, dead_letters], #{count => Count}, #{handler => Handler})
-    end, Handlers).
+    Count = evoq_dead_letter:count(),
+    telemetry:execute([my_app, dead_letters], #{count => Count}, #{}).
 ```
 
 ## Next Steps

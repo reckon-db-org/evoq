@@ -103,13 +103,15 @@ Business logic container. Validates commands and produces events.
 -behaviour(evoq_aggregate).
 
 %% Initialize state
-init(AggregateId) -> {ok, InitialState}.
+-callback state_module() -> module().
+-callback init(AggregateId :: binary()) -> {ok, State :: term()}.
 
 %% Validate and produce events
-execute(State, Command) -> {ok, [Event]} | {error, Reason}.
+-callback execute(State :: term(), Command :: map()) ->
+    {ok, [Event :: map()]} | {error, Reason :: term()}.
 
 %% Update state from event
-apply(State, Event) -> NewState.
+-callback apply(State :: term(), Event :: map()) -> NewState :: term().
 ```
 
 ### evoq_event_router
@@ -238,10 +240,12 @@ Aggregates are distributed across 4 partition supervisors using consistent hashi
 evoq uses reckon-db for event persistence:
 
 ```erlang
-%% Event store operations delegated to reckon-db
-evoq_event_store:append(StoreId, StreamId, ExpectedVersion, Events)
-evoq_event_store:read(StoreId, StreamId, StartVersion, Count)
-evoq_event_store:subscribe(StoreId, EventTypes, Handler)
+%% Event store operations delegated to reckon-db through the adapter. A
+%% subscription is the store's to deliver: evoq_store_subscription holds one
+%% per node and routes what arrives to the handlers and process managers.
+evoq_event_store:append(StoreId, StreamId, ExpectedVersion, Events).
+evoq_event_store:read(StoreId, StreamId, StartVersion, Count, forward).
+evoq_store_subscription:start_link(StoreId).
 ```
 
 The adapter pattern allows different backends:

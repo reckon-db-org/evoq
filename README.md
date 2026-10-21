@@ -110,6 +110,16 @@ handle_event(<<"AccountOpened">>, Event, _Metadata, State) ->
 handle_event(<<"LargeDeposit">>, Event, _Metadata, State) ->
     send_deposit_alert(Event),
     {ok, State}.
+
+%% The side effect is the handler's own: post the mail, page the operator,
+%% publish a fact. Here it is a log line, so the example runs as it stands.
+send_welcome_email(Event) ->
+    logger:notice("welcome: ~p", [Event]),
+    ok.
+
+send_deposit_alert(Event) ->
+    logger:warning("large deposit: ~p", [Event]),
+    ok.
 ```
 
 ### Process Managers
@@ -192,12 +202,12 @@ Commands represent intentions to change state. Formal contract for command modul
 
 %% Required
 -callback command_type() -> atom().
--callback new(Params :: map()) -> {ok, Command} | {error, Reason}.
--callback to_map(Command) -> map().
+-callback new(Params :: map()) -> {ok, Command :: term()} | {error, Reason :: term()}.
+-callback to_map(Command :: term()) -> map().
 
 %% Optional
--callback validate(Command) -> ok | {ok, Command} | {error, Reason}.
--callback from_map(Map :: map()) -> {ok, Command} | {error, Reason}.
+-callback validate(Command :: term()) -> ok | {ok, Command :: term()} | {error, Reason :: term()}.
+-callback from_map(Map :: map()) -> {ok, Command :: term()} | {error, Reason :: term()}.
 ```
 
 #### evoq_event
@@ -208,12 +218,12 @@ Events represent facts that have happened. Immutable once stored.
 -behaviour(evoq_event).
 
 %% Required
--callback event_type() -> atom().
--callback new(Params :: map()) -> Event.
--callback to_map(Event) -> map().
+-callback event_type() -> atom() | binary().
+-callback new(Params :: map()) -> Event :: term().
+-callback to_map(Event :: term()) -> map().
 
 %% Optional
--callback from_map(Map :: map()) -> {ok, Event} | {error, Reason}.
+-callback from_map(Map :: map()) -> {ok, Event :: term()} | {error, Reason :: term()}.
 ```
 
 ### Integration Artifacts
@@ -233,8 +243,8 @@ Facts translate domain events into payloads for external consumption via pg or m
     {ok, Payload :: map()} | skip.
 
 %% Optional (defaults use OTP 27 json module)
--callback serialize(Payload :: map()) -> {ok, binary()} | {error, Reason}.
--callback deserialize(Binary :: binary()) -> {ok, map()} | {error, Reason}.
+-callback serialize(Payload :: map()) -> {ok, binary()} | {error, Reason :: term()}.
+-callback deserialize(Binary :: binary()) -> {ok, map()} | {error, Reason :: term()}.
 -callback schema() -> map().
 ```
 
@@ -247,12 +257,12 @@ Hopes are outbound RPC requests between agents. Unlike facts (fire-and-forget), 
 
 %% Required
 -callback hope_type() -> binary().
--callback new(Params :: map()) -> {ok, Hope} | {error, Reason}.
--callback to_payload(Hope) -> map().
--callback from_payload(Payload :: map()) -> {ok, Hope} | {error, Reason}.
+-callback new(Params :: map()) -> {ok, Hope :: term()} | {error, Reason :: term()}.
+-callback to_payload(Hope :: term()) -> map().
+-callback from_payload(Payload :: map()) -> {ok, Hope :: term()} | {error, Reason :: term()}.
 
 %% Optional
--callback validate(Hope) -> ok | {error, Reason}.
+-callback validate(Hope :: term()) -> ok | {error, Reason :: term()}.
 ```
 
 See [Artifacts Guide](guides/artifacts.md) for detailed documentation and examples.
@@ -262,6 +272,7 @@ See [Artifacts Guide](guides/artifacts.md) for detailed documentation and exampl
 Aggregates maintain business invariants and produce events.
 
 ```erlang
+-callback state_module() -> module().
 -callback init(AggregateId :: binary()) -> {ok, State :: term()}.
 -callback execute(State :: term(), Command :: map()) ->
     {ok, [Event :: map()]} | {error, Reason :: term()}.
@@ -277,9 +288,11 @@ Aggregates maintain business invariants and produce events.
 Controls aggregate lifecycle (TTL, passivation).
 
 ```erlang
--callback after_event(Event :: map()) -> timeout() | infinity | hibernate | stop.
--callback after_command(Command :: map()) -> timeout() | infinity | hibernate | stop.
--callback after_error(Error :: term()) -> timeout() | infinity | hibernate | stop.
+-type action() :: timeout() | infinity | hibernate | stop.
+
+-callback after_event(Event :: map()) -> action().
+-callback after_command(Command :: map()) -> action().
+-callback after_error(Error :: term()) -> action().
 -callback on_timeout(State :: term()) -> {ok, action()} | {snapshot, action()}.
 ```
 
@@ -291,9 +304,10 @@ Subscribe to events by type (not by stream).
 
 ```erlang
 -callback interested_in() -> [EventType :: binary()].
--callback init(Config :: map()) -> {ok, State :: term()}.
--callback handle_event(EventType, Event, Metadata, State) ->
-    {ok, NewState} | {error, Reason}.
+-callback init(Config :: map()) -> {ok, State :: term()} | {error, Reason :: term()}.
+-callback handle_event(EventType :: binary(), Event :: map(),
+                       Metadata :: map(), State :: term()) ->
+    {ok, NewState :: term()} | {error, Reason :: term()}.
 %% Optional: skip for a handler with side effects, see guides/event_handlers.md
 -callback replay_policy() -> skip | deliver.
 ```
@@ -304,12 +318,17 @@ Coordinate long-running business processes.
 
 ```erlang
 -callback interested_in() -> [EventType :: binary()].
--callback correlate(Event, Metadata) -> {start | continue | stop, ProcessId} | false.
--callback handle(State, Event, Metadata) -> {ok, State} | {ok, State, [Command]}.
--callback apply(State, Event) -> NewState.
+-callback correlate(Event :: map(), Metadata :: map()) ->
+    {start | continue | stop, ProcessId :: binary()} | false.
+-callback handle(State :: term(), Event :: map(), Metadata :: map()) ->
+    {ok, NewState :: term()} |
+    {ok, NewState :: term(), Commands :: [#evoq_command{}]} |
+    {error, Reason :: term()}.
+-callback apply(State :: term(), Event :: map()) -> NewState :: term().
 
 %% Optional: compensation for a failed command
--callback compensate(State, FailedCommand) -> {ok, [CompensatingCommand]} | skip.
+-callback compensate(State :: term(), FailedCommand :: #evoq_command{}) ->
+    {ok, [CompensatingCommand :: #evoq_command{}]} | skip.
 ```
 
 ### evoq_projection
@@ -318,9 +337,13 @@ Build read models from events.
 
 ```erlang
 -callback interested_in() -> [EventType :: binary()].
--callback init(Config) -> {ok, State, ReadModel}.
--callback project(Event, Metadata, State, ReadModel) ->
-    {ok, NewState, NewReadModel} | {skip, State, ReadModel}.
+-callback init(Config :: map()) ->
+    {ok, State :: term(), ReadModel :: evoq_read_model:read_model()} |
+    {error, Reason :: term()}.
+-callback project(Event :: map(), Metadata :: map(),
+                  State :: term(), ReadModel :: evoq_read_model:read_model()) ->
+    {ok, NewState :: term(), NewReadModel :: evoq_read_model:read_model()} |
+    {skip, State :: term(), ReadModel :: evoq_read_model:read_model()}.
 ```
 
 ### evoq_middleware
@@ -328,9 +351,9 @@ Build read models from events.
 Intercept command dispatch.
 
 ```erlang
--callback before_dispatch(Pipeline) -> {ok, Pipeline} | {error, Reason}.
--callback after_dispatch(Pipeline) -> {ok, Pipeline}.
--callback on_failure(Pipeline, Reason) -> {ok, Pipeline} | {error, Reason}.
+-callback before_dispatch(Pipeline :: #evoq_pipeline{}) -> #evoq_pipeline{}.
+-callback after_dispatch(Pipeline :: #evoq_pipeline{}) -> #evoq_pipeline{}.
+-callback after_failure(Pipeline :: #evoq_pipeline{}) -> #evoq_pipeline{}.
 ```
 
 ## Configuration

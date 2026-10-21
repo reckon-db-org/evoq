@@ -45,12 +45,12 @@ Commands are the entry point to the domain. They carry user intent.
 ```erlang
 %% Required
 -callback command_type() -> atom().
--callback new(Params :: map()) -> {ok, Command} | {error, Reason}.
--callback to_map(Command) -> map().
+-callback new(Params :: map()) -> {ok, Command :: term()} | {error, Reason :: term()}.
+-callback to_map(Command :: term()) -> map().
 
 %% Optional
--callback validate(Command) -> ok | {ok, Command} | {error, Reason}.
--callback from_map(Map :: map()) -> {ok, Command} | {error, Reason}.
+-callback validate(Command :: term()) -> ok | {ok, Command :: term()} | {error, Reason :: term()}.
+-callback from_map(Map :: map()) -> {ok, Command :: term()} | {error, Reason :: term()}.
 ```
 
 ### Example
@@ -69,8 +69,15 @@ Commands are the entry point to the domain. They carry user intent.
 command_type() -> initiate_venture_v1.
 
 new(#{name := Name} = Params) ->
+    %% A stream id's format belongs to the store, so evoq asks the adapter to
+    %% mint one rather than inventing a format here. Mint only when the
+    %% caller did not bring an id of its own.
+    VentureId = case maps:find(venture_id, Params) of
+                    {ok, Given} -> Given;
+                    error -> evoq_event_store:new_stream_id(venture)
+                end,
     {ok, #initiate_venture_v1{
-        venture_id = maps:get(venture_id, Params, generate_id()),
+        venture_id = VentureId,
         name = Name,
         brief = maps:get(brief, Params, undefined),
         initiated_by = maps:get(initiated_by, Params, undefined)
@@ -109,12 +116,12 @@ Events are the source of truth. They record what happened.
 
 ```erlang
 %% Required
--callback event_type() -> atom().
--callback new(Params :: map()) -> Event.
--callback to_map(Event) -> map().
+-callback event_type() -> atom() | binary().
+-callback new(Params :: map()) -> Event :: term().
+-callback to_map(Event :: term()) -> map().
 
 %% Optional
--callback from_map(Map :: map()) -> {ok, Event} | {error, Reason}.
+-callback from_map(Map :: map()) -> {ok, Event :: term()} | {error, Reason :: term()}.
 ```
 
 ### Example
@@ -171,8 +178,9 @@ When `to_map/1` returns an atom `event_type`, evoq handles the conversion:
 ```erlang
 apply_event(#{event_type := Type} = E, S) when is_atom(Type) ->
     apply_event(E#{event_type := atom_to_binary(Type, utf8)}, S);
-apply_event(#{event_type := <<"venture_initiated_v1">>} = E, S) ->
-    %% handle event...
+apply_event(#{event_type := <<"venture_initiated_v1">>} = _E, S) ->
+    %% Your own fold of the stored (binary) shape; unchanged here.
+    S.
 ```
 
 ## evoq_fact
@@ -196,8 +204,8 @@ Domain events are implementation details. They may change frequently, use intern
     {ok, Payload :: map()} | skip.
 
 %% Optional
--callback serialize(Payload :: map()) -> {ok, binary()} | {error, Reason}.
--callback deserialize(Binary :: binary()) -> {ok, map()} | {error, Reason}.
+-callback serialize(Payload :: map()) -> {ok, binary()} | {error, Reason :: term()}.
+-callback deserialize(Binary :: binary()) -> {ok, map()} | {error, Reason :: term()}.
 -callback schema() -> map().
 ```
 
@@ -254,14 +262,14 @@ Hopes are outbound RPC requests. They represent one agent asking another to do s
 ```erlang
 %% Required
 -callback hope_type() -> binary().
--callback new(Params :: map()) -> {ok, Hope} | {error, Reason}.
--callback to_payload(Hope) -> map().
--callback from_payload(Payload :: map()) -> {ok, Hope} | {error, Reason}.
+-callback new(Params :: map()) -> {ok, Hope :: term()} | {error, Reason :: term()}.
+-callback to_payload(Hope :: term()) -> map().
+-callback from_payload(Payload :: map()) -> {ok, Hope :: term()} | {error, Reason :: term()}.
 
 %% Optional
--callback validate(Hope) -> ok | {error, Reason}.
--callback serialize(Payload :: map()) -> {ok, binary()} | {error, Reason}.
--callback deserialize(Binary :: binary()) -> {ok, map()} | {error, Reason}.
+-callback validate(Hope :: term()) -> ok | {error, Reason :: term()}.
+-callback serialize(Payload :: map()) -> {ok, binary()} | {error, Reason :: term()}.
+-callback deserialize(Binary :: binary()) -> {ok, map()} | {error, Reason :: term()}.
 -callback schema() -> map().
 ```
 

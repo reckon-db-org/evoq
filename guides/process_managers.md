@@ -148,7 +148,7 @@ handle(State, #{event_type := <<"OrderPlaced">>}, _Meta) ->
     {ok, State#{started_at => erlang:system_time()}};
 
 %% Update state and dispatch commands
-handle(State, #{event_type := <<"PaymentReceived">>}, _Meta) ->
+handle(State, #{event_type := <<"PaymentReceived">>, data := #{order_id := OrderId}}, _Meta) ->
     Cmd1 = evoq_command:new(reserve_inventory, inventory, OrderId, #{}),
     Cmd2 = evoq_command:new(notify_warehouse, warehouse, OrderId, #{}),
     {ok, State#{payment_received => true}, [Cmd1, Cmd2]}.
@@ -196,19 +196,33 @@ rebuilt in `apply/2`.
 interested_in() ->
     [<<"TransferInitiated">>, <<"SourceDebited">>, <<"DestinationCreditFailed">>].
 
-handle(State, #{event_type := <<"TransferInitiated">>}, _Meta) ->
-    %% Step 1: Debit source account
-    Cmd = evoq_command:new(debit, account, SourceId, #{amount => Amount}),
-    {ok, State#{status => debiting_source}, [Cmd]};
+correlate(#{data := #{transfer_id := TransferId}}, _Meta) ->
+    {continue, TransferId};
+correlate(_Event, _Meta) ->
+    false.
+
+handle(State, #{event_type := <<"TransferInitiated">>, data := Data}, _Meta) ->
+    %% Step 1: Debit source account, keeping what step 2 needs in the
+    %% process's own state.
+    Cmd = evoq_command:new(debit, account, maps:get(source_id, Data),
+                           #{amount => maps:get(amount, Data)}),
+    {ok, State#{status => debiting_source,
+                source_id => maps:get(source_id, Data),
+                dest_id => maps:get(dest_id, Data),
+                amount => maps:get(amount, Data)}, [Cmd]};
 
 handle(State, #{event_type := <<"SourceDebited">>}, _Meta) ->
     %% Step 2: Credit destination account
-    Cmd = evoq_command:new(credit, account, DestId, #{amount => Amount}),
+    Cmd = evoq_command:new(credit, account, maps:get(dest_id, State),
+                           #{amount => maps:get(amount, State)}),
     {ok, State#{status => crediting_dest}, [Cmd]};
 
 handle(State, #{event_type := <<"DestinationCreditFailed">>}, _Meta) ->
     %% Credit failed - need to compensate
     {ok, State#{status => compensating}}.
+
+apply(State, _Event) ->
+    State.
 
 %% Compensation callback. The failed command arrives as the evoq_command
 %% record the process manager returned - it is a #evoq_command{}, not a map.
@@ -242,6 +256,17 @@ lands:
 
 -export([interested_in/0, correlate/2, handle/3, apply/2, handle_info/2]).
 
+interested_in() ->
+    [<<"game_started_v1">>].
+
+correlate(#{data := #{game_id := GameId}}, _Meta) ->
+    {continue, GameId};
+correlate(_Event, _Meta) ->
+    false.
+
+apply(State, _Event) ->
+    State.
+
 handle(State, #{event_type := <<"game_started_v1">>, data := Data}, _Meta) ->
     %% What is left on the mover's clock, from the event, not from a read model.
     erlang:send_after(maps:get(mover_ms, Data), self(), {deadline, maps:get(mover, Data)}),
@@ -256,6 +281,9 @@ handle_info({deadline, Player}, State) ->
 handle_info(Other, State) ->
     %% Keep it total: an unmatched message must not take the instance down.
     {noreply, State#{last_ignored => Other}}.
+
+flag_clock_cmd(Player) ->
+    evoq_command:new(flag_clock, clock, Player, #{}).
 ```
 
 The return shape is `{noreply, NewState}`, `{noreply, NewState, Commands}`
@@ -300,16 +328,30 @@ Process managers naturally model state machines:
 
 ```erlang
 -module(order_state_machine_pm).
+-behaviour(evoq_process_manager).
+
+-export([interested_in/0, correlate/2, handle/3, apply/2]).
+
+interested_in() ->
+    [<<"OrderPlaced">>, <<"PaymentReceived">>, <<"PaymentFailed">>, <<"ItemShipped">>].
+
+correlate(#{data := #{order_id := OrderId}}, _Meta) ->
+    {continue, OrderId};
+correlate(_Event, _Meta) ->
+    false.
+
+apply(State, _Event) ->
+    State.
 
 %% State transitions
 handle(#{status := new} = State, #{event_type := <<"OrderPlaced">>}, _) ->
-    {ok, State#{status => awaiting_payment}, [process_payment_cmd()]};
+    {ok, State#{status => awaiting_payment}, [process_payment_cmd(State)]};
 
 handle(#{status := awaiting_payment} = State, #{event_type := <<"PaymentReceived">>}, _) ->
-    {ok, State#{status => awaiting_shipment}, [ship_order_cmd()]};
+    {ok, State#{status => awaiting_shipment}, [ship_order_cmd(State)]};
 
 handle(#{status := awaiting_payment} = State, #{event_type := <<"PaymentFailed">>}, _) ->
-    {ok, State#{status => cancelled}, [notify_customer_cmd()]};
+    {ok, State#{status => cancelled}, [notify_customer_cmd(State)]};
 
 handle(#{status := awaiting_shipment} = State, #{event_type := <<"ItemShipped">>}, _) ->
     {ok, State#{status => completed}};
@@ -317,6 +359,17 @@ handle(#{status := awaiting_shipment} = State, #{event_type := <<"ItemShipped">>
 %% Invalid transition - ignore
 handle(State, _Event, _Meta) ->
     {ok, State}.
+
+%% The commands this manager issues, each addressed by the order in its own
+%% state.
+process_payment_cmd(#{order_id := OrderId}) ->
+    evoq_command:new(process_payment, payment, OrderId, #{}).
+
+ship_order_cmd(#{order_id := OrderId}) ->
+    evoq_command:new(ship_item, shipping, OrderId, #{}).
+
+notify_customer_cmd(#{order_id := OrderId}) ->
+    evoq_command:new(notify_customer, notification, OrderId, #{}).
 ```
 
 ## Instance Lifetime
@@ -379,6 +432,19 @@ Test the state machine in isolation:
 ```erlang
 -module(order_pm_tests).
 -include_lib("eunit/include/eunit.hrl").
+
+%% The events the process manager reacts to, as the store delivers them.
+order_placed_event() ->
+    #{event_type => <<"OrderPlaced">>,
+      data => #{order_id => <<"order-1">>, total => 100}}.
+
+payment_received_event() ->
+    #{event_type => <<"PaymentReceived">>,
+      data => #{order_id => <<"order-1">>, amount => 100}}.
+
+item_shipped_event() ->
+    #{event_type => <<"ItemShipped">>,
+      data => #{order_id => <<"order-1">>}}.
 
 full_workflow_test() ->
     %% Initial state

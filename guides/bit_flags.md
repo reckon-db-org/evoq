@@ -93,7 +93,7 @@ State1 = evoq_bit_flags:set(State0, 4),        %% 2#00000100 (Processing)
 %% State1 = 4
 
 %% Set another flag
-State2 = evoq_bit_flags:set(State1, 32),       %% 2#00100100 (Processing + Archived)
+State2 = evoq_bit_flags:set(State1, 32)        %% 2#00100100 (Processing + Archived)
 %% State2 = 36
 ```
 
@@ -102,7 +102,7 @@ State2 = evoq_bit_flags:set(State1, 32),       %% 2#00100100 (Processing + Archi
 ```erlang
 %% Set multiple flags at once
 State0 = 0,
-State1 = evoq_bit_flags:set_all(State0, [1, 4, 32]),
+State1 = evoq_bit_flags:set_all(State0, [1, 4, 32])
 %% State1 = 37 (Created + Processing + Archived)
 ```
 
@@ -113,7 +113,7 @@ State1 = evoq_bit_flags:set_all(State0, [1, 4, 32]),
 ```erlang
 %% Unset a single flag
 State0 = 100,                                  %% 2#01100100 (Processing + Archived + Ready)
-State1 = evoq_bit_flags:unset(State0, 64),     %% Remove "Ready to Publish"
+State1 = evoq_bit_flags:unset(State0, 64)      %% Remove "Ready to Publish"
 %% State1 = 36 (2#00100100)
 ```
 
@@ -122,7 +122,7 @@ State1 = evoq_bit_flags:unset(State0, 64),     %% Remove "Ready to Publish"
 ```erlang
 %% Unset multiple flags
 State0 = 228,                                  %% 2#11100100
-State1 = evoq_bit_flags:unset_all(State0, [64, 128]),
+State1 = evoq_bit_flags:unset_all(State0, [64, 128])
 %% State1 = 36
 ```
 
@@ -135,7 +135,7 @@ State = 100,                                   %% 2#01100100
 
 true  = evoq_bit_flags:has(State, 4),          %% Processing is set
 false = evoq_bit_flags:has(State, 8),          %% Completed is NOT set
-true  = evoq_bit_flags:has_not(State, 8),      %% Completed is NOT set
+true  = evoq_bit_flags:has_not(State, 8)       %% Completed is NOT set
 ```
 
 ### Check Multiple Flags
@@ -149,7 +149,7 @@ false = evoq_bit_flags:has_all(State, [4, 8]),
 
 %% Check if ANY flag is set
 true  = evoq_bit_flags:has_any(State, [8, 64]),    %% 64 is set
-false = evoq_bit_flags:has_any(State, [1, 2, 8]),  %% None are set
+false = evoq_bit_flags:has_any(State, [1, 2, 8])   %% None are set
 ```
 
 ## Conversion Operations
@@ -241,7 +241,29 @@ Create a header file with your aggregate's status flags:
 -module(order_aggregate).
 -behaviour(evoq_aggregate).
 
--include("order_status.hrl").
+-export([init/1, apply_event/2, can_cancel/1, can_refund/1, is_active/1,
+         get_status_string/1, get_current_stage/1]).
+
+%% include/order_status.hrl, written out so the example compiles as it stands.
+-define(ORDER_CREATED,          1).
+-define(ORDER_PAYMENT_PENDING,  2).
+-define(ORDER_PAYMENT_CONFIRMED,4).
+-define(ORDER_PROCESSING,       8).
+-define(ORDER_SHIPPED,         16).
+-define(ORDER_DELIVERED,       32).
+-define(ORDER_CANCELLED,       64).
+-define(ORDER_REFUNDED,       128).
+
+-define(ORDER_STATUS_MAP, #{
+    ?ORDER_CREATED          => <<"Created">>,
+    ?ORDER_PAYMENT_PENDING  => <<"Payment Pending">>,
+    ?ORDER_PAYMENT_CONFIRMED=> <<"Payment Confirmed">>,
+    ?ORDER_PROCESSING       => <<"Processing">>,
+    ?ORDER_SHIPPED          => <<"Shipped">>,
+    ?ORDER_DELIVERED        => <<"Delivered">>,
+    ?ORDER_CANCELLED        => <<"Cancelled">>,
+    ?ORDER_REFUNDED         => <<"Refunded">>
+}).
 
 -record(order, {
     id :: binary(),
@@ -267,15 +289,15 @@ apply_event(#order{status = Status} = Order, {payment_requested, _}) ->
     Order#order{status = NewStatus};
 
 apply_event(#order{status = Status} = Order, {payment_confirmed, _}) ->
-    NewStatus = Status
-        |> evoq_bit_flags:unset(?ORDER_PAYMENT_PENDING)
-        |> evoq_bit_flags:set(?ORDER_PAYMENT_CONFIRMED),
+    NewStatus = evoq_bit_flags:set(
+                  evoq_bit_flags:unset(Status, ?ORDER_PAYMENT_PENDING),
+                  ?ORDER_PAYMENT_CONFIRMED),
     Order#order{status = NewStatus};
 
 apply_event(#order{status = Status} = Order, {order_shipped, _}) ->
-    NewStatus = Status
-        |> evoq_bit_flags:unset(?ORDER_PROCESSING)
-        |> evoq_bit_flags:set(?ORDER_SHIPPED),
+    NewStatus = evoq_bit_flags:set(
+                  evoq_bit_flags:unset(Status, ?ORDER_PROCESSING),
+                  ?ORDER_SHIPPED),
     Order#order{status = NewStatus};
 
 apply_event(#order{status = Status} = Order, {order_cancelled, _}) ->
@@ -307,8 +329,6 @@ get_current_stage(#order{status = Status}) ->
 
 ```erlang
 -module(maybe_cancel_order).
-
--include("order_status.hrl").
 
 handle(Order, {cancel_order, Reason}) ->
     case order_aggregate:can_cancel(Order) of
@@ -368,6 +388,11 @@ Keep all flag definitions in `.hrl` files for consistency:
 Always validate that state transitions are valid:
 
 ```erlang
+%% include/task_status.hrl
+-define(TASK_IN_PROGRESS, 4).
+-define(TASK_COMPLETED,   8).
+-define(TASK_ARCHIVED,   16).
+
 complete_task(Status) ->
     case evoq_bit_flags:has(Status, ?TASK_ARCHIVED) of
         true ->
@@ -402,6 +427,10 @@ complete_task(Status) ->
 ### 5. Use Flags for Read Model Queries
 
 ```erlang
+%% include/order_status.hrl
+-define(ORDER_SHIPPED,   16).
+-define(ORDER_DELIVERED, 32).
+
 %% Query all orders that are shipped but not delivered
 find_in_transit_orders(Repo) ->
     ShippedFlag = ?ORDER_SHIPPED,

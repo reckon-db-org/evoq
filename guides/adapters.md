@@ -46,15 +46,27 @@ evoq defines three adapter behaviors:
 Core event operations:
 
 ```erlang
--callback append(StoreId, StreamId, ExpectedVersion, Events) -> {ok, Version} | {error, Reason}.
--callback read(StoreId, StreamId, StartVersion, Count, Direction) -> {ok, Events} | {error, Reason}.
--callback read_all(StoreId, StreamId, Direction) -> {ok, Events} | {error, Reason}.
--callback version(StoreId, StreamId) -> integer().
--callback exists(StoreId, StreamId) -> boolean().
--callback list_streams(StoreId) -> {ok, [StreamId]} | {error, Reason}.
--callback delete_stream(StoreId, StreamId) -> ok | {error, Reason}.
+%% The core of evoq_adapter. The behaviour module (src/evoq_adapter.erl)
+%% carries the full contract, including the batch-limited reads
+%% (read_by_event_types/3, read_by_tags/4, ccc_read_by_payload/4) and the
+%% payload index introspection a CCC decision needs.
+-callback append(StoreId :: atom(), StreamId :: binary(),
+                 ExpectedVersion :: integer(), Events :: [map()]) ->
+    {ok, non_neg_integer()} | {error, term()}.
+-callback read(StoreId :: atom(), StreamId :: binary(),
+               StartVersion :: non_neg_integer(), Count :: pos_integer(),
+               Direction :: forward | backward) ->
+    {ok, [map()]} | {error, term()}.
+-callback read_all(StoreId :: atom(), StreamId :: binary(),
+                   Direction :: forward | backward) ->
+    {ok, [map()]} | {error, term()}.
+-callback version(StoreId :: atom(), StreamId :: binary()) -> integer().
+-callback exists(StoreId :: atom(), StreamId :: binary()) -> boolean().
+-callback list_streams(StoreId :: atom()) -> {ok, [binary()]} | {error, term()}.
+-callback delete_stream(StoreId :: atom(), StreamId :: binary()) ->
+    ok | {error, term()}.
 %% Optional: see "Minting a stream id" below.
--callback new_stream_id(Prefix) -> StreamId.
+-callback new_stream_id(Prefix :: atom() | binary()) -> binary().
 ```
 
 ### Minting a stream id
@@ -84,11 +96,21 @@ caller's command handler.
 Snapshot operations for aggregate optimization:
 
 ```erlang
--callback save(StoreId, StreamId, Version, Data, Metadata) -> ok | {error, Reason}.
--callback read(StoreId, StreamId) -> {ok, Snapshot} | {error, not_found}.
--callback read_at_version(StoreId, StreamId, Version) -> {ok, Snapshot} | {error, not_found}.
--callback delete(StoreId, StreamId) -> ok | {error, Reason}.
--callback list_versions(StoreId, StreamId) -> {ok, [Version]} | {error, Reason}.
+-callback save(StoreId :: atom(), StreamId :: binary(),
+               Version :: non_neg_integer(), Data :: map() | binary(),
+               Metadata :: map()) ->
+    ok | {error, term()}.
+-callback read(StoreId :: atom(), StreamId :: binary()) ->
+    {ok, map()} | {error, not_found | term()}.
+-callback read_at_version(StoreId :: atom(), StreamId :: binary(),
+                          Version :: non_neg_integer()) ->
+    {ok, map()} | {error, not_found | term()}.
+-callback delete(StoreId :: atom(), StreamId :: binary()) -> ok | {error, term()}.
+-callback delete_at_version(StoreId :: atom(), StreamId :: binary(),
+                            Version :: non_neg_integer()) ->
+    ok | {error, term()}.
+-callback list_versions(StoreId :: atom(), StreamId :: binary()) ->
+    {ok, [non_neg_integer()]} | {error, term()}.
 ```
 
 ### evoq_subscription_adapter
@@ -96,11 +118,22 @@ Snapshot operations for aggregate optimization:
 Subscription operations for event delivery:
 
 ```erlang
--callback subscribe(StoreId, Type, Selector, Name, Opts) -> {ok, SubscriptionId} | {error, Reason}.
--callback unsubscribe(StoreId, SubscriptionId) -> ok | {error, Reason}.
--callback ack(StoreId, Name, StreamId, Position) -> ok | {error, Reason}.
--callback get_checkpoint(StoreId, Name) -> {ok, Position} | {error, not_found}.
--callback list(StoreId) -> {ok, [Subscription]} | {error, Reason}.
+%% Type is one of stream_id, event_type, pattern or all, as the store
+%% backend defines them; see src/evoq_subscription_adapter.erl.
+-callback subscribe(StoreId :: atom(), Type :: atom(),
+                    Selector :: binary() | map(),
+                    SubscriptionName :: binary(), Opts :: map()) ->
+    {ok, SubscriptionId :: binary()} | {error, term()}.
+-callback unsubscribe(StoreId :: atom(), SubscriptionId :: binary()) ->
+    ok | {error, term()}.
+-callback ack(StoreId :: atom(), SubscriptionName :: binary(),
+              StreamId :: binary() | undefined, Position :: non_neg_integer()) ->
+    ok | {error, term()}.
+-callback get_checkpoint(StoreId :: atom(), SubscriptionName :: binary()) ->
+    {ok, non_neg_integer()} | {error, not_found | term()}.
+-callback list(StoreId :: atom()) -> {ok, [map()]} | {error, term()}.
+-callback get_by_name(StoreId :: atom(), SubscriptionName :: binary()) ->
+    {ok, map()} | {error, not_found | term()}.
 ```
 
 ## Implementing a Custom Adapter
@@ -119,19 +152,22 @@ Example skeleton:
 -behaviour(evoq_snapshot_adapter).
 -behaviour(evoq_subscription_adapter).
 
-%% evoq_adapter callbacks
--export([append/4, read/5, read_all/3, version/2, exists/2, list_streams/1, delete_stream/2]).
-
-%% evoq_snapshot_adapter callbacks
--export([save/5, read/2, read_at_version/3, delete/2, list_versions/2]).
-
-%% evoq_subscription_adapter callbacks
--export([subscribe/5, unsubscribe/2, ack/4, get_checkpoint/2, list/1]).
+%% evoq_adapter callbacks: append/4, read/5, read_all/3, version/2,
+%% exists/2, list_streams/1, delete_stream/2
+%% evoq_snapshot_adapter callbacks: save/5, read/2, read_at_version/3,
+%% delete/2, delete_at_version/3, list_versions/2
+%% evoq_subscription_adapter callbacks: subscribe/5, unsubscribe/2, ack/4,
+%% get_checkpoint/2, list/1, get_by_name/2
+%% A module exports every callback it implements; export each one as you
+%% write it. Only append/4 is written out here.
+-export([append/4]).
 
 %% Implementation...
-append(StoreId, StreamId, ExpectedVersion, Events) ->
-    %% Connect to your event store and append events
-    {ok, NewVersion}.
+append(_StoreId, _StreamId, ExpectedVersion, Events) ->
+    %% Connect to your event store and append the events, then answer the
+    %% stream's new version. Versions are 0-based, and -1 means "the stream
+    %% must not exist yet", so an append of N events ends at N - 1 there.
+    {ok, ExpectedVersion + length(Events)}.
 
 %% ... implement other callbacks
 ```

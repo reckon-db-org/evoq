@@ -35,7 +35,7 @@ Emitters subscribe to domain events and publish them as integration facts to ext
 -callback fact_module() -> module().
 -callback transport() -> pg | mesh.
 -callback emit(FactType :: binary(), Payload :: map(), Metadata :: map()) ->
-    ok | {error, Reason}.
+    ok | {error, Reason :: term()}.
 ```
 
 ### Example
@@ -48,8 +48,11 @@ source_event() -> venture_initiated_v1.
 fact_module() -> venture_initiated_fact_v1.
 transport() -> pg.
 
+%% pg has no send: a publisher looks the group's members up and sends to
+%% each, which is how evoq's own consistency fan-out does it.
 emit(FactType, Payload, _Metadata) ->
-    pg:send(pg, venture_initiated_v1, {venture_initiated_v1, Payload}),
+    Message = {fact, FactType, Payload},
+    lists:foreach(fun(Pid) -> Pid ! Message end, pg:get_members(pg, FactType)),
     ok.
 ```
 
@@ -72,7 +75,7 @@ Listeners receive integration facts from external transports and dispatch comman
 -callback source_fact() -> binary().
 -callback transport() -> pg | mesh.
 -callback handle_fact(FactType :: binary(), Payload :: map(), Metadata :: map()) ->
-    ok | skip | {error, Reason}.
+    ok | skip | {error, Reason :: term()}.
 ```
 
 ### Example
@@ -112,7 +115,7 @@ Requesters send hopes over mesh and wait for feedback (cross-daemon RPC).
 %% Required
 -callback hope_module() -> module().
 -callback send(Hope :: term(), Opts :: map()) ->
-    {ok, Feedback :: map()} | {error, Reason}.
+    {ok, Feedback :: map()} | {error, Reason :: term()}.
 ```
 
 ### Naming
@@ -131,7 +134,7 @@ Responders receive hopes, dispatch commands, and return feedback with the post-e
 %% Required
 -callback hope_type() -> binary().
 -callback handle_hope(HopeType :: binary(), Payload :: map(), Metadata :: map()) ->
-    {ok, State :: term()} | {error, Reason}.
+    {ok, State :: term()} | {error, Reason :: term()}.
 
 %% Optional
 -callback feedback_module() -> module().
@@ -152,12 +155,12 @@ Feedback is the response to a Hope. It carries the result of command execution f
 
 %% Required
 -callback feedback_type() -> binary().
--callback from_result({ok, State} | {error, Reason}) -> map().
--callback to_result(Payload :: map()) -> {ok, State} | {error, Reason}.
+-callback from_result({ok, State :: term()} | {error, Reason :: term()}) -> map().
+-callback to_result(Payload :: map()) -> {ok, State :: term()} | {error, Reason :: term()}.
 
 %% Optional (defaults use OTP 27 json module)
--callback serialize(Payload :: map()) -> {ok, binary()} | {error, Reason}.
--callback deserialize(Binary :: binary()) -> {ok, map()} | {error, Reason}.
+-callback serialize(Payload :: map()) -> {ok, binary()} | {error, Reason :: term()}.
+-callback deserialize(Binary :: binary()) -> {ok, map()} | {error, Reason :: term()}.
 ```
 
 Default serialization: `evoq_feedback:default_serialize/1` and `default_deserialize/1`.

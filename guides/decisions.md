@@ -161,7 +161,7 @@ indexes.
 ```erlang
 %% Uniqueness on a payload field rather than a tag.
 context(#{license_key := Key}) ->
-    {payload_match, <<"license_key">>, Key}.
+    {payload_match, <<"license_key">>, Key};
 
 %% Composite: this (realm, email) pair must be unique.
 context(#{realm := R, email := E}) ->
