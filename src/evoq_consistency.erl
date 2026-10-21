@@ -138,8 +138,14 @@ targets(Event) ->
 %% a remote pid is waiting for an ack that pid cannot send for this store: it
 %% is not subscribed here and never sees the event, so every dispatch would
 %% end in a consistency timeout. The required set is the delivered set, so a
-%% pid on another node is not in it. A module entry stays: the router calls
-%% it here, and it acks through the calling process.
+%% pid on another node is not in it.
+%%
+%% An atom is not something the registry names: `register_handler/2' refuses a
+%% module (`{error, not_supported}'), and the router's own module clause calls
+%% `handle_event/4' without acknowledging anything. The clause answers true
+%% because a module the registry cannot hold never reaches here, and a caller
+%% that names one in `{handlers, ...}' is naming a handler with no process to
+%% deliver to; refusing it here would be a different, larger change.
 -spec waitable(pid() | atom()) -> boolean().
 waitable(Pid) when is_pid(Pid) ->
     node(Pid) =:= node();
