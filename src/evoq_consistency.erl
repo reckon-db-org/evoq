@@ -158,12 +158,23 @@ waitable(Module) when is_atom(Module) ->
 %% answers `{error, {dropped, Handler}}' at once: the write did not happen,
 %% and waiting out the deadline for it would say the same thing later and
 %% less clearly.
+%%
+%% WHICH EVENTS ARE THIS DISPATCH'S is the append's own range of versions,
+%% `{first_version, V}' in the options (the caller that appended knows it; it
+%% is `Version' by default, the single event case). A drop is this call's
+%% business only inside it: a stream carries every command's appends, so a
+%% drop above it is the next command's (and a handler's messages arrive in
+%% order, so it can only be one) and a drop below it was answered for before
+%% this append began. Inside it, a drop fails the wait even when the same
+%% handler went on to write a later version of the append, because that is
+%% exactly the event the read model is missing.
 -spec await(waiter(), [pid() | atom()], integer(), map()) ->
     ok | {error, timeout | {dropped, pid() | atom()}}.
 await(Waiter, Required, Version, Opts) ->
     Timeout = maps:get(timeout, Opts, ?DEFAULT_TIMEOUT),
     Deadline = erlang:monotonic_time(millisecond) + Timeout,
-    wait_loop(Waiter, lists:usort(Required), #{}, Version, Deadline).
+    Range = {maps:get(first_version, Opts, Version), Version},
+    wait_loop(Waiter, lists:usort(Required), #{}, Version, Range, Deadline).
 
 %% @doc Acknowledge a handler's or projection's write from the event it was
 %% handed.
@@ -230,6 +241,12 @@ notify_waiters(Message = {_Tag, _Identity, StoreId, StreamId, _Version}) ->
 %% which handlers the dispatch would have to wait for, and `ok' would say
 %% "they have all written" about a set it never looked up. A dispatch asks
 %% for `strong' instead, which derives the set from the appended events.
+%%
+%% It sees no events, so it also does not know the append's range of versions:
+%% only a drop of exactly `Version' fails this wait, and a drop of one of the
+%% append's earlier versions is not noticed. A caller that appended several
+%% events and wants the whole range calls `open/2' and `await/4' itself, with
+%% `{first_version, V}'.
 -spec wait_for(atom(), binary(), integer(), map()) -> ok | {error, timeout} | {error, all_needs_events}.
 wait_for(StoreId, StreamId, Version, Opts) ->
     named(maps:get(handlers, Opts, all), StoreId, StreamId, Version, Opts).
@@ -253,46 +270,64 @@ waiter_key(StoreId, StreamId) ->
 
 %% @private Nothing to wait for: every handler the router could reach has
 %% been reached, because there is none.
-wait_loop(_Waiter, [], _Acked, _Version, _Deadline) ->
+wait_loop(_Waiter, [], _Acked, _Version, _Range, _Deadline) ->
     ok;
 
-wait_loop(Waiter, Required, Acked, Version, Deadline) ->
-    acked_reply(all_acked(Required, Acked, Version), Waiter, Required, Acked, Version, Deadline).
+wait_loop(Waiter, Required, Acked, Version, Range, Deadline) ->
+    acked_reply(all_acked(Required, Acked, Version), Waiter, Required, Acked, Version,
+                Range, Deadline).
 
 %% @private
-acked_reply(true, _Waiter, _Required, _Acked, _Version, _Deadline) ->
+acked_reply(true, _Waiter, _Required, _Acked, _Version, _Range, _Deadline) ->
     ok;
 acked_reply(false, #{store_id := StoreId, stream_id := StreamId} = Waiter,
-            Required, Acked, Version, Deadline) ->
+            Required, Acked, Version, Range, Deadline) ->
     %% One deadline for the whole wait: an ack for another stream cannot
     %% reset it, and no unrelated message is taken out of the mailbox.
     Remaining = max(0, Deadline - erlang:monotonic_time(millisecond)),
     receive
         {handler_ack, Identity, StoreId, StreamId, AckedVersion} when is_integer(AckedVersion) ->
-            wait_loop(Waiter, Required, record(Identity, AckedVersion, Acked), Version, Deadline);
+            wait_loop(Waiter, Required, record(Identity, AckedVersion, Acked), Version,
+                      Range, Deadline);
         {handler_dropped, Identity, StoreId, StreamId, DroppedVersion}
           when is_integer(DroppedVersion) ->
-            drop_reply(Identity, DroppedVersion, Required, Waiter, Acked, Version, Deadline)
+            drop_reply(Identity, DroppedVersion, Required, Waiter, Acked, Version,
+                       Range, Deadline)
     after Remaining ->
         {error, timeout}
     end.
 
-%% @private A handler this dispatch waits for dropped the event by its own
-%% error policy, so it will never ack: the answer is a drop, at once, not a
-%% deadline. A drop for a handler this dispatch does not wait for, or for an
-%% event below the one being waited on, is about some other dispatch and the
-%% wait carries on.
-drop_reply({Pid, Module} = Identity, DroppedVersion, Required, Waiter, Acked, Version, Deadline) ->
-    WaitedFor = lists:member(Pid, Required) orelse lists:member(Module, Required),
-    drop_verdict(WaitedFor andalso DroppedVersion >= Version,
-                 Identity, Required, Waiter, Acked, Version, Deadline).
+%% @private A handler this dispatch waits for dropped one of ITS events by its
+%% own error policy, so that write will never happen: the answer is a drop, at
+%% once, not a deadline. Anything else is another dispatch's and the wait
+%% carries on: a drop by a handler this call does not wait for, one for an
+%% event outside this append's range of versions, or one by a handler that has
+%% already written the version this call waits for.
+drop_reply({Pid, Module} = Identity, DroppedVersion, Required, Waiter, Acked, Version,
+           Range, Deadline) ->
+    ThisDispatch = lists:member(Pid, Required) orelse lists:member(Module, Required),
+    drop_verdict(ThisDispatch andalso in_range(DroppedVersion, Range)
+                 andalso not satisfied(Identity, Acked, Version),
+                 Identity, Required, Waiter, Acked, Version, Range, Deadline).
 
 %% @private Named by its module: that is what a caller subscribes by, and it
 %% is the same for the pid and the module identity of one handler.
-drop_verdict(true, {_Pid, Module}, _Required, _Waiter, _Acked, _Version, _Deadline) ->
+drop_verdict(true, {_Pid, Module}, _Required, _Waiter, _Acked, _Version, _Range, _Deadline) ->
     {error, {dropped, Module}};
-drop_verdict(false, _Identity, Required, Waiter, Acked, Version, Deadline) ->
-    wait_loop(Waiter, Required, Acked, Version, Deadline).
+drop_verdict(false, _Identity, Required, Waiter, Acked, Version, Range, Deadline) ->
+    wait_loop(Waiter, Required, Acked, Version, Range, Deadline).
+
+%% @private The versions one command's append produced. Monotonic, so a drop
+%% inside the range is one of this dispatch's events whatever order the
+%% handlers' messages arrive in.
+in_range(Version, {First, Last}) ->
+    First =< Version andalso Version =< Last.
+
+%% @private Has this handler already written the version the call waits for?
+%% A handler's messages arrive in order, so this is the same test `all_acked/3'
+%% makes, asked of one handler.
+satisfied({Pid, Module}, Acked, Version) ->
+    max(maps:get(Pid, Acked, -1), maps:get(Module, Acked, -1)) >= Version.
 
 %% @private Take this stream's acks and drops out of the mailbox, after
 %% leaving the group. `after 0', so an empty mailbox costs nothing.

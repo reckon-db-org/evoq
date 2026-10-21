@@ -32,6 +32,11 @@ projection writing to SQLite after the test's sandbox owner had exited.
   its deadline for a write that will never happen. A projection declining an
   event it does not want (`{skip, State, ReadModel}` from `project/4`) is a
   decision, not a drop: it acks.
+- **A drop counts only inside the dispatch's own append.** The router passes
+  the range of versions its append produced (`await/4`'s `first_version`), so a
+  drop above it belongs to the next command and one below it was answered for
+  before this append. Inside it, a drop fails the wait even when the same
+  handler wrote a later version of that append.
 - **A handler on another node is not in the required set.** The event type
   registry is a cluster-wide `pg` scope, so it names members on every
   connected node, while the router delivers only to local pids; waiting for a

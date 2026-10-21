@@ -327,21 +327,27 @@ handle_consistency(Pipeline, Context, Waiter, Version) ->
         %% from the registry the event router delivers by (evoq#23). Until
         %% evoq 1.29 it resolved to an empty set and answered at once.
         {strong, {ok, _, Appended}} ->
-            await(evoq_consistency:required(Appended), Waiter, Version, Timeout, Response);
-        {{handlers, Handlers}, {ok, _, _Appended}} ->
-            await(Handlers, Waiter, Version, Timeout, Response);
+            await(evoq_consistency:required(Appended), Waiter, Version, Timeout,
+                  Response, Appended);
+        {{handlers, Handlers}, {ok, _, Appended}} ->
+            await(Handlers, Waiter, Version, Timeout, Response, Appended);
         _ ->
             Response
     end.
 
 %% @private
-await([], _Waiter, _Version, _Timeout, Response) ->
+await([], _Waiter, _Version, _Timeout, Response, _Appended) ->
     %% Nothing is subscribed to what was appended: there is no handler that
     %% could still be behind, which is an answer, not a timeout.
     Response;
-await(Required, Waiter, Version, Timeout, Response) ->
+await(Required, Waiter, Version, Timeout, Response, Appended) ->
+    %% The append's own range of versions. A handler that dropped one of these
+    %% events is a hole this dispatch must report, and one that dropped a
+    %% later command's event says nothing about this one.
+    First = Version - length(Appended) + 1,
     consistency_outcome(
-        evoq_consistency:await(Waiter, Required, Version, #{timeout => Timeout}), Response).
+        evoq_consistency:await(Waiter, Required, Version,
+                               #{timeout => Timeout, first_version => First}), Response).
 
 %% @private Map a consistency wait outcome onto the response.
 consistency_outcome(ok, Response) -> Response;

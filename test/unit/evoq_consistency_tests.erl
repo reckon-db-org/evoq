@@ -150,6 +150,37 @@ a_drop_by_another_handler_does_not_end_the_wait_test() ->
                  evoq_consistency:await(Waiter, [waited_handler], 5, #{timeout => 100})),
     ok = evoq_consistency:close(Waiter).
 
+%% A DROP FROM THE NEXT APPEND IS NOT THIS DISPATCH'S. A stream is a sequence
+%% of appends, and a handler that dropped version 6 says nothing about version
+%% 5, which it wrote. One handler's messages arrive in order, so a drop above
+%% the version this dispatch produced can only be a later command's.
+a_drop_above_this_dispatch_s_range_does_not_fail_it_test() ->
+    Waiter = evoq_consistency:open(test_store, <<"s-range-later">>),
+    ok = evoq_consistency:acknowledge(writing_handler, test_store, <<"s-range-later">>, 5),
+    ok = evoq_consistency:dropped(
+           writing_handler, #{store_id => test_store, stream_id => <<"s-range-later">>,
+                              stream_version => 6}),
+    async_ack(other_required_handler, <<"s-range-later">>, 5),
+    ?assertEqual(ok, evoq_consistency:await(
+                       Waiter, [writing_handler, other_required_handler], 5,
+                       #{timeout => 2000, first_version => 5})),
+    ok = evoq_consistency:close(Waiter).
+
+%% AND A DROP INSIDE IT FAILS THE WAIT EVEN WHEN THE HANDLER WROTE A LATER
+%% VERSION OF THE SAME APPEND. One command appending versions 4 and 5 is one
+%% dispatch: a handler that dropped 4 has a hole the caller must hear about,
+%% and the ack of 5 must not paper over it.
+a_drop_inside_this_append_fails_the_wait_after_a_later_write_test() ->
+    Waiter = evoq_consistency:open(test_store, <<"s-range-multi">>),
+    ok = evoq_consistency:dropped(
+           multi_handler, #{store_id => test_store, stream_id => <<"s-range-multi">>,
+                            stream_version => 4}),
+    ok = evoq_consistency:acknowledge(multi_handler, test_store, <<"s-range-multi">>, 5),
+    ?assertEqual({error, {dropped, multi_handler}},
+                 evoq_consistency:await(Waiter, [multi_handler], 5,
+                                        #{timeout => 2000, first_version => 4})),
+    ok = evoq_consistency:close(Waiter).
+
 %%====================================================================
 %% Acks the wait did not need
 %%====================================================================
@@ -203,6 +234,15 @@ await_drop(Waiter, Module, Version) ->
         Self ! dropped
     end),
     evoq_consistency:await(Waiter, [Module], Version, #{timeout => 5000}).
+
+%% An ack from another process, after a short wait, so the wait is already
+%% listening when it arrives: what the drops in between are judged against.
+async_ack(Module, StreamId, Version) ->
+    _ = spawn(fun() ->
+                  timer:sleep(50),
+                  ok = evoq_consistency:acknowledge(Module, test_store, StreamId, Version)
+              end),
+    ok.
 
 %% A pid whose node is another one, which no local node can join to a pg
 %% group (`{nolocal, Pid}'): what a cluster-wide group names for a member

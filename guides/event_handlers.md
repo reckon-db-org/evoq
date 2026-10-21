@@ -294,6 +294,13 @@ later and less clearly. A projection that deliberately declines an event it
 does not want (returning `{skip, State, ReadModel}` from `project/4`) is not
 a drop: it decided, it wrote nothing, and it acks.
 
+A drop counts for a dispatch only inside the range of versions its own append
+produced. A stream carries every command's appends, so a drop above that range
+is the next command's, and one below it was answered for before this append
+began. Inside the range it fails the wait even when the same handler went on to
+write a later version of the append, because the event it dropped is exactly the
+one the read model is missing.
+
 A handler on another node is not in the set. The event type registry is a
 cluster-wide `pg` scope, so it names members on every connected node, while
 the event router delivers only to local pids; waiting for a remote pid would
