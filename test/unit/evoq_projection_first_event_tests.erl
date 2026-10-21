@@ -35,15 +35,25 @@ first_event_is_projected_when_the_store_has_no_checkpoint_yet_test() ->
     ?assertEqual([1], projected(Pid)),
     stop(Pid).
 
+%% A stored checkpoint means the boot resume reads the store from that
+%% checkpoint, so the store has to answer: an unreachable one halts the
+%% projection (it cannot catch up), which is a different test.
 a_stored_checkpoint_still_skips_what_it_already_covers_test() ->
     ensure_registry(),
     set_stored({ok, 0}),
-    {ok, Pid} = evoq_projection:start_link(?MODULE, #{},
-                                           #{checkpoint_store => ?MODULE}),
-    ok = evoq_projection:notify(Pid, ?TYPE, event(1), #{version => 0}),
-    ok = evoq_projection:notify(Pid, ?TYPE, event(2), #{version => 1}),
-    ?assertEqual([2], projected(Pid)),
-    stop(Pid).
+    meck:new(evoq_event_store, [passthrough]),
+    try
+        meck:expect(evoq_event_store, read_all_global,
+                    fun(_Store, _Offset, _Batch) -> {ok, []} end),
+        {ok, Pid} = evoq_projection:start_link(?MODULE, #{},
+                                               #{checkpoint_store => ?MODULE}),
+        ok = evoq_projection:notify(Pid, ?TYPE, event(1), #{version => 0}),
+        ok = evoq_projection:notify(Pid, ?TYPE, event(2), #{version => 1}),
+        ?assertEqual([2], projected(Pid)),
+        stop(Pid)
+    after
+        meck:unload(evoq_event_store)
+    end.
 
 %% A module that exports neither load/1 nor save/2 stands in for a store
 %% that cannot load: `lists' is always loaded and has neither.

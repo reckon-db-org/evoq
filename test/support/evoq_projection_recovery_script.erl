@@ -5,11 +5,23 @@
 %% same event, or the two tests would not be testing the same thing.
 -module(evoq_projection_recovery_script).
 
--export([reset/0, fail_times/2, take_failure/1, set_action/1, action/0]).
+-export([reset/0, fail_times/2, take_failure/1, set_action/1, action/0,
+         raise_on/1, raise_on/0]).
 
 reset() ->
     persistent_term:put({?MODULE, failures}, #{}),
-    persistent_term:put({?MODULE, action}, skip).
+    persistent_term:put({?MODULE, action}, skip),
+    persistent_term:put({?MODULE, raise_on}, undefined).
+
+%% Raise (not return {error, _}) on event N, every time it is projected.
+%% A raise is the common way a projection fails - a badmatch, a badkey, a
+%% failing {ok, _} = ... - and it took a different path out of the
+%% framework than {error, _} did.
+raise_on(N) ->
+    persistent_term:put({?MODULE, raise_on}, N).
+
+raise_on() ->
+    persistent_term:get({?MODULE, raise_on}, undefined).
 
 %% Fail event N Count more times, then let it through.
 fail_times(N, Count) ->

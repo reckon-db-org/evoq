@@ -116,7 +116,17 @@
     %% again: a rebuild replays the whole log, and replaying it on top of
     %% state that already reflects it counted every event twice. (Last in
     %% the record so the field order callers rely on does not move.)
-    config :: map()
+    config :: map(),
+    %% Why this projection stopped projecting, or undefined while it is
+    %% healthy. A projection that could not catch up at boot, or whose
+    %% on_error/4 answered stop, is HALTED: it keeps the checkpoint it
+    %% reached, it answers every later event with {error, {halted, Reason}}
+    %% instead of projecting it, and a successful rebuild/1 clears it. The
+    %% flag is what makes "halted and behind" a state rather than a log
+    %% line - without it the projection kept serving and moved the
+    %% checkpoint past the event it had refused, which is exactly the
+    %% permanent hole the resume exists to remove.
+    halted :: undefined | term()
 }).
 
 %%====================================================================
@@ -216,28 +226,44 @@ init({ProjectionModule, Config, Opts}) ->
 %%
 %% A projection never refuses to boot. One that cannot catch up comes up
 %% halted and behind: the state carries the checkpoint it actually reached,
-%% the halt is logged and counted in telemetry, and a rebuild recovers it.
-%% Refusing would turn one poison event into a restart loop, and a statically
-%% supervised projection into a failed application boot.
-start_projection(#state{event_types = EventTypes} = State) ->
+%% `halted' says why, the halt is logged and counted in telemetry once, and
+%% a rebuild after the cause is fixed recovers it. Refusing would turn one
+%% poison event into a restart loop, and a statically supervised projection
+%% into a failed application boot.
+%%
+%% A halt in the first pass skips the second: the same poison event would
+%% halt it too and the operator would get two error logs and two
+%% [evoq, projection, halted] events for one failure.
+start_projection(#state{event_types = EventTypes, projection_module = ProjectionModule} = State) ->
+    %% Before the catch-up, not after: a dashboard that reads [evoq,
+    %% projection, event] for a long resume should not see it arrive before
+    %% the projection has said it started.
+    telemetry:execute(?TELEMETRY_PROJECTION_START, #{}, #{
+        projection => ProjectionModule
+    }),
+
     {Resumed, FirstStatus} = resume_after_checkpoint(State),
 
     ok = evoq_event_type_registry:register_all(EventTypes, self()),
 
-    telemetry:execute(?TELEMETRY_PROJECTION_START, #{}, #{
-        projection => State#state.projection_module
-    }),
-
-    {Final, SecondStatus} = resume_after_checkpoint(Resumed),
-
-    report_halt(State#state.projection_module, FirstStatus),
-    report_halt(State#state.projection_module, SecondStatus),
+    Final = note_halt(second_pass(Resumed, FirstStatus)),
     {ok, Final}.
 
-%% @private
-report_halt(_ProjectionModule, ok) ->
-    ok;
-report_halt(ProjectionModule, {halted, Reason}) ->
+%% @private The second replay pass, or the first pass's verdict if it halted.
+second_pass(State, ok) ->
+    resume_after_checkpoint(State);
+second_pass(State, {halted, _} = Halted) ->
+    {State, Halted}.
+
+%% @private Record the verdict of the boot resume, saying so once.
+note_halt({State, ok}) ->
+    State#state{halted = undefined};
+note_halt({State, {halted, Reason}}) ->
+    report_halt(State#state.projection_module, Reason),
+    State#state{halted = Reason}.
+
+%% @private Say that the projection halted, once, with the reason it halted.
+report_halt(ProjectionModule, Reason) ->
     logger:error(#{what => evoq_projection_halted_behind,
                    projection => ProjectionModule,
                    error => Reason}),
@@ -260,17 +286,37 @@ handle_call(get_read_model, _From, #state{read_model = RM} = State) ->
 handle_call({rebuild, _Opts}, _From, State) ->
     case do_rebuild(State) of
         {NewState, ok} ->
-            {reply, ok, NewState};
+            %% The replay reached the end: whatever halted it before is
+            %% gone, so the projection projects again.
+            {reply, ok, NewState#state{halted = undefined}};
         {NewState, {halted, Reason}} ->
             %% The read model is cleared and the replay stopped part-way.
             %% Keep what the replay reached: the old state no longer
             %% matches the empty read model, and replying ok would serve a
-            %% partial read model as a complete one.
-            {reply, {error, Reason}, NewState};
+            %% partial read model as a complete one. The projection stays
+            %% halted, now on what the rebuild hit.
+            {reply, {error, Reason}, NewState#state{halted = Reason}};
+        {init_failed, Reason} ->
+            %% init/1 could not give us a state to match the cleared read
+            %% model, and there is no honest state to carry, so this stops
+            %% the way a boot whose init/1 fails does; the supervisor
+            %% restarts it and init/1 runs again.
+            {stop, Reason, {error, Reason}, State};
         {error, Reason} ->
             %% Nothing was cleared, so nothing has changed.
             {reply, {error, Reason}, State}
     end;
+
+%% @private A halted projection answers every later event the same way.
+%%
+%% It is registered (that is how the router reaches it), so the events keep
+%% arriving; projecting them would serve a read model with a hole and move
+%% the checkpoint past the event the projection refused, which is the
+%% permanent loss this whole path exists to prevent. The router logs the
+%% error reply, which is the standing signal to rebuild.
+handle_call({notify, _EventType, _Event, _Metadata}, _From,
+            #state{halted = Reason} = State) when Reason =/= undefined ->
+    {reply, {error, {halted, Reason}}, State};
 
 handle_call({notify, EventType, Event, Metadata}, _From, State) ->
     case handle_event_internal(EventType, Event, Metadata, State) of
@@ -370,7 +416,7 @@ project_with_retry(EventType, Event, Metadata, EventVersion, FailureContext, Sta
 
     %% Call the projection
     FullEvent = Event#{event_type => EventType},
-    case ProjectionModule:project(FullEvent, Metadata, ProjectionState, ReadModel) of
+    case call_project(ProjectionModule, FullEvent, Metadata, ProjectionState, ReadModel) of
         {ok, NewProjectionState, NewReadModel} ->
             project_succeeded(EventType, EventVersion, NewProjectionState, NewReadModel,
                               StartTime, State);
@@ -384,6 +430,29 @@ project_with_retry(EventType, Event, Metadata, EventVersion, FailureContext, Sta
         {error, Reason} ->
             projection_failed(EventType, Event, Metadata, EventVersion, Reason,
                               StartTime, FailureContext, State)
+    end.
+
+%% @private Call project/4 so that a raise is an error like any other.
+%%
+%% Without this, a projection that raises - a badmatch, a badkey, a failing
+%% `{ok, RM2} = evoq_read_model:put(...)` - escaped through the replay's
+%% `try ... of' body (which does not cover it) and killed the process inside
+%% init/1: a restart loop at boot, and `rebuild/1` exiting its caller. A
+%% raise is the common way a projection fails, so "a raise and {error,_}
+%% report the same way" only became true once project/4 ran inside a try.
+%% The stacktrace is logged here; what on_error/4 and telemetry see is the
+%% class and the reason.
+call_project(ProjectionModule, Event, Metadata, ProjectionState, ReadModel) ->
+    try
+        ProjectionModule:project(Event, Metadata, ProjectionState, ReadModel)
+    catch
+        Class:Reason:Stack ->
+            logger:error(#{what => evoq_projection_raised,
+                           projection => ProjectionModule,
+                           class => Class,
+                           reason => Reason,
+                           stacktrace => Stack}),
+            {error, {Class, Reason}}
     end.
 
 %% @private
@@ -551,13 +620,12 @@ rebuild_with_fresh_state(ProjectionModule, Config, ClearedRM, EventTypes, State)
 
         {error, Reason} ->
             %% The read model is already cleared and the checkpoint at -1,
-            %% and init/1 could not give us a state to match them with. The
-            %% caller is told the rebuild failed and the projection keeps
-            %% the cleared state it has: serving from the state that
-            %% belonged to the old data would be worse than being empty and
-            %% saying so.
-            {State#state{read_model = ClearedRM, checkpoint = -1},
-             {halted, {rebuild_init_failed, ProjectionModule, Reason}}}
+            %% and init/1 could not give us a state to match them with.
+            %% There is no honest state to carry over an empty read model -
+            %% the old one describes data that is gone - so this stops, the
+            %% same way a boot whose init/1 fails stops. The supervisor
+            %% restarts it and init/1 runs again.
+            {init_failed, {rebuild_init_failed, ProjectionModule, Reason}}
     end.
 
 %% @private
@@ -618,7 +686,13 @@ replay_page(StoreId, EventTypes, Offset, BatchSize, State) ->
             {State, {halted, {read_all_global, Reason}}}
     catch
         Class:Reason:Stack ->
-            {State, {halted, {Class, Reason, Stack}}}
+            %% The stack goes to the log, not into the value the caller and
+            %% the telemetry metadata get.
+            logger:error(#{what => evoq_projection_replay_raised,
+                           class => Class,
+                           reason => Reason,
+                           stacktrace => Stack}),
+            {State, {halted, {Class, Reason}}}
     end.
 
 next_page({ok, State}, true, _StoreId, _EventTypes, _Offset, _BatchSize) ->
@@ -675,11 +749,22 @@ load_checkpoint(true, ProjectionModule, CheckpointStore) ->
 load_checkpoint(false, _ProjectionModule, _CheckpointStore) ->
     -1.
 
-%% A store with nothing saved yet (every projection's first boot) means
-%% nothing has been projected: -1, the same as having no store at all.
-%% This read 0, which made version 0 look already covered and dropped the
-%% first event without a word.
-checkpoint_value({ok, Checkpoint}) -> Checkpoint;
+%% A store with nothing saved yet (every projection's first boot) answers
+%% `{error, not_found}': nothing projected, so -1, the same as having no
+%% store at all. This read 0, which made version 0 look already covered and
+%% dropped the first event without a word.
+%%
+%% Anything else that is not a position is also answered as "nothing
+%% projected", with a warning, because the alternative is silent death:
+%% `0 =< undefined' is true in Erlang (numbers sort below atoms), so a
+%% checkpoint of `undefined' marked EVERY event as already projected and the
+%% projection served nothing, forever, without a line.
+checkpoint_value({ok, Checkpoint}) when is_integer(Checkpoint) ->
+    Checkpoint;
+checkpoint_value({ok, Other}) ->
+    logger:warning(#{what => evoq_projection_bad_checkpoint,
+                     checkpoint => Other}),
+    -1;
 checkpoint_value({error, _}) -> -1.
 
 %% @private A checkpoint save is the projection's progress, and the one

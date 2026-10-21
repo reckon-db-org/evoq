@@ -58,16 +58,47 @@ for the length of the catch-up. Replaying first, registering, then replaying
 again from the position reached closes the gap without that stall; the
 checkpoint dedupe makes the overlap free.
 
-**A projection never refuses to boot.** One that cannot catch up - a poison
-event whose `on_error/4` answers `stop`, a store it cannot read - comes up
-halted and behind: the state carries the checkpoint it actually reached, the
-halt is logged (`evoq_projection_halted_behind`) and counted
-(`[evoq, projection, halted]`), and a rebuild recovers it. Before, the resume
+**A projection never refuses to boot, and a halted one stays halted.** One
+that cannot catch up - a poison event whose `on_error/4` answers `stop`, a
+store it cannot read - comes up halted and behind: the state carries the
+checkpoint it actually reached and a `halted` reason, the halt is logged
+(`evoq_projection_halted_behind`) and counted (`[evoq, projection, halted]`)
+once, and a rebuild after the cause is fixed recovers it. Before, the resume
 ran in `init/1` and answered `{stop, _}`: a statically supervised projection
 failed the application's boot, and a restarted one looped on the same event.
-A raise in `project/4` and an `{error, _}` from it now report the same way,
-and a store that answers `{error, _}` halts the replay instead of reporting
-an empty success.
+
+While halted it answers every later event `{error, {halted, Reason}}` instead
+of projecting it. That is not politeness: the process is registered, so the
+events keep arriving, and projecting them would move the checkpoint past the
+event the projection refused - the permanent, silent hole this whole path
+exists to remove. A store that answers `{error, _}` halts the replay the same
+way, instead of reporting an empty success.
+
+**A raise in `project/4` is a failure like any other.** It used to escape -
+the call sits in the `of` body of the replay's `try`, which the catch does not
+cover - and killed `init/1` (restart loop at boot) or the caller of
+`rebuild/1`. It now goes through `on_error/4` with `{Class, Reason}`, with the
+stacktrace in the log, live and during a replay. A raise is the common way a
+projection fails (a badmatch, a badkey, a failing `{ok, _} = ...`), so the
+parity between a raise and an `{error, _}` is what makes "never refuses to
+boot" true.
+
+**A checkpoint that is not a position no longer kills the projection.** A
+store answering `{ok, undefined}` put `undefined` in the checkpoint, and
+`0 =< undefined` is true in Erlang (numbers sort below atoms): every event
+read as already projected, forever, in silence. Anything that is not an
+integer is answered as "nothing projected" with a warning
+(`evoq_projection_bad_checkpoint`).
+
+**A rebuild whose `init/1` fails stops the projection** instead of keeping
+the old projection state over a read model that has already been emptied, and
+the comment, the code and the guide now say the same thing. The supervisor
+restarts it and `init/1` runs again.
+
+**`evoq_aggregate:execute_command/2` mints the command's ids**, as the
+command router already did: a caller that talks to an aggregate directly gets
+a `command_id` and a `correlation_id` instead of events stamped with
+`undefined`. Both paths are idempotent.
 
 **The checkpoint store was probed before it was loaded.** A store named in
 `Opts` had usually never been called, so `function_exported/3` answered

@@ -16,7 +16,12 @@ init(_Config) ->
     {ok, [], RM}.
 
 project(#{data := #{n := N}}, _Metadata, Seen, RM) ->
-    case evoq_projection_recovery_script:take_failure(N) of
-        true -> {error, {boom, N}};
-        false -> {ok, Seen ++ [N], RM}
+    case evoq_projection_recovery_script:raise_on() of
+        N ->
+            error({scripted_raise, N});
+        _ ->
+            case evoq_projection_recovery_script:take_failure(N) of
+                true -> {error, {boom, N}};
+                false -> {ok, Seen ++ [N], RM}
+            end
     end.

@@ -22,6 +22,7 @@
 
 -include_lib("eunit/include/eunit.hrl").
 -include("evoq_types.hrl").
+-include("evoq_telemetry.hrl").
 
 -export([interested_in/0, init/1, project/4, on_error/4]).
 
@@ -152,24 +153,88 @@ a_restarted_projection_resumes_from_its_checkpoint_test_() ->
 %% boot. Before this, the resume ran in init/1 and answered {stop, _}: a
 %% statically supervised projection failed the whole application's boot, and
 %% a restarted one looped on the same event forever. It comes up halted and
-%% behind now - the checkpoint says where it stopped - and says so.
+%% behind now - the checkpoint says where it stopped - and it does not
+%% project again until it is rebuilt.
+%%
+%% The script and the store's answer are set BEFORE start_link: the boot
+%% resume runs inside init/1, so a mock arranged afterwards was never hit and
+%% the assertions below held on a projection that had read nothing.
 a_poison_event_on_resume_boots_halted_and_behind_test_() ->
-    with_checkpointed_projection(?MODULE, [evoq_event_store],
-                                 evoq_projection_resume_checkpoint, fun(Pid) ->
-        meck:expect(evoq_event_store, read_all_global,
-                    fun(_Store, Offset, _Batch) ->
-                        Store = [{1, stored_event(2, 1)}, {2, stored_event(3, 2)}],
-                        {ok, [E || {Pos, E} <- Store, Pos >= Offset]}
-                    end),
-        %% The first replayed event fails and on_error/4 says stop.
-        fail_times(2, 5),
-        set_action(stop),
+    with_prepared_projection(
+      ?MODULE, [evoq_event_store],
+      #{checkpoint_store => evoq_projection_resume_checkpoint},
+      fun() ->
+              meck:expect(evoq_event_store, read_all_global,
+                          fun(_Store, Offset, _Batch) ->
+                                  Store = [{1, stored_event(2, 1)},
+                                           {2, stored_event(3, 2)}],
+                                  {ok, [E || {Pos, E} <- Store, Pos >= Offset]}
+                          end),
+              %% The first replayed event fails and on_error/4 says stop.
+              fail_times(2, 5),
+              set_action(stop),
+              attach_halted_telemetry()
+      end,
+      fun(Pid) ->
+              ?assert(is_process_alive(Pid)),
+              %% Nothing was projected, and the checkpoint is the one it
+              %% resumed from: behind, not pretending.
+              ?assertEqual([], projected(Pid)),
+              ?assertEqual(0, evoq_projection:get_checkpoint(Pid)),
+              %% One halt, logged and counted once: the second pass is
+              %% skipped, or the same poison would be reported twice.
+              ?assertEqual(1, halted_telemetry_count()),
+              %% And it IS halted: the next live event is refused instead of
+              %% being projected over the hole and pulling the checkpoint
+              %% past the event the projection refused.
+              ?assertMatch({error, {halted, _}},
+                           evoq_projection:notify(Pid, ?TYPE, event(7),
+                                                  #{global_position => 5})),
+              ?assertEqual([], projected(Pid)),
+              ?assertEqual(0, evoq_projection:get_checkpoint(Pid))
+      end).
 
-        ?assert(is_process_alive(Pid)),
-        %% Nothing was projected, and the checkpoint is the one it resumed
-        %% from: behind, not pretending.
+%% A raise in project/4 during the resume is a failure like any other, not
+%% an exit: it goes through on_error/4, which here says stop, and the
+%% projection halts instead of refusing to boot. Before this, the raise
+%% escaped `try read_all_global(...) of ...' - the `of' body is not covered
+%% by the catch - and killed init/1.
+a_raise_on_resume_halts_instead_of_refusing_to_boot_test_() ->
+    with_prepared_projection(
+      ?MODULE, [evoq_event_store],
+      #{checkpoint_store => evoq_projection_resume_checkpoint},
+      fun() ->
+              meck:expect(evoq_event_store, read_all_global,
+                          fun(_Store, Offset, _Batch) ->
+                                  Store = [{1, stored_event(2, 1)}],
+                                  {ok, [E || {Pos, E} <- Store, Pos >= Offset]}
+                          end),
+              raise_on(2),
+              set_action(stop),
+              attach_halted_telemetry()
+      end,
+      fun(Pid) ->
+              ?assert(is_process_alive(Pid)),
+              ?assertEqual([], projected(Pid)),
+              ?assertEqual(0, evoq_projection:get_checkpoint(Pid)),
+              ?assertEqual(1, halted_telemetry_count()),
+              ?assertMatch({error, {halted, _}},
+                           evoq_projection:notify(Pid, ?TYPE, event(7),
+                                                  #{global_position => 5}))
+      end).
+
+%% And while it is live: a raise is reported through on_error/4 like an
+%% {error, _}, so `skip' skips it and the process keeps running. Before this
+%% a raise in project/4 exited the gen_server and the caller with it.
+a_raise_while_live_goes_through_on_error_test_() ->
+    with_projection(fun(Pid) ->
+        raise_on(1),
+        set_action(skip),
+        ?assertEqual(ok, evoq_projection:notify(Pid, ?TYPE, event(1),
+                                                #{version => 0})),
         ?assertEqual([], projected(Pid)),
-        ?assertEqual(0, evoq_projection:get_checkpoint(Pid))
+        ?assertEqual(0, evoq_projection:get_checkpoint(Pid)),
+        ?assert(is_process_alive(Pid))
     end).
 
 %% The catch-up must not stall the node. It runs before the projection
@@ -217,6 +282,14 @@ resume_before_registration() ->
                   after 5000 -> ?assert(false)
                   end,
 
+        %% The SECOND pass runs after registration: same process, and it
+        %% must see itself registered.
+        receive
+            {read_seen, ProjPid, SecondWasRegistered} ->
+                ?assertEqual(true, SecondWasRegistered)
+        after 5000 -> ?assert(false)
+        end,
+
         {started, StartedPid} = receive {started, P0} -> {started, P0}
                                  after 5000 -> ?assert(false) end,
         ?assertEqual(ProjPid, StartedPid),
@@ -248,9 +321,14 @@ init(_Config) ->
     {ok, [], RM}.
 
 project(#{data := #{n := N}}, _Metadata, Seen, RM) ->
-    case evoq_projection_recovery_script:take_failure(N) of
-        true -> {error, {boom, N}};
-        false -> {ok, Seen ++ [N], RM}
+    case evoq_projection_recovery_script:raise_on() of
+        N ->
+            error({scripted_raise, N});
+        _ ->
+            case evoq_projection_recovery_script:take_failure(N) of
+                true -> {error, {boom, N}};
+                false -> {ok, Seen ++ [N], RM}
+            end
     end.
 
 on_error(_Reason, _Event, _FailureContext, _State) ->
@@ -273,22 +351,63 @@ with_checkpointed_projection(Module, Mecked, CheckpointStore, Fun) ->
 %% {timeout, _, Fun} returned from *inside* a running test is just a value,
 %% and a test that returns it passes without ever running.
 with_projection(Module, Mecked, Opts, Fun) ->
+    with_prepared_projection(Module, Mecked, Opts, fun() -> ok end, Fun).
+
+%% As with_projection/4, but Prepare runs after the mecks are in place and
+%% before start_link - which is what a test of the BOOT path needs, since the
+%% resume runs inside init/1.
+with_prepared_projection(Module, Mecked, Opts, Prepare, Fun) ->
     {timeout, 60, fun() ->
         [ok = meck:new(M, [passthrough]) || M <- Mecked],
         ensure_registry(),
         reset_script(),
-        {ok, Pid} = evoq_projection:start_link(Module, #{}, Opts),
         try
-            Fun(Pid)
+            ok = Prepare(),
+            {ok, Pid} = evoq_projection:start_link(Module, #{}, Opts),
+            try
+                Fun(Pid)
+            after
+                stop(Pid)
+            end
         after
-            stop(Pid),
+            detach_halted_telemetry(),
             [meck:unload(M) || M <- Mecked]
         end
     end}.
 
+%% Count [evoq, projection, halted] events for the current test.
+attach_halted_telemetry() ->
+    Test = self(),
+    Ref = make_ref(),
+    persistent_term:put({?MODULE, halted_ref}, Ref),
+    telemetry:attach(Ref, ?TELEMETRY_PROJECTION_HALTED,
+                     fun(_Event, _Measurements, Metadata, Pid) ->
+                             Pid ! {halted_telemetry, Metadata}
+                     end, Test),
+    ok.
+
+halted_telemetry_count() ->
+    halted_telemetry_count(0).
+
+halted_telemetry_count(N) ->
+    receive
+        {halted_telemetry, _Metadata} -> halted_telemetry_count(N + 1)
+    after 200 -> N
+    end.
+
+detach_halted_telemetry() ->
+    case persistent_term:get({?MODULE, halted_ref}, undefined) of
+        undefined -> ok;
+        Ref ->
+            catch telemetry:detach(Ref),
+            persistent_term:erase({?MODULE, halted_ref}),
+            ok
+    end.
+
 reset_script() -> evoq_projection_recovery_script:reset().
 fail_times(N, Count) -> evoq_projection_recovery_script:fail_times(N, Count).
 set_action(Action) -> evoq_projection_recovery_script:set_action(Action).
+raise_on(N) -> evoq_projection_recovery_script:raise_on(N).
 
 %%====================================================================
 %% Helpers
@@ -312,6 +431,9 @@ projected(Pid) ->
     element(3, sys:get_state(Pid)).
 
 ensure_registry() ->
+    %% telemetry:attach/4 needs the app; a module run on its own has not
+    %% started it, and the halt assertion reads its events.
+    {ok, _} = application:ensure_all_started(telemetry),
     case whereis(evoq_event_type_registry) of
         undefined -> {ok, _} = evoq_event_type_registry:start_link(), ok;
         _ -> ok

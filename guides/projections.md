@@ -376,19 +376,32 @@ up in the log.
 
 ### A projection that comes up halted and behind
 
-A projection never refuses to boot. If the catch-up at start (or the second
-pass after it registers) stops on an event - the `stop` action above, or a
-`raise` in `project/4`, which is reported the same way - the projection comes
-up **halted and behind**: its state carries the checkpoint it actually
-reached, it serves nothing past that point, and it says so twice:
+A projection never refuses to boot. It catches up at start in two passes -
+one before it registers (so a long catch-up does not hold up the node's
+event router), one after, from the position the first pass reached. The
+second pass runs while registered, so the router waits on it for the length
+of the second pass; that is bounded by what was appended while the first pass
+ran, which is nothing at all for a projection whose first pass was short. If
+either pass stops on an event - the `stop` action above, or a `raise` in
+`project/4`, which is reported exactly like an `{error, _}` - the projection
+comes up **halted and behind**:
 
-- a log line with `what => evoq_projection_halted_behind`, the `projection`
-  module and the `error`;
-- the `[evoq, projection, halted]` telemetry event, same metadata.
+- the checkpoint is the one the replay actually reached; nothing after it is
+  projected, and the checkpoint never moves past it;
+- `halted` in its state carries the reason, so every later event is answered
+  `{error, {halted, Reason}}` instead of being projected (the event router
+  logs that reply as `evoq_handler_returned_error`). Without this the next
+  successful event would move the checkpoint past the event the projection
+  refused, and the gap would be permanent and silent;
+- it says so once: a log line with
+  `what => evoq_projection_halted_behind`, the `projection` module and the
+  `error`, and the `[evoq, projection, halted]` telemetry event with the
+  same metadata. (Once, not twice: a halt in the first pass skips the
+  second, which would halt on the same event.)
 
 Refusing to start would turn one poison event into a restart loop and, for a
 statically supervised projection, into a failed application boot. Coming up
-behind keeps the failure where the event is.
+halted keeps the failure where the event is.
 
 The way out is a rebuild, once the cause is fixed - repair the data, or ship
 the projection fix:
@@ -398,8 +411,13 @@ ok = evoq_projection:rebuild(ProjectionPid).
 ```
 
 That clears the read model, sets the checkpoint back to -1 and replays
-everything (see the next section). Until then the projection's checkpoint
-does not advance, which is visible in `[evoq, projection, checkpoint]`.
+everything (see the next section), and on success it clears `halted`. Until
+then the checkpoint does not advance, which is visible in
+`[evoq, projection, checkpoint]`.
+
+A rebuild of a projection whose `init/1` fails stops the process rather than
+serving the old state over an emptied read model; the supervisor restarts it
+and `init/1` runs again.
 
 ## Rebuilding Projections
 

@@ -76,6 +76,13 @@ start_link(AggregateModule, AggregateId, StoreId) ->
 
 %% @doc Execute a command against an aggregate.
 %%
+%% The command's ids are ensured here (`evoq_command:ensure_id/1'), exactly
+%% as the command router does for a dispatched command: a caller that talks
+%% to an aggregate directly gets the same minted `command_id' and
+%% `correlation_id' instead of events stamped with `undefined'. Both paths
+%% are idempotent, so a command that already went through the router is
+%% unchanged.
+%%
 %% AN AGGREGATE THAT CANNOT ANSWER IS AN ERROR HERE, NOT AN EXIT FOR ITS
 %% CALLER. The store load runs after init (see handle_continue/2), so a store
 %% that cannot be read takes this process down while a caller is waiting on it.
@@ -84,7 +91,7 @@ start_link(AggregateModule, AggregateId, StoreId) ->
 -spec execute_command(pid(), #evoq_command{}) ->
     {ok, integer(), [map()]} | {error, term()}.
 execute_command(Pid, Command) ->
-    called(Pid, {execute, Command}).
+    called(Pid, {execute, evoq_command:ensure_id(Command)}).
 
 %% @doc Execute a command and return the post-event aggregate state.
 %%
@@ -94,7 +101,7 @@ execute_command(Pid, Command) ->
 -spec execute_command_with_state(pid(), #evoq_command{}) ->
     {ok, integer(), [map()], term()} | {error, term()}.
 execute_command_with_state(Pid, Command) ->
-    called(Pid, {execute_with_state, Command}).
+    called(Pid, {execute_with_state, evoq_command:ensure_id(Command)}).
 
 %% Catching an exit is otherwise frowned on in this codebase. What it buys is a
 %% whole class of store failures arriving as a value the command router already
