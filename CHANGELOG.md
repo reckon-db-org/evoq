@@ -27,6 +27,12 @@ projection.
 - The router passes the append's first version (`required/1` is gone; it is
   `required/2` now), and `{handlers, [...]}` still answers at the version the
   dispatch produced, which is what naming handlers rather than events means.
+- Documented, in `guides/event_handlers.md` and this module's own doc: a
+  cascade written as an `evoq_event_handler` must dispatch `:eventual`, not
+  `:strong`. It is itself in the required set of the dispatch that triggered
+  it, so waiting for the read model of the events it appends waits for the
+  projection still handling its own triggering event, and both dispatches end
+  at the deadline. Found in macula-realm with a membership cascade.
 
 ## [1.29.0] - 2026-10-21
 

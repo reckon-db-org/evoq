@@ -52,6 +52,20 @@
 %% could wait for does not exist when it dispatches. A process manager that
 %% needs its own writes seen dispatches and waits itself.
 %%
+%% == A handler that dispatches must not wait for its own event's handlers ==
+%%
+%% A cascade written as an `evoq_event_handler' (a module with
+%% `interested_in/0', which the event type registry does hold, unlike a
+%% process manager instance) is itself in the required set of the dispatch
+%% that triggered it. Dispatching from its `handle_event/4' with `strong'
+%% waits for the read models of the events it just appended, and the
+%% projection that would ack them is still handling the event that ran the
+%% cascade: it cannot pick up the new events until it returns, and the
+%% cascade cannot return until they are acked. Both dispatches end at their
+%% deadline with both writes made. A cascade dispatches `eventual': it does
+%% not read its own write, and the entry-point dispatch that triggered it is
+%% the one that asked for the guarantee.
+%%
 %% @author rgfaber
 -module(evoq_consistency).
 
@@ -332,7 +346,7 @@ acked_reply(false, #{store_id := StoreId, stream_id := StreamId} = Waiter,
 %% carries on: a drop by a handler this call does not wait for, one for an
 %% event outside this append's range of versions, or one by a handler that has
 %% already written the version this call waits for.
-drop_reply({Pid, Module} = Identity, DroppedVersion, Required, Waiter, Acked, Version,
+drop_reply({_Pid, _Module} = Identity, DroppedVersion, Required, Waiter, Acked, Version,
            Range, Deadline) ->
     Wanted = required_version(Identity, Required),
     ThisDispatch = Wanted =/= undefined,

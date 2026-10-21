@@ -314,6 +314,20 @@ instances handle an event is decided at delivery time (`correlate/2`, which
 may start one), so the set does not exist when the command is dispatched. A
 process manager that needs its own writes seen dispatches and waits itself.
 
+**A handler that dispatches must not wait, with `strong`, for the handlers of
+its own event.** A cascade written as an `evoq_event_handler` (a module with
+`interested_in/0`, which the event type registry does hold, unlike a process
+manager instance) is itself one of the handlers the dispatch that triggered it
+is waiting for. If it dispatches a command with `strong`, it waits for the
+read models of the events it just appended; the projection that would ack
+them is still handling the event that ran the cascade, and cannot pick up the
+new events until it returns. Nothing can end that wait: both dispatches reach
+their deadline with both writes made. A cascade dispatches `:eventual`, since
+it does not read its own write; the entry-point dispatch that triggered it is
+the one that asked for the guarantee. (Macula-realm found this with a realm
+membership's revocation: the manager that ends the person's clients waited on
+the same `realm_members` projection that was handling the revocation.)
+
 A wait that times out answers `{error, consistency_timeout}` rather than
 `{ok, ...}`: the command's events are appended either way, so a caller must
 treat that error as "written, but not yet seen by those handlers". The wait
