@@ -168,8 +168,9 @@ execute_and_finalize_with_state(Pipeline, Middleware, StartTime) ->
 %% @private
 execute_on_aggregate_with_state(Pipeline, Pid, Middleware, StartTime, Context) ->
     Command = Pipeline#evoq_pipeline.command,
+    Waiter = open_waiter(Context),
 
-    case evoq_aggregate:execute_command_with_state(Pid, Command) of
+    try evoq_aggregate:execute_command_with_state(Pid, Command) of
         {ok, Version, Events, AggState} ->
             BaseResult = {ok, Version, Events},
             Pipeline2 = evoq_middleware:assign(events, Events, Pipeline),
@@ -177,7 +178,7 @@ execute_on_aggregate_with_state(Pipeline, Pid, Middleware, StartTime, Context) -
             Pipeline4 = evoq_middleware:respond(BaseResult, Pipeline3),
             Pipeline5 = evoq_middleware:chain(Pipeline4, after_dispatch, Middleware),
 
-            ConsistencyResult = handle_consistency(Pipeline5, Context),
+            ConsistencyResult = handle_consistency(Pipeline5, Context, Waiter, Version),
             FinalResult = with_agg_state(ConsistencyResult, AggState),
             emit_stop_telemetry(StartTime, Command, ConsistencyResult),
             FinalResult;
@@ -187,6 +188,8 @@ execute_on_aggregate_with_state(Pipeline, Pid, Middleware, StartTime, Context) -
 
         {error, _Reason} = Error ->
             handle_failure(Pipeline, Error, Middleware, StartTime)
+    after
+        close_waiter(Waiter)
     end.
 
 %% @private Carry the post-command aggregate state into a successful result.
@@ -217,8 +220,9 @@ execute_and_finalize(Pipeline, Middleware, StartTime) ->
 %% @private
 execute_on_aggregate(Pipeline, Pid, Middleware, StartTime, Context) ->
     Command = Pipeline#evoq_pipeline.command,
+    Waiter = open_waiter(Context),
 
-    case evoq_aggregate:execute_command(Pid, Command) of
+    try evoq_aggregate:execute_command(Pid, Command) of
         {ok, Version, Events} = Result ->
             %% Success - run after_dispatch middleware
             Pipeline2 = evoq_middleware:assign(events, Events, Pipeline),
@@ -227,7 +231,7 @@ execute_on_aggregate(Pipeline, Pid, Middleware, StartTime, Context) ->
             Pipeline5 = evoq_middleware:chain(Pipeline4, after_dispatch, Middleware),
 
             %% Handle consistency
-            FinalResult = handle_consistency(Pipeline5, Context),
+            FinalResult = handle_consistency(Pipeline5, Context, Waiter, Version),
             emit_stop_telemetry(StartTime, Command, FinalResult),
             FinalResult;
 
@@ -237,6 +241,8 @@ execute_on_aggregate(Pipeline, Pid, Middleware, StartTime, Context) ->
 
         {error, _Reason} = Error ->
             handle_failure(Pipeline, Error, Middleware, StartTime)
+    after
+        close_waiter(Waiter)
     end.
 
 %% @private
@@ -283,11 +289,25 @@ handle_failure(Pipeline, Error, Middleware, StartTime) ->
 
     evoq_middleware:get_response(Pipeline4).
 
+%% @private Open the waiter BEFORE the append. An ack can only be sent to a
+%% waiter that is already a member of the stream's group, and a handler can
+%% finish before the router is back from the append: the window is small and
+%% real. `eventual' opens nothing, so a dispatch that does not ask for a
+%% guarantee pays nothing.
+open_waiter(#evoq_execution_context{consistency = eventual}) ->
+    undefined;
+open_waiter(#evoq_execution_context{store_id = StoreId, aggregate_id = AggregateId}) ->
+    evoq_consistency:open(StoreId, AggregateId).
+
 %% @private
-handle_consistency(Pipeline, Context) ->
+close_waiter(undefined) -> ok;
+close_waiter(Waiter) -> evoq_consistency:close(Waiter).
+
+%% @private
+handle_consistency(Pipeline, Context, Waiter, Version) ->
     Response = evoq_middleware:get_response(Pipeline),
     Consistency = Context#evoq_execution_context.consistency,
-    StoreId = Context#evoq_execution_context.store_id,
+    Timeout = Context#evoq_execution_context.timeout,
 
     case {Consistency, Response} of
         {eventual, _} ->
@@ -300,26 +320,28 @@ handle_consistency(Pipeline, Context) ->
         %% `Version' is the stream's existing one and no handler will ever ack
         %% it for this dispatch. Waiting could only ever end in the timeout,
         %% answering `{error, consistency_timeout}' where the aggregate had said
-        %% `{ok, Version, []}'. Same defect as evoq#16, one layer up.
-        %%
-        %% Only an explicit handler list reaches the wait at all: `strong'
-        %% passes `#{}' to `evoq_consistency:wait_for/4', whose default `all'
-        %% becomes an EMPTY required list, and `wait_loop/4' answers that at
-        %% once. This clause covers both.
+        %% `{ok, Version, []}'. Same defect as evoq#16.
         {_, {ok, _, []}} ->
             Response;
-        {strong, {ok, Version, _Events}} ->
-            AggregateId = Context#evoq_execution_context.aggregate_id,
-            consistency_outcome(
-                evoq_consistency:wait_for(StoreId, AggregateId, Version, #{}), Response);
-        {{handlers, Handlers}, {ok, Version, _Events}} ->
-            AggregateId = Context#evoq_execution_context.aggregate_id,
-            consistency_outcome(
-                evoq_consistency:wait_for(StoreId, AggregateId, Version, #{handlers => Handlers}),
-                Response);
+        %% STRONG WAITS FOR THE HANDLERS THE APPENDED EVENTS REACH, derived
+        %% from the registry the event router delivers by (evoq#23). Until
+        %% evoq 1.29 it resolved to an empty set and answered at once.
+        {strong, {ok, _, Appended}} ->
+            await(evoq_consistency:required(Appended), Waiter, Version, Timeout, Response);
+        {{handlers, Handlers}, {ok, _, _Appended}} ->
+            await(Handlers, Waiter, Version, Timeout, Response);
         _ ->
             Response
     end.
+
+%% @private
+await([], _Waiter, _Version, _Timeout, Response) ->
+    %% Nothing is subscribed to what was appended: there is no handler that
+    %% could still be behind, which is an answer, not a timeout.
+    Response;
+await(Required, Waiter, Version, Timeout, Response) ->
+    consistency_outcome(
+        evoq_consistency:await(Waiter, Required, Version, #{timeout => Timeout}), Response).
 
 %% @private Map a consistency wait outcome onto the response.
 consistency_outcome(ok, Response) -> Response;

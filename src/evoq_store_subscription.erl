@@ -349,7 +349,7 @@ handle_info({events, Events}, #state{store_id = StoreId, seq = Seq0,
     %% Live events carry their global position too: the offset this
     %% subscription has counted is where they sit in the store's global log.
     %% Nothing live is replay, so SeenUpTo is 0.
-    Seq1 = route_positioned(positioned(Fresh, Offset0), Seq0, 0),
+    Seq1 = route_positioned(StoreId, positioned(Fresh, Offset0), Seq0, 0),
     Offset1 = Offset0 + length(Fresh),
     NewLastAcked = maybe_ack(StoreId, Offset1, LastAcked),
     {noreply, State#state{seq = Seq1, offset = Offset1, last_acked = NewLastAcked,
@@ -503,7 +503,7 @@ catch_up_loop(StoreId, Offset, BatchSize, Seq, KnownTypes, SeenUpTo) ->
             %% detection and the next Offset are unaffected by the filter.
             Routable = [PE || {_, E} = PE <- positioned(Events, Offset),
                               lists:member(event_type_or_unknown(E), KnownTypes)],
-            Seq1 = route_positioned(Routable, Seq, SeenUpTo),
+            Seq1 = route_positioned(StoreId, Routable, Seq, SeenUpTo),
             logger:info("[evoq] Catch-up ~s: routed ~b of ~b events (seq ~b -> ~b) in ~.1fms",
                         [StoreId, length(Routable), length(Events), Seq, Seq1, ElapsedMs]),
             continue_catch_up(length(Events) < BatchSize,
@@ -548,7 +548,7 @@ backfill_loop(StoreId, EventTypes, Offset, BatchSize, Seq, SeenUpTo) ->
         {ok, Events} ->
             Matching = [PE || {_, E} = PE <- positioned(Events, Offset),
                               lists:member(event_type_or_unknown(E), EventTypes)],
-            Seq1 = route_positioned(Matching, Seq, SeenUpTo),
+            Seq1 = route_positioned(StoreId, Matching, Seq, SeenUpTo),
             logger:info("[evoq] Backfill ~s/~p: matched ~b of ~b scanned (seq ~b -> ~b)",
                         [StoreId, EventTypes, length(Matching), length(Events), Seq, Seq1]),
             continue_backfill(length(Events) < BatchSize,
@@ -665,12 +665,16 @@ positioned(Events, Offset) ->
     lists:zip(lists:seq(Offset, Offset + length(Events) - 1), Events).
 
 %% @private Route positioned events, marking those below SeenUpTo replay.
--spec route_positioned([{non_neg_integer(), evoq_event() | term()}], non_neg_integer(),
+%% The store is threaded through so every delivery names the store it came
+%% from: a handler's acknowledgment is keyed on (store, stream) and an
+%% aggregate id alone is not unique across stores.
+-spec route_positioned(atom(), [{non_neg_integer(), evoq_event() | term()}], non_neg_integer(),
                        non_neg_integer()) -> non_neg_integer().
-route_positioned([], Seq, _SeenUpTo) ->
+route_positioned(_StoreId, [], Seq, _SeenUpTo) ->
     Seq;
-route_positioned([{Position, E} | Rest], Seq, SeenUpTo) ->
-    route_positioned(Rest, route_event_at(E, Seq, Position, Position < SeenUpTo), SeenUpTo).
+route_positioned(StoreId, [{Position, E} | Rest], Seq, SeenUpTo) ->
+    route_positioned(StoreId, Rest, route_event_at(StoreId, E, Seq, Position, Position < SeenUpTo),
+                     SeenUpTo).
 
 %% @private Route a single event with sequence-based version override and no
 %% global position. Kept for route_events_with_seq/2; every path the
@@ -685,10 +689,10 @@ route_event_with_seq(E, Seq) ->
 %% a projection checkpoints on (evoq #1). `version' stays the per-boot `Seq'
 %% for anything that already reads it, but nothing may persist `Seq': it
 %% restarts at 0 on every boot and counts only events that have a handler.
--spec route_event_at(evoq_event() | term(), non_neg_integer(), non_neg_integer(), boolean()) ->
-    non_neg_integer().
-route_event_at(E, Seq, Position, Replaying) ->
-    route_event_with_seq(E, Seq, Replaying, #{global_position => Position}).
+-spec route_event_at(atom(), evoq_event() | term(), non_neg_integer(), non_neg_integer(),
+                     boolean()) -> non_neg_integer().
+route_event_at(StoreId, E, Seq, Position, Replaying) ->
+    route_event_with_seq(E, Seq, Replaying, #{global_position => Position, store_id => StoreId}).
 
 %% @private Replay carries `replaying => true'; a new event carries no
 %% such key, so metadata of live delivery is exactly what it always was.

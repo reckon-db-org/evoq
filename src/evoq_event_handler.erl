@@ -157,6 +157,12 @@ notify_reply(deliver, EventType, Event, Metadata, State) ->
     %% clause to write.
     case handle_event_internal(EventType, Event, Metadata, State) of
         {ok, NewState} ->
+            %% THE WRITE IS DONE, AND SAID SO. A dispatch with `strong'
+            %% consistency waits for exactly this: every handler and
+            %% projection subscribed to the appended events has written. A
+            %% skip, a halt or a stop wrote nothing and acknowledges nothing,
+            %% so a waiter is never told about a write that did not happen.
+            ok = evoq_consistency:acknowledge(State#state.handler_module, Metadata),
             {reply, ok, NewState};
         {stop, Reason} ->
             %% Handler decided to stop

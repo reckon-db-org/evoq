@@ -5,6 +5,51 @@ All notable changes to evoq will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.29.0] - 2026-10-21
+
+### Fixed: `strong` consistency waits for the handlers that were appended to (evoq#23)
+
+`consistency => strong` was a no-op by construction: its required set came from
+`evoq_consistency:wait_for/4`'s default `all`, which collapsed to an empty
+list, and `wait_loop/4` answered an empty list at once. No handler and no
+projection acknowledged anything either, so even `{handlers, [M]}` could only
+ever end in the timeout. Found through macula-io/macula-realm#92: a live
+projection writing to SQLite after the test's sandbox owner had exited.
+
+- **The required set is derived, not kept.** For each appended event the router
+  asks the event type registry which processes the delivery reaches
+  (`evoq_event_router:delivery_targets/1`, the same lookup the router delivers
+  by), so nothing is a hand-kept list and a handler that registers later is in
+  the set from the moment it registers.
+- **Handlers and projections acknowledge.** `evoq_event_handler` and
+  `evoq_projection` acknowledge after a successful write, carrying the event's
+  own stream version. A skip, a halt or a stop writes nothing and acknowledges
+  nothing, so a waiter is never told about a write that did not happen.
+- **An ack cannot arrive before anyone is listening.** The router opens the
+  waiter, keyed on (store, stream), before the append. A handler fast enough to
+  finish during the append is counted, and the version in the ack means one
+  already past the waited version answers for it while one behind does not.
+- **The wait is the dispatch's `timeout`** (five seconds by default) and still
+  answers `{error, consistency_timeout}`, since the events are appended either
+  way.
+
+Observable changes a consumer floating `~> 1.28` picks up on its next lock
+refresh:
+
+- routing metadata carries `store_id`. An event routed outside a store
+  subscription has none, and is not acknowledged: there is no stream for a
+  waiter to be waiting on.
+- `evoq_consistency:wait_for/4` refuses `all` with `{error, all_needs_events}`
+  rather than answering `ok`: it sees no events, so it cannot know which
+  handlers a dispatch would have to wait for, and `ok` would claim they had all
+  written. A dispatch asks for `strong`, which can resolve it.
+- `evoq_consistency:open/2`, `close/1`, `await/4` and `required/1` are new, and
+  `acknowledge/2` acknowledges straight from an event's metadata.
+- `strong` does not wait for process manager instances: which instance handles
+  an event is decided at delivery time (`correlate/2`, which may start one), so
+  the set does not exist when the command is dispatched. A process manager that
+  needs its own writes seen dispatches and waits itself.
+
 ## [1.28.0] - 2026-10-21
 
 ### Fixed and changed: lineage, projection errors, rebuild state and compensation (evoq#22)

@@ -357,9 +357,11 @@ Intercept command dispatch.
 ```
 
 Consistency is a dispatch option, not application config and not a handler
-option: `evoq_router:dispatch(Command, #{consistency => {handlers, [...]}})`
-waits for those handlers to ack before returning. See the consistency
-section of `guides/event_handlers.md` (`strong` currently waits for nothing).
+option: `evoq_router:dispatch(Command, #{consistency => strong})` waits for
+every event handler and projection subscribed to the events the command
+appended to have written them, and `#{consistency => {handlers, [...]}}`
+waits for those alone. See the consistency section of
+`guides/event_handlers.md` for what is and is not in the wait.
 
 ## Memory Pressure Handling
 

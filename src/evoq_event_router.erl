@@ -20,6 +20,7 @@
 -export([start_link/0]).
 -export([route_event/2, route_event/3]).
 -export([route_events/2]).
+-export([delivery_targets/1]).
 
 %% gen_server callbacks
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
@@ -54,6 +55,20 @@ route_events(Events, Metadata) ->
         route_event(Event, Metadata)
     end, Events),
     ok.
+
+%% @doc The type this event is delivered as, and the handler processes that
+%% delivery reaches.
+%%
+%% Read from the registry, through the same upcasting the delivery does, so
+%% a caller asking "who will see this event" gets the answer the router acts
+%% on. `evoq_consistency' asks it to derive what a `strong' dispatch must
+%% wait for; nothing keeps a list.
+-spec delivery_targets(map()) -> {binary(), [pid()]}.
+delivery_targets(#{event_type := Type} = Event) ->
+    {_Upcasted, UpcastedType} = upcast_event(Event, Type, #{}),
+    {UpcastedType, evoq_event_type_registry:get_handlers(UpcastedType)};
+delivery_targets(_Event) ->
+    {undefined, []}.
 
 %%====================================================================
 %% gen_server callbacks

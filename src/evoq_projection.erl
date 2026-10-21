@@ -325,6 +325,13 @@ handle_call({notify, _EventType, _Event, _Metadata}, _From,
 handle_call({notify, EventType, Event, Metadata}, _From, State) ->
     case handle_event_internal(EventType, Event, Metadata, State) of
         {ok, NewState} ->
+            %% THE READ MODEL IS WRITTEN, AND SAID SO. A dispatch with
+            %% `strong' consistency waits for this: a caller that reads its
+            %% own write after dispatching is reading what this call just
+            %% wrote. A skip, a halt or a stop wrote nothing and does not
+            %% acknowledge, so a waiter is never told about a write that did
+            %% not happen.
+            ok = evoq_consistency:acknowledge(State#state.projection_module, Metadata),
             {reply, ok, NewState};
         {stop, Reason} ->
             %% The projection's on_error/4 chose stop: reply first, then end,

@@ -260,12 +260,30 @@ a handler sees an event, the dispatch that produced it is already over.
 | Option | What it waits for |
 |--------|-------------------|
 | `eventual` (default) | nothing - the command returns once the events are appended |
-| `{handlers, Handlers}` | those handlers, up to their acks, then returns |
-| `strong` | **nothing today**: it resolves to "wait for all handlers", the required set is empty, and the wait returns at once. Use `{handlers, [...]}` when you need the guarantee |
+| `{handlers, Handlers}` | those handlers and projections, up to their acks on the version this dispatch produced, then returns |
+| `strong` | every event handler and projection subscribed to the event types the command appended, up to their acks on the version this dispatch produced |
+
+`strong` derives its set from the appended events and the event type
+registry, the same lookup the event router delivers by: nothing keeps a list,
+and a handler that registers later is in the set from the moment it
+registers. When nothing subscribes to what was appended there is nothing that
+could be behind it, so the dispatch answers at once rather than waiting out
+the timeout.
+
+The waiter joins the stream's group **before** the append, so a handler fast
+enough to finish before the router gets back from the append still has its
+acknowledgment counted. The ack carries the event's own stream version: a
+handler already past it answers for it, one behind it does not.
+
+What `strong` does **not** wait for is a process manager instance. Which
+instances handle an event is decided at delivery time (`correlate/2`, which
+may start one), so the set does not exist when the command is dispatched. A
+process manager that needs its own writes seen dispatches and waits itself.
 
 A wait that times out answers `{error, consistency_timeout}` rather than
 `{ok, ...}`: the command's events are appended either way, so a caller must
-treat that error as "written, but not yet seen by those handlers".
+treat that error as "written, but not yet seen by those handlers". The wait
+follows the dispatch's `timeout` option (five seconds by default).
 
 ## What the handler is handed
 
