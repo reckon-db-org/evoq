@@ -17,24 +17,34 @@ The key insight: read models can be **rebuilt** by replaying events.
 
 ## Understanding Event Envelope Structure
 
-**IMPORTANT:** Projections receive events wrapped in an `evoq_event` envelope. The first parameter to `project/4` is a map with this structure:
+**IMPORTANT:** `project/4` takes the event as its first argument and the
+delivered metadata as its second. The event is a flat map:
 
 ```erlang
 #{
-    event_type => <<"OrderPlaced">>,     %% Event type (binary)
-    data => #{                            %% ← YOUR BUSINESS EVENT PAYLOAD
+    event_type => <<"order_placed_v1">>,  %% Event type (binary)
+    data => #{                             %% ← YOUR BUSINESS EVENT PAYLOAD
         order_id => <<"ord-123">>,
         customer_id => <<"cust-456">>,
         total => 99.99,
         items => [...]
     },
-    metadata => #{                        %% ← Envelope metadata
-        aggregate_id => <<"ord-123">>,
-        correlation_id => <<"req-abc">>,
-        causation_id => <<"cmd-xyz">>,
-        timestamp => 1703001234567
-    },
     tags => [<<"tenant:acme">>],
+    timestamp => 1703001234567,            %% ← read the time from here
+    ...
+}
+```
+
+and the metadata is the routing envelope:
+
+```erlang
+#{
+    stream_id => <<"order-ord-123">>,      %% the stream the event was appended to
+    version => 7,                          %% its version in that stream
+    global_position => 412,                %% its index in the store's global log
+    event_id => <<"01J8...">>,
+    correlation_id => <<"req-abc">>,       %% lineage, see evoq_lineage
+    causation_id => <<"cmd-xyz">>,
     ...
 }
 ```
@@ -67,27 +77,27 @@ init(_Config) ->
     {ok, #{}, ReadModel}.
 
 %% Project each event into the read model
-project(#{event_type := <<"OrderPlaced">>, data := Data}, Metadata, State, ReadModel) ->
-    OrderId = maps:get(aggregate_id, Metadata),
+project(#{event_type := <<"OrderPlaced">>, data := Data} = Event, Metadata, State, ReadModel) ->
+    OrderId = maps:get(stream_id, Metadata),
     Summary = #{
         order_id => OrderId,
         customer_id => maps:get(customer_id, Data),
         total => maps:get(total, Data),
         items => maps:get(items, Data),
         status => placed,
-        placed_at => maps:get(timestamp, Metadata)
+        placed_at => maps:get(timestamp, Event)
     },
     {ok, NewRM} = evoq_read_model:put(OrderId, Summary, ReadModel),
     {ok, State, NewRM};
 
-project(#{event_type := <<"OrderShipped">>, data := Data}, Metadata, State, ReadModel) ->
-    OrderId = maps:get(aggregate_id, Metadata),
+project(#{event_type := <<"OrderShipped">>, data := Data} = Event, Metadata, State, ReadModel) ->
+    OrderId = maps:get(stream_id, Metadata),
     case evoq_read_model:get(OrderId, ReadModel) of
         {ok, Summary} ->
             Updated = Summary#{
                 status => shipped,
                 tracking_number => maps:get(tracking_number, Data),
-                shipped_at => maps:get(timestamp, Metadata)
+                shipped_at => maps:get(timestamp, Event)
             },
             {ok, NewRM} = evoq_read_model:put(OrderId, Updated, ReadModel),
             {ok, State, NewRM};
@@ -96,13 +106,13 @@ project(#{event_type := <<"OrderShipped">>, data := Data}, Metadata, State, Read
             {skip, State, ReadModel}
     end;
 
-project(#{event_type := <<"OrderCancelled">>}, Metadata, State, ReadModel) ->
-    OrderId = maps:get(aggregate_id, Metadata),
+project(#{event_type := <<"OrderCancelled">>} = Event, Metadata, State, ReadModel) ->
+    OrderId = maps:get(stream_id, Metadata),
     case evoq_read_model:get(OrderId, ReadModel) of
         {ok, Summary} ->
             Updated = Summary#{
                 status => cancelled,
-                cancelled_at => maps:get(timestamp, Metadata)
+                cancelled_at => maps:get(timestamp, Event)
             },
             {ok, NewRM} = evoq_read_model:put(OrderId, Updated, ReadModel),
             {ok, State, NewRM};
@@ -157,8 +167,8 @@ Transform an event into read model updates:
     {skip, State :: term(), ReadModel :: term()}.
 
 project(Event, Metadata, State, ReadModel) ->
-    %% Event: #{event_type => ..., data => ...}
-    %% Metadata: #{aggregate_id => ..., version => ..., timestamp => ...}
+    %% Event: #{event_type => ..., data => ..., timestamp => ...}
+    %% Metadata: #{stream_id => ..., version => ..., global_position => ...}
 
     %% Update read model
     {ok, NewRM} = update_read_model(Event, ReadModel),
@@ -166,7 +176,7 @@ project(Event, Metadata, State, ReadModel) ->
     %% Update projection state
     NewState = State#{
         events_processed => maps:get(events_processed, State) + 1,
-        last_event_time => maps:get(timestamp, Metadata)
+        last_event_time => maps:get(timestamp, Event)
     },
 
     {ok, NewState, NewRM}.
@@ -183,18 +193,20 @@ Fast, volatile storage. Good for caching and development.
 ```erlang
 init(_Config) ->
     {ok, RM} = evoq_read_model:new(evoq_read_model_ets, #{
-        table_name => order_summaries
+        name => order_summaries
     }),
     {ok, #{}, RM}.
 ```
 
-### PostgreSQL
+### A persistent backend
 
-Persistent, queryable storage. Good for production.
+`evoq` ships one read model backend, `evoq_read_model_ets`. SQL, DETS or an
+external store is a backend you implement (next section) and start the
+projection with:
 
 ```erlang
 init(Config) ->
-    {ok, RM} = evoq_read_model:new(evoq_read_model_postgres, #{
+    {ok, RM} = evoq_read_model:new(my_postgres_read_model, #{
         pool => my_pool,
         table => <<"order_summaries">>
     }),
@@ -209,13 +221,18 @@ Implement the `evoq_read_model` behavior:
 -module(my_custom_read_model).
 -behaviour(evoq_read_model).
 
--export([new/1, get/2, put/3, delete/2, list/1]).
+-export([init/1, get/2, put/3, delete/2, list/2, clear/1]).
 
-new(Config) -> {ok, State}.
+%% Required
+init(Config) -> {ok, State}.
 get(Key, State) -> {ok, Value} | {error, not_found}.
 put(Key, Value, State) -> {ok, NewState}.
 delete(Key, State) -> {ok, NewState}.
-list(State) -> {ok, [Key]}.
+
+%% Optional: without them a rebuild cannot clear, and list returns
+%% {error, not_implemented}
+list(Prefix, State) -> {ok, [{Key, Value}]}.
+clear(State) -> {ok, NewState}.
 ```
 
 ## Checkpointing
@@ -235,6 +252,13 @@ evoq_projection:start_link(order_summary_projection, #{},
 The store implements `evoq_checkpoint_store` (`load/1`, `save/2`,
 `delete/1`). `evoq_checkpoint_store_ets` keeps it in ETS, which does not
 survive a restart either.
+
+A checkpoint save is a **second write**. The read model rows are written
+first, then the checkpoint; a crash between the two leaves the read model
+ahead of the checkpoint, so the last event is projected again on the next
+boot. Delivery is therefore at-least-once, not exactly-once: make
+`project/4` idempotent (put, do not increment a counter you read back
+blindly) and expect the last event to repeat after a crash.
 
 ### What the position is
 
@@ -331,7 +355,7 @@ interested_in() ->
     [<<"CustomerRegistered">>, <<"OrderPlaced">>, <<"OrderShipped">>].
 
 project(#{event_type := <<"CustomerRegistered">>, data := Data}, Meta, State, RM) ->
-    CustomerId = maps:get(aggregate_id, Meta),
+    CustomerId = maps:get(stream_id, Meta),
     Customer = #{
         customer_id => CustomerId,
         name => maps:get(name, Data),
@@ -373,8 +397,8 @@ Build statistics and summaries:
 interested_in() ->
     [<<"OrderPlaced">>, <<"OrderCancelled">>].
 
-project(#{event_type := <<"OrderPlaced">>, data := Data}, Meta, State, RM) ->
-    Date = date_from_timestamp(maps:get(timestamp, Meta)),
+project(#{event_type := <<"OrderPlaced">>, data := Data} = Event, Meta, State, RM) ->
+    Date = date_from_timestamp(maps:get(timestamp, Event)),
 
     Stats = case evoq_read_model:get(Date, RM) of
         {ok, Existing} -> Existing;
@@ -398,16 +422,13 @@ Query projections directly:
 %% Get single item
 {ok, OrderSummary} = evoq_read_model:get(OrderId, ReadModel).
 
-%% List all items
-{ok, AllOrders} = evoq_read_model:list(ReadModel).
-
-%% Backend-specific queries (PostgreSQL)
-{ok, RecentOrders} = evoq_read_model_postgres:query(
-    ReadModel,
-    "SELECT * FROM order_summaries WHERE status = $1 ORDER BY placed_at DESC LIMIT $2",
-    [<<"placed">>, 10]
-).
+%% List every key (list/2, not list/1); a binary or tuple lists a prefix
+{ok, AllOrders} = evoq_read_model:list(all, ReadModel).
 ```
+
+Anything beyond a key lookup is your backend's own API: `evoq_read_model`
+exposes `get/2`, `put/3`, `delete/2`, `list/2` and `clear/1`, and a SQL
+backend adds its own query calls beside them.
 
 ## Testing Projections
 
@@ -424,9 +445,10 @@ project_order_lifecycle_test() ->
     %% Order placed
     PlacedEvent = #{
         event_type => <<"OrderPlaced">>,
-        data => #{customer_id => <<"cust-1">>, total => 100, items => []}
+        data => #{customer_id => <<"cust-1">>, total => 100, items => []},
+        timestamp => 1000
     },
-    PlacedMeta = #{aggregate_id => <<"order-1">>, timestamp => 1000},
+    PlacedMeta = #{stream_id => <<"order-1">>},
 
     {ok, State1, RM1} = order_summary_projection:project(PlacedEvent, PlacedMeta, State0, RM0),
 
@@ -438,9 +460,10 @@ project_order_lifecycle_test() ->
     %% Order shipped
     ShippedEvent = #{
         event_type => <<"OrderShipped">>,
-        data => #{tracking_number => <<"TRACK123">>}
+        data => #{tracking_number => <<"TRACK123">>},
+        timestamp => 2000
     },
-    ShippedMeta = #{aggregate_id => <<"order-1">>, timestamp => 2000},
+    ShippedMeta = #{stream_id => <<"order-1">>},
 
     {ok, _State2, RM2} = order_summary_projection:project(ShippedEvent, ShippedMeta, State1, RM1),
 
@@ -502,29 +525,13 @@ project(Event, _Meta, State, RM) ->
     end.
 ```
 
-### 3. Keep Projections Idempotent
-
-Projections may replay events during rebuild:
-
-```erlang
-project(Event, Meta, State, RM) ->
-    EventId = maps:get(event_id, Event),
-    case already_projected(EventId, State) of
-        true -> {skip, State, RM};
-        false ->
-            %% Project normally
-            NewState = mark_projected(EventId, State),
-            {ok, NewState, NewRM}
-    end.
-```
-
-### 4. Monitor Lag
+### 3. Monitor Lag
 
 Track how far behind projections are:
 
 ```erlang
 project(Event, Meta, State, RM) ->
-    EventTime = maps:get(timestamp, Meta),
+    EventTime = maps:get(timestamp, Event),
     Lag = erlang:system_time(millisecond) - EventTime,
 
     telemetry:execute([my_app, projection, lag], #{lag_ms => Lag}, #{
@@ -535,7 +542,7 @@ project(Event, Meta, State, RM) ->
     {ok, State, NewRM}.
 ```
 
-### 5. Version Read Models
+### 4. Version Read Models
 
 Support schema evolution:
 

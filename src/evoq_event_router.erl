@@ -148,12 +148,29 @@ notify_handler(Handler, EventType, Event, Metadata) when is_atom(Handler) ->
     end.
 
 %% @private Notify a local handler pid only if still alive.
+%%
+%% The reply is read rather than discarded: a projection that answered
+%% {error, Reason} used to look exactly like one that succeeded, which hid
+%% a dropped event. The handler decides what a failure means (retry, skip,
+%% dead letter); the router only makes sure a failure that comes back to it
+%% leaves a trace.
 notify_if_alive(true, Handler, EventType, Event, Metadata) ->
     try
-        evoq_event_handler:notify(Handler, EventType, Event, Metadata)
+        notify_reply(evoq_event_handler:notify(Handler, EventType, Event, Metadata),
+                     Handler, EventType)
     catch
         _:Reason ->
             logger:warning("Failed to notify handler ~p: ~p", [Handler, Reason])
     end;
 notify_if_alive(false, _Handler, _EventType, _Event, _Metadata) ->
+    ok.
+
+%% @private
+notify_reply(ok, _Handler, _EventType) ->
+    ok;
+notify_reply({error, Reason}, Handler, EventType) ->
+    logger:warning(#{what => evoq_handler_returned_error,
+                     handler => Handler,
+                     event_type => EventType,
+                     error => Reason}),
     ok.

@@ -11,6 +11,16 @@ evoq provides 4 actor behaviours for moving integration artifacts across boundar
 | **Requester** | Sends hopes, receives feedback | Hope | Feedback | `evoq_requester` |
 | **Responder** | Receives hopes, returns feedback | Hope | Feedback | `evoq_responder` |
 
+`evoq_emitter` is a **contract, not a runtime**: the behaviour declares the
+callbacks, and the application supplies the process that runs them, under
+its own supervisor. evoq does not start emitters for you.
+
+Emitting is also a decision, not a reflex: not every domain event is an
+integration fact. The desk decides which events leave the bounded context
+and in what shape (see the process-manager pattern in
+`process_managers.md`), rather than one emitter per event mirroring
+internal structure onto the wire.
+
 ## evoq_emitter
 
 Emitters subscribe to domain events and publish them as integration facts to external transports (pg or mesh).
@@ -152,19 +162,44 @@ Feedback is the response to a Hope. It carries the result of command execution f
 
 Default serialization: `evoq_feedback:default_serialize/1` and `default_deserialize/1`.
 
-## Session-Level Consistency
+## Session Consistency
 
-The `dispatch_with_state/2` function enables session-level consistency:
+evoq deliberately departs from one line of the CQRS literature here, and the
+departure is the feature.
+
+The reference model says a command handler returns only a status: the caller
+learns the outcome, and any state it needs comes from a projection, later.
+evoq's `dispatch/2` returns the events the command produced and
+`dispatch_with_state/2` returns the aggregate's state as well:
 
 ```erlang
-%% Standard dispatch
-{ok, Version, Events} = evoq_dispatcher:dispatch(Command, Opts).
+%% Standard dispatch: what changed
+{ok, Version, Events} = evoq_router:dispatch(Command, Opts).
 
-%% Dispatch with state (for session-level consistency)
-{ok, Version, Events, AggregateState} = evoq_dispatcher:dispatch_with_state(Command, Opts).
+%% Session consistency: what changed, and the state it left behind
+{ok, Version, Events, AggregateState} =
+    evoq_command_router:dispatch_with_state(Command, Opts).
 ```
 
-The aggregate state after applying all new events is included in the response. This allows responders to return immediate truth to requesters without waiting for projections.
+The name is **session consistency**: within one session - one request, one
+user, one process manager step - the caller sees its own write immediately,
+without waiting for a projection to catch up. It is not strong consistency
+across the system (a projection may still lag, and another session may still
+read an older version); it is the guarantee that *you* do not have to
+poll your own read model to find out what you just did.
+
+Why it stays:
+
+- A responder answering an RPC needs the post-command state to build its
+  reply. Without it, every responder either re-reads a projection it may
+  already have outrun, or returns a version number the caller cannot use.
+- A process manager deciding its next command has the same problem one
+  step removed.
+- Event sourcing makes the state derivable from the events in hand, so the
+  extra return value costs one fold, not another round trip.
+
+`dispatch/2` is unchanged: callers that want only what happened get a
+version and the events.
 
 ## Complete Desk Example
 

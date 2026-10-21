@@ -1,6 +1,8 @@
 # Process Managers
 
-Process managers (also called sagas) coordinate long-running business processes that span multiple aggregates. They react to events and dispatch commands to drive workflows forward.
+Process managers coordinate long-running business processes that span multiple aggregates. They react to events and dispatch commands to drive workflows forward.
+
+The reference material is explicit that a process manager is **not** a saga, and these guides follow it: evoq's module and callback names still say `evoq_saga_compensation` for compatibility, but the concept is a process manager.
 
 ![Process Manager Flow](assets/process-manager.svg)
 
@@ -170,7 +172,12 @@ apply(State, #{event_type := <<"PaymentReceived">>, data := #{amount := Amount}}
 
 ## Compensation (Rollback)
 
-When a step fails, the process manager can compensate by undoing previous steps:
+When a command the process manager dispatched fails, the instance runs the
+process manager's `compensate/2` and dispatches what it returns, in order.
+Commands already dispatched are recorded in the process manager's state
+(`executed_commands`, written with `evoq_saga_compensation:record_command/2`)
+so compensation and `build_compensation_chain/2` can see what ran; a command
+after the failed one is not dispatched.
 
 ```erlang
 -module(money_transfer_pm).
@@ -195,11 +202,13 @@ handle(State, #{event_type := <<"DestinationCreditFailed">>}, _Meta) ->
     %% Credit failed - need to compensate
     {ok, State#{status => compensating}}.
 
-%% Compensation callback
--spec compensate(State :: term(), FailedCommand :: map()) ->
-    {ok, CompensatingCommands :: [map()]} | skip.
+%% Compensation callback. The failed command arrives as the evoq_command
+%% record the process manager returned - it is a #evoq_command{}, not a map.
+-spec compensate(State :: term(), FailedCommand :: #evoq_command{}) ->
+    {ok, CompensatingCommands :: [#evoq_command{}]} | skip.
 
-compensate(#{source_id := SourceId, amount := Amount}, #{command_type := credit}) ->
+compensate(#{source_id := SourceId, amount := Amount},
+           #evoq_command{command_type = credit}) ->
     %% Credit failed, refund the source account
     RefundCmd = evoq_command:new(credit, account, SourceId, #{
         amount => Amount,

@@ -26,7 +26,7 @@ suggested orders below.
 | Guide | What it covers |
 |---|---|
 | [Event Handlers](event_handlers.md) | Reacting to events with side effects; per-event-type subscriptions, retry strategies, and dead-letter support. |
-| [Process Managers](process_managers.md) | Sagas that coordinate long-running workflows across aggregates, with command dispatch and compensation. |
+| [Process Managers](process_managers.md) | Coordinate long-running workflows across aggregates, with command dispatch and compensation. |
 | [Projections](projections.md) | Building optimized read models from events, with checkpointing. |
 
 ## Integration boundary

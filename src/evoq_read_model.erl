@@ -54,7 +54,7 @@
 -record(read_model, {
     module :: atom(),
     state :: term(),
-    checkpoint = 0 :: non_neg_integer()
+    checkpoint = -1 :: integer()
 }).
 
 -opaque read_model() :: #read_model{}.
@@ -119,17 +119,20 @@ clear_dispatch(true, Module, State, RM) ->
 clear_dispatch(false, _Module, _State, _RM) ->
     {error, not_implemented}.
 
+%% @private A cleared read model has seen nothing, so its position is -1,
+%% the same "nothing yet" the projection uses (positions start at 0). This
+%% read 0, which said the first event was already processed.
 clear_result({ok, NewState}, RM) ->
-    {ok, RM#read_model{state = NewState, checkpoint = 0}};
+    {ok, RM#read_model{state = NewState, checkpoint = -1}};
 clear_result({error, Reason}, _RM) ->
     {error, Reason}.
 
 %% @doc Get the current checkpoint position.
--spec get_checkpoint(read_model()) -> non_neg_integer().
+-spec get_checkpoint(read_model()) -> integer().
 get_checkpoint(#read_model{checkpoint = Checkpoint}) ->
     Checkpoint.
 
 %% @doc Set the checkpoint position.
--spec set_checkpoint(non_neg_integer(), read_model()) -> read_model().
+-spec set_checkpoint(integer(), read_model()) -> read_model().
 set_checkpoint(Position, RM) ->
     RM#read_model{checkpoint = Position}.

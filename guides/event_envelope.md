@@ -147,21 +147,22 @@ Unique identifier for this specific event instance (UUID).
 
 ### event_type
 
-Binary string identifying the event type, typically in PascalCase with version suffix.
+Binary string identifying the event type: `{subject}_{verb_past}_v{N}`.
 
 **You provide** this in your aggregate's event map.
 
 **Examples:**
 ```erlang
-<<"OrderPlaced.v1">>
-<<"UserRegistered.v2">>
-<<"PaymentProcessed.v1">>
+<<"order_placed_v1">>
+<<"user_registered_v2">>
+<<"payment_processed_v1">>
 ```
 
 **Best practices:**
-- Use past tense (what happened, not what to do)
-- Include version suffix for schema evolution
-- PascalCase for consistency
+- Use past tense (what happened, not what to do) - never `create`/`update`/`delete`
+- Lowercase with underscores, version suffix `_v{N}` for schema evolution
+- The type names the fact, so a handler list reads like a list of things that
+  happened rather than a list of classes
 
 ### stream_id
 
@@ -214,23 +215,42 @@ Cross-cutting metadata about the event.
 
 ```erlang
 #{
-    %% Request ID linking related operations
+    %% Request ID linking related operations. evoq sets this on dispatch from
+    %% the command and carries it across process-manager hops; read it with
+    %% evoq_lineage:correlation_id/1
     correlation_id => <<"req-abc-123">>,
 
-    %% What caused this event (command ID or previous event ID)
+    %% What caused this event: the command id that produced it
     causation_id => <<"cmd-xyz-789">>,
+
+    %% An application-level conversation id, tying several correlations to one
+    %% conceptual operation. evoq never sets this; you do, in the command's
+    %% metadata, and read it back with evoq_lineage:conversation_id/1
+    conversation_id => <<"import-batch-42">>,
 
     %% Who triggered this
     user_id => <<"usr-456">>,
-
-    %% When it happened (may differ from envelope timestamp)
-    timestamp => 1703001234567,
 
     %% Additional context
     ip_address => <<"192.168.1.1">>,
     user_agent => <<"Mozilla/5.0...">>
 }
 ```
+
+**Delivered metadata.** When a handler or projection receives an event, the
+metadata it is handed is the stored metadata above plus the routing keys the
+store subscription adds:
+
+| Key | What it is |
+|-----|-----------|
+| `event_id` | the event's id |
+| `stream_id` | the stream it was appended to |
+| `version` | its version in that stream |
+| `stream_version` | the same number, under the name handlers used before |
+| `global_position` | its index in the store's global log |
+| `replaying` | `true` when the event is a replay after a restart |
+
+The event's own `timestamp` is on the event map, not in the metadata.
 
 **Use metadata for:**
 - Distributed tracing (correlation_id)

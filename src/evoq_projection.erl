@@ -20,12 +20,22 @@
 %%   Initialize projection with read model
 %%
 %% - project(Event, Metadata, State, ReadModel) ->
-%%     {ok, NewState, NewReadModel} | {error, Reason}
-%%   Transform event into read model updates
+%%     {ok, NewState, NewReadModel}
+%%   | {skip, NewState, NewReadModel}
+%%   | {error, Reason}
+%%   Transform event into read model updates. `skip' says the projection
+%%   does not want this event; the checkpoint still advances and the event
+%%   is not retried.
 %%
 %% Optional:
 %% - on_error(Error, Event, FailureContext, State) -> error_action()
-%%   Handle projection errors
+%%   Handle projection errors: retry, {retry, DelayMs}, skip, stop or
+%%   {dead_letter, Reason}, exactly as for an event handler. Without it the
+%%   shared default applies (backoff, then dead letter).
+%%
+%% - max_retries() -> pos_integer()
+%% - backoff_ms(Attempt) -> pos_integer()
+%%   Tune the default retry policy.
 %%
 %% == Example ==
 %%
@@ -71,7 +81,12 @@
                    FailureContext :: #evoq_failure_context{}, State :: term()) ->
     evoq_error_handler:error_action().
 
--optional_callbacks([on_error/4]).
+%% Same two knobs an event handler can turn to tune the default retry
+%% policy; read by evoq_error_handler:handle_error/5.
+-callback max_retries() -> pos_integer().
+-callback backoff_ms(AttemptNumber :: pos_integer()) -> pos_integer().
+
+-optional_callbacks([on_error/4, max_retries/0, backoff_ms/1]).
 
 %% API
 -export([start_link/2, start_link/3]).
@@ -96,7 +111,12 @@
     %% for what a position is.
     checkpoint :: integer(),
     checkpoint_store :: atom() | undefined,
-    store_id :: atom() | undefined
+    store_id :: atom() | undefined,
+    %% The Config init/1 was called with, kept so a rebuild can call it
+    %% again: a rebuild replays the whole log, and replaying it on top of
+    %% state that already reflects it counted every event twice. (Last in
+    %% the record so the field order callers rely on does not move.)
+    config :: map()
 }).
 
 %%====================================================================
@@ -177,6 +197,7 @@ init({ProjectionModule, Config, Opts}) ->
 
             State = #state{
                 projection_module = ProjectionModule,
+                config = Config,
                 projection_state = ProjectionState,
                 read_model = ReadModel,
                 event_types = EventTypes,
@@ -212,8 +233,10 @@ handle_call({notify, EventType, Event, Metadata}, _From, State) ->
     case handle_event_internal(EventType, Event, Metadata, State) of
         {ok, NewState} ->
             {reply, ok, NewState};
-        {error, Reason} ->
-            {reply, {error, Reason}, State}
+        {stop, Reason} ->
+            %% The projection's on_error/4 chose stop: reply first, then end,
+            %% so a caller blocked in notify/4 is not left guessing.
+            {stop, Reason, {error, Reason}, State}
     end;
 
 handle_call(_Request, _From, State) ->
@@ -251,10 +274,7 @@ terminate(_Reason, #state{
 handle_event_internal(EventType, Event, Metadata, State) ->
     #state{
         projection_module = ProjectionModule,
-        projection_state = ProjectionState,
-        read_model = ReadModel,
-        checkpoint = Checkpoint,
-        checkpoint_store = CheckpointStore
+        checkpoint = Checkpoint
     } = State,
 
     %% Check for idempotency - skip if already processed
@@ -264,15 +284,36 @@ handle_event_internal(EventType, Event, Metadata, State) ->
             %% Already processed, skip
             {ok, State};
         false ->
-            do_project(EventType, Event, Metadata, EventVersion,
-                       ProjectionModule, ProjectionState, ReadModel,
-                       CheckpointStore, State)
+            FailureContext = #evoq_failure_context{
+                handler_module = ProjectionModule,
+                event = Event,
+                error = undefined,
+                attempt_number = 1,
+                first_failure_at = erlang:system_time(millisecond),
+                last_failure_at = erlang:system_time(millisecond),
+                stacktrace = []
+            },
+            project_with_retry(EventType, Event, Metadata, EventVersion,
+                               FailureContext, State)
     end.
 
 %% @private
-do_project(EventType, Event, Metadata, EventVersion,
-           ProjectionModule, ProjectionState, ReadModel,
-           CheckpointStore, State) ->
+%%
+%% A projection that returns {error, Reason} is handled exactly as an event
+%% handler is: the module's on_error/4 decides retry, {retry, DelayMs},
+%% skip, stop or {dead_letter, Reason}, and without one the shared default
+%% applies (backoff, then dead letter after max_retries). Before this, the
+%% action was computed and thrown away, the error was returned to a router
+%% that discarded the reply, and the next event successfully projected
+%% jumped the checkpoint past the one that had failed: the event was lost
+%% for good and nothing said so.
+project_with_retry(EventType, Event, Metadata, EventVersion, FailureContext, State) ->
+    #state{
+        projection_module = ProjectionModule,
+        projection_state = ProjectionState,
+        read_model = ReadModel
+    } = State,
+
     StartTime = evoq_telemetry:monotonic_start(),
 
     %% Emit start telemetry
@@ -280,80 +321,129 @@ do_project(EventType, Event, Metadata, EventVersion,
         system_time => erlang:system_time()
     }, #{
         projection => ProjectionModule,
-        event_type => EventType
+        event_type => EventType,
+        attempt => FailureContext#evoq_failure_context.attempt_number
     }),
 
     %% Call the projection
     FullEvent = Event#{event_type => EventType},
     case ProjectionModule:project(FullEvent, Metadata, ProjectionState, ReadModel) of
         {ok, NewProjectionState, NewReadModel} ->
-            Duration = evoq_telemetry:duration_since(StartTime),
-
-            %% Update checkpoint
-            NewRM = evoq_read_model:set_checkpoint(EventVersion, NewReadModel),
-
-            %% Persist checkpoint if store available
-            save_checkpoint(ProjectionModule, CheckpointStore, EventVersion),
-
-            %% Emit success telemetry
-            telemetry:execute(?TELEMETRY_PROJECTION_STOP, #{
-                duration => Duration
-            }, #{
-                projection => ProjectionModule,
-                event_type => EventType
-            }),
-
-            NewState = State#state{
-                projection_state = NewProjectionState,
-                read_model = NewRM,
-                checkpoint = EventVersion
-            },
-            {ok, NewState};
+            project_succeeded(EventType, EventVersion, NewProjectionState, NewReadModel,
+                              StartTime, State);
 
         {skip, NewProjectionState, NewReadModel} ->
             %% Event skipped but checkpoint still advances
-            NewRM = evoq_read_model:set_checkpoint(EventVersion, NewReadModel),
-            save_checkpoint(ProjectionModule, CheckpointStore, EventVersion),
+            advance_checkpoint(EventVersion,
+                               State#state{projection_state = NewProjectionState,
+                                           read_model = NewReadModel});
 
-            NewState = State#state{
-                projection_state = NewProjectionState,
-                read_model = NewRM,
-                checkpoint = EventVersion
-            },
-            {ok, NewState};
-
-        {error, Reason} = Error ->
-            Duration = evoq_telemetry:duration_since(StartTime),
-
-            %% Emit failure telemetry
-            telemetry:execute(?TELEMETRY_PROJECTION_EXCEPTION, #{
-                duration => Duration
-            }, #{
-                projection => ProjectionModule,
-                event_type => EventType,
-                error => Reason
-            }),
-
-            %% Check for error callback
-            notify_on_error(erlang:function_exported(ProjectionModule, on_error, 4),
-                            ProjectionModule, Event, Reason, ProjectionState, Error)
+        {error, Reason} ->
+            projection_failed(EventType, Event, Metadata, EventVersion, Reason,
+                              StartTime, FailureContext, State)
     end.
 
-%% @private Invoke the projection's on_error/4 callback when present.
-notify_on_error(true, ProjectionModule, Event, Reason, ProjectionState, Error) ->
-    FailureContext = #evoq_failure_context{
-        handler_module = ProjectionModule,
-        event = Event,
+%% @private
+project_succeeded(EventType, EventVersion, NewProjectionState, NewReadModel,
+                  StartTime, #state{projection_module = ProjectionModule} = State) ->
+    Duration = evoq_telemetry:duration_since(StartTime),
+
+    %% Emit success telemetry
+    telemetry:execute(?TELEMETRY_PROJECTION_STOP, #{
+        duration => Duration
+    }, #{
+        projection => ProjectionModule,
+        event_type => EventType
+    }),
+
+    advance_checkpoint(EventVersion,
+                       State#state{projection_state = NewProjectionState,
+                                   read_model = NewReadModel}).
+
+%% @private
+projection_failed(EventType, Event, Metadata, EventVersion, Reason,
+                  StartTime, FailureContext, #state{projection_module = ProjectionModule} = State) ->
+    Duration = evoq_telemetry:duration_since(StartTime),
+
+    %% Emit failure telemetry
+    telemetry:execute(?TELEMETRY_PROJECTION_EXCEPTION, #{
+        duration => Duration
+    }, #{
+        projection => ProjectionModule,
+        event_type => EventType,
+        error => Reason
+    }),
+
+    UpdatedContext = FailureContext#evoq_failure_context{
         error = Reason,
-        attempt_number = 1,
-        first_failure_at = erlang:system_time(millisecond),
-        last_failure_at = erlang:system_time(millisecond),
-        stacktrace = []
+        last_failure_at = erlang:system_time(millisecond)
     },
-    _Action = ProjectionModule:on_error(Reason, Event, FailureContext, ProjectionState),
-    Error;
-notify_on_error(false, _ProjectionModule, _Event, _Reason, _ProjectionState, Error) ->
-    Error.
+
+    %% Ask the projection (or the shared default) what to do next
+    Action = evoq_error_handler:handle_error(
+        ProjectionModule, Reason, Event, UpdatedContext,
+        State#state.projection_state
+    ),
+
+    execute_error_action(Action, EventType, Event, Metadata, EventVersion,
+                         UpdatedContext, State).
+
+%% @private
+execute_error_action(retry, EventType, Event, Metadata, EventVersion,
+                     FailureContext, State) ->
+    project_with_retry(EventType, Event, Metadata, EventVersion,
+                       increment_attempt(FailureContext), State);
+
+execute_error_action({retry, DelayMs}, EventType, Event, Metadata, EventVersion,
+                     FailureContext, State) ->
+    timer:sleep(DelayMs),
+    project_with_retry(EventType, Event, Metadata, EventVersion,
+                       increment_attempt(FailureContext), State);
+
+execute_error_action(skip, _EventType, Event, Metadata, _EventVersion,
+                     FailureContext, State) ->
+    %% Skipped, but the checkpoint still advances: the projection said it does
+    %% not want this event, which is not the same as failing to see it. Said
+    %% out loud, because a skip is a hole in the read model.
+    log_dropped(skip, Event, Metadata, FailureContext, State),
+    advance_checkpoint(position(Metadata), State);
+
+execute_error_action(stop, _EventType, _Event, _Metadata, _EventVersion,
+                     FailureContext, _State) ->
+    {stop, {projection_stopped, FailureContext#evoq_failure_context.error}};
+
+execute_error_action({dead_letter, Reason}, _EventType, Event, Metadata,
+                     EventVersion, FailureContext,
+                     #state{projection_module = ProjectionModule} = State) ->
+    _ = evoq_dead_letter:store(Event, ProjectionModule, FailureContext, Reason),
+    log_dropped({dead_letter, Reason}, Event, Metadata, FailureContext, State),
+    advance_checkpoint(EventVersion, State).
+
+%% @private A retry re-runs project/4 on the same state; nothing has moved.
+increment_attempt(#evoq_failure_context{attempt_number = N} = Ctx) ->
+    Ctx#evoq_failure_context{attempt_number = N + 1}.
+
+%% @private
+log_dropped(Why, Event, Metadata, #evoq_failure_context{attempt_number = Attempt,
+                                                        error = Error},
+            #state{projection_module = ProjectionModule}) ->
+    logger:warning(#{what => evoq_projection_dropped_event,
+                     projection => ProjectionModule,
+                     action => Why,
+                     event_type => maps:get(event_type, Event, undefined),
+                     event_id => maps:get(event_id, Metadata, undefined),
+                     position => position(Metadata),
+                     attempts => Attempt,
+                     error => Error}).
+
+%% @private Move the checkpoint (stored and in memory) to EventVersion.
+advance_checkpoint(EventVersion,
+                   #state{projection_module = ProjectionModule,
+                          read_model = ReadModel,
+                          checkpoint_store = CheckpointStore} = State) ->
+    NewRM = evoq_read_model:set_checkpoint(EventVersion, ReadModel),
+    save_checkpoint(ProjectionModule, CheckpointStore, EventVersion),
+    {ok, State#state{read_model = NewRM, checkpoint = EventVersion}}.
 
 %% @private The number a projection checkpoints on, and so the number that
 %% decides "already projected" after a restart (evoq #1).
@@ -374,9 +464,18 @@ notify_on_error(false, _ProjectionModule, _Event, _Reason, _ProjectionState, Err
 position(#{global_position := Position}) -> Position;
 position(Metadata) -> maps:get(version, Metadata, 0).
 
-%% @private
+%% @private A rebuild starts from nothing: the read model is cleared, the
+%% checkpoint is reset, and init/1 runs again so the projection state is as
+%% fresh as the read model. Keeping the old state replayed the whole log on
+%% top of state that already reflected it.
+%%
+%% init/1 returns a read model of its own; it is discarded, because the
+%% cleared one is the table the projection has been writing to and clearing
+%% is what a rebuild means. A projection that builds a new table in init/1
+%% gets a second, empty one on every rebuild.
 do_rebuild(#state{
     projection_module = ProjectionModule,
+    config = Config,
     read_model = ReadModel,
     checkpoint_store = CheckpointStore,
     event_types = EventTypes
@@ -387,7 +486,19 @@ do_rebuild(#state{
             %% Reset checkpoint (-1 = nothing processed yet)
             save_checkpoint(ProjectionModule, CheckpointStore, -1),
 
+            rebuild_with_fresh_state(ProjectionModule, Config, ClearedRM,
+                                     EventTypes, State);
+
+        {error, Reason} ->
+            {error, Reason}
+    end.
+
+%% @private
+rebuild_with_fresh_state(ProjectionModule, Config, ClearedRM, EventTypes, State) ->
+    case ProjectionModule:init(Config) of
+        {ok, ProjectionState, _ReadModelFromInit} ->
             InitialState = State#state{
+                projection_state = ProjectionState,
                 read_model = ClearedRM,
                 checkpoint = -1
             },
@@ -396,7 +507,10 @@ do_rebuild(#state{
             replay_events(InitialState, EventTypes);
 
         {error, Reason} ->
-            {error, Reason}
+            %% The checkpoint is already at -1 and the read model cleared;
+            %% the projection now has neither data nor a state that matches
+            %% it, so the failure is reported rather than papered over.
+            {error, {rebuild_init_failed, ProjectionModule, Reason}}
     end.
 
 %% @private
@@ -515,10 +629,22 @@ load_checkpoint(false, _ProjectionModule, _CheckpointStore) ->
 checkpoint_value({ok, Checkpoint}) -> Checkpoint;
 checkpoint_value({error, _}) -> -1.
 
-%% @private
-save_checkpoint(_ProjectionModule, undefined, _Position) ->
-    ok;
+%% @private A checkpoint save is the projection's progress, and the one
+%% number that says whether it is still moving. Emitted on every save, with
+%% or without a store, so a projection that has stalled is visible instead
+%% of merely quiet: the event was declared in evoq_telemetry.hrl and never
+%% emitted.
 save_checkpoint(ProjectionModule, CheckpointStore, Position) ->
+    telemetry:execute(?TELEMETRY_PROJECTION_CHECKPOINT, #{}, #{
+        projection => ProjectionModule,
+        position => Position
+    }),
+    save_checkpoint_to_store(CheckpointStore, ProjectionModule, Position).
+
+%% @private
+save_checkpoint_to_store(undefined, _ProjectionModule, _Position) ->
+    ok;
+save_checkpoint_to_store(CheckpointStore, ProjectionModule, Position) ->
     case erlang:function_exported(CheckpointStore, save, 2) of
         true ->
             CheckpointStore:save(ProjectionModule, Position);

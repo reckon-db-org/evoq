@@ -66,7 +66,7 @@ Must be pure and deterministic. Called for each event produced by execute/2, and
 -callback to_map(State :: term()) -> map().
 ```
 
-Used for session-level consistency feedback (dispatch_with_state/2), snapshot serialization, and programmatic state inspection.
+Used for session consistency feedback (dispatch_with_state/2), snapshot serialization, and programmatic state inspection.
 
 ### Optional Callbacks
 
@@ -239,7 +239,12 @@ apply_event/2 MUST be pure and deterministic:
 
 to_map/1 serves three purposes:
 
-1. **Session-level consistency** -- dispatch_with_state/2 returns the aggregate state as a map to the caller, enabling immediate feedback without waiting for projections
+1. **Session consistency** -- `dispatch_with_state/2` returns the
+   aggregate's state to the caller as well as its events, so a session
+   sees the result of its own write without waiting for a projection.
+   This is a deliberate departure from the reference CQRS model, where a
+   command returns only a status; see
+   `integration_actors.md#session-consistency`.
 2. **Snapshot serialization** -- Snapshots store the aggregate state for faster loading
 3. **Programmatic inspection** -- Debugging, monitoring, and tooling can inspect state without knowing the record structure
 

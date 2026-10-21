@@ -194,8 +194,8 @@ read_model_wrapper_test(_Config) ->
     %% Get
     ?assertEqual({ok, wrapper_value}, evoq_read_model:get(wrapper_key, RM2)),
 
-    %% Checkpoint
-    ?assertEqual(0, evoq_read_model:get_checkpoint(RM2)),
+    %% Checkpoint: -1 says nothing has been projected (positions start at 0)
+    ?assertEqual(-1, evoq_read_model:get_checkpoint(RM2)),
     RM3 = evoq_read_model:set_checkpoint(100, RM2),
     ?assertEqual(100, evoq_read_model:get_checkpoint(RM3)),
 

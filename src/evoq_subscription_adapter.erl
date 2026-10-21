@@ -53,8 +53,11 @@
 
 %% Acknowledge an event has been processed.
 %%
-%% Updates the subscription checkpoint to the acknowledged position.
-%% Used for exactly-once delivery semantics.
+%% Updates the subscription checkpoint to the acknowledged position. The
+%% checkpoint is the node's, not the handler's: every handler and process
+%% manager on this node shares one `$all' subscription, so acknowledging a
+%% position says "this node has consumed the store up to here", and a crash
+%% redelivers what was not yet acknowledged. Delivery is at-least-once.
 -callback ack(StoreId :: atom(),
               SubscriptionName :: binary(),
               StreamId :: binary() | undefined,

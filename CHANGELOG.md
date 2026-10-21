@@ -5,6 +5,85 @@ All notable changes to evoq will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.28.0] - 2026-10-21
+
+### Fixed: lineage across a process manager, projection errors, rebuild state and compensation (evoq#22)
+
+Read against the GY-AW reference book. Four places where evoq did something
+other than what it documents, and a batch of guide statements that no longer
+matched the code. No wire format and no on-disk format changes.
+
+**A process manager threw the conversation away.** `evoq_command:new/4,5`
+mints a fresh `correlation_id` and leaves `causation_id` undefined, and the
+instance dispatched the PM's commands as they were - so a chain aggregate ->
+event -> PM -> command -> event started a new conversation at every hop and
+`causation_id` was never set. A PM is a responder: its commands now carry
+`causation_id` = the triggering event's id and `correlation_id` = that
+event's correlation, on both dispatch paths. An explicitly set
+`causation_id` is kept. A self-scheduled message (`handle_info/2`) has no
+triggering event and nothing is stamped. **Behaviour change for a PM that
+deliberately wanted its own conversation**: set the id on the command before
+returning it from `handle/3`, or the instance's inherited one is used.
+
+**A projection's `{error, Reason}` dropped the event forever.** `on_error/4`
+was called and the action it returned thrown away; the error went back to a
+router that discarded the reply; the next successfully projected event moved
+the checkpoint past the failed one. It is now handled exactly as an event
+handler is: `retry`, `{retry, DelayMs}`, `skip`, `stop` or
+`{dead_letter, Reason}`, and the shared default (backoff, then dead letter)
+when the projection has no `on_error/4`. `max_retries/0` and `backoff_ms/1`
+are optional projection callbacks now. A skip or a dead letter is logged
+with the event id and the position.
+
+**A rebuild kept the projection's state.** It cleared the read model and
+reset the checkpoint, then replayed the whole log on top of state that
+already reflected it. The Config is kept and `init/1` runs again.
+`evoq_read_model:clear/1` now leaves the checkpoint at -1 rather than 0, for
+the same reason `load_checkpoint/1` does: positions start at 0, so "nothing
+yet" must sit below them.
+
+**Compensation was documented and never ran.** A failed command was logged
+and the rest of the saga's commands still ran. The instance now stops at the
+first failure, records each successful dispatch in the PM's state
+(`executed_commands`, what `evoq_saga_compensation:build_compensation_chain/2`
+reads), and runs the PM's `compensate/2`, dispatching what it returns. **A
+process manager that relied on later commands running after a failure sees
+them stop.** `{ok, Results}` from `evoq_pm_instance:handle_event/3` now
+carries one result per dispatched command plus the compensation results, so
+it can be shorter than the command list.
+
+**The projection checkpoint telemetry is emitted.** `[evoq, projection,
+checkpoint]` was declared and never fired; it fires on every save now, with
+or without a checkpoint store, which is what makes a stalled projection
+visible.
+
+Also removed: the `handler_defaults` application environment, which nothing
+read (`consistency` is a `start_link/3` option), and the guide's "Start From
+Position", which described an option that never existed.
+
+### Guides
+
+Corrected against the code: `aggregate_id` -> `stream_id` in the delivered
+metadata (the event's `timestamp` is on the event, not the metadata);
+`evoq_dispatcher` -> `evoq_router` / `evoq_command_router:dispatch_with_state/2`;
+`evoq_read_model_postgres`, `evoq_projection_sup`, `evoq_subscription_manager`
+and `evoq_test.hrl` do not exist; `table_name` -> `name`; `list/1` -> `list/2`,
+`new/1` -> `init/1`; `retry_strategy/0` is not a callback (`on_error/4`,
+`max_retries/0`, `backoff_ms/1` are); event types are
+`{subject}_{verb_past}_v{N}`, not `OrderPlaced.v1`; delivery is at-least-once
+behind the shared `$all` checkpoint, not exactly-once, and a checkpoint save
+is a second write, so the last event may repeat after a crash; compensation
+carries the `#evoq_command{}` record, not a map; a process manager is not a
+saga; `evoq_emitter` is a contract the application runs, and emitting is the
+desk's decision rather than a reflex on every event.
+
+New: **session consistency** is documented as a named, deliberate concept in
+`guides/integration_actors.md`, `guides/state_modules.md` and
+`guides/architecture.md`. The reference model says a command returns only a
+status; evoq returns the events (`dispatch/2`) and, with
+`dispatch_with_state/2`, the aggregate state too, so a caller sees its own
+write without waiting for a projection. That stays; it is the point.
+
 ## [1.27.0] - 2026-10-19
 
 ### Added: a process manager instance can be woken by its own message, and evoq can mint a stream id (mcl-chess#1)

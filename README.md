@@ -17,7 +17,7 @@ Erlang CQRS/Event Sourcing framework built on reckon-db.
 - Command idempotency
 - Middleware pipeline for command dispatch
 - Event handlers with retry strategies and dead letter support
-- Process managers (sagas) with compensation
+- Process managers with compensation
 - Projections with checkpointing
 - Schema evolution via event upcasters
 - Memory pressure monitoring with adaptive TTL
@@ -112,7 +112,7 @@ handle_event(<<"LargeDeposit">>, Event, _Metadata, State) ->
     {ok, State}.
 ```
 
-### Process Managers (Sagas)
+### Process Managers
 
 ```erlang
 -module(order_fulfillment_pm).
@@ -161,11 +161,11 @@ init(_Config) ->
     {ok, #{}, ReadModel}.
 
 project(#{event_type := <<"AccountOpened">>, data := #{balance := B}},
-        #{aggregate_id := Id}, State, ReadModel) ->
+        #{stream_id := Id}, State, ReadModel) ->
     {ok, NewRM} = evoq_read_model:put(Id, #{balance => B, tx_count => 0}, ReadModel),
     {ok, State, NewRM};
 project(#{event_type := <<"MoneyDeposited">>, data := #{amount := A}},
-        #{aggregate_id := Id}, State, ReadModel) ->
+        #{stream_id := Id}, State, ReadModel) ->
     {ok, Current} = evoq_read_model:get(Id, ReadModel),
     Updated = Current#{
         balance => maps:get(balance, Current) + A,
@@ -298,7 +298,7 @@ Subscribe to events by type (not by stream).
 
 ### evoq_process_manager
 
-Coordinate long-running business processes (sagas).
+Coordinate long-running business processes.
 
 ```erlang
 -callback interested_in() -> [EventType :: binary()].
@@ -306,7 +306,7 @@ Coordinate long-running business processes (sagas).
 -callback handle(State, Event, Metadata) -> {ok, State} | {ok, State, [Command]}.
 -callback apply(State, Event) -> NewState.
 
-%% Optional: saga compensation
+%% Optional: compensation for a failed command
 -callback compensate(State, FailedCommand) -> {ok, [CompensatingCommand]} | skip.
 ```
 
@@ -350,14 +350,13 @@ Intercept command dispatch.
         check_interval => 10000,    %% 10 seconds
         elevated_threshold => 0.70,
         critical_threshold => 0.85
-    }},
-
-    {handler_defaults, #{
-        consistency => eventual,
-        start_from => origin
     }}
 ]}].
 ```
+
+An event handler's `consistency` is not application config: it is passed to
+`evoq_event_handler:start_link(Module, Config, Opts)` as `#{consistency =>
+eventual | strong | {handlers, [...]}}`.
 
 ## Memory Pressure Handling
 
@@ -396,7 +395,9 @@ retry backoff.
 
 ### Projection Events
 - `[evoq, projection, start | stop | exception]`
-- `[evoq, projection, event | checkpoint]`
+- `[evoq, projection, event]` - one event handed to the projection
+- `[evoq, projection, checkpoint]` - a checkpoint was saved; its position is
+  the projection's progress, so a stalled projection is visible here
 
 ## Testing
 

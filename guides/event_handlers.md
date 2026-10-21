@@ -89,9 +89,9 @@ Process a single event:
     {ok, NewState :: term()} | {error, Reason :: term()}.
 
 handle_event(EventType, Event, Metadata, State) ->
-    %% EventType: <<"OrderPlaced">>
+    %% EventType: <<"order_placed_v1">>
     %% Event: #{event_type => ..., data => ..., ...}
-    %% Metadata: #{aggregate_id => ..., version => ..., timestamp => ...}
+    %% Metadata: the delivered routing keys, see "What the handler is handed"
     %% State: Handler's internal state
 
     do_side_effect(Event),
@@ -178,17 +178,16 @@ Event handlers can fail (network issues, service unavailable). evoq supports ret
 -module(my_handler).
 -behaviour(evoq_event_handler).
 
--export([interested_in/0, init/1, handle_event/4, retry_strategy/0]).
+-export([interested_in/0, init/1, handle_event/4, on_error/4, max_retries/0, backoff_ms/1]).
 
-%% Optional callback for retry configuration
-retry_strategy() ->
-    #{
-        max_retries => 5,
-        initial_delay => 1000,      %% 1 second
-        max_delay => 60000,         %% 1 minute max
-        backoff => exponential,     %% exponential | linear | constant
-        jitter => true              %% Add randomness to prevent thundering herd
-    }.
+%% Optional: decide what happens on a failure
+on_error(_Reason, _Event, _FailureContext, _State) -> retry.
+
+%% Optional: how many attempts before the default gives up
+max_retries() -> 5.
+
+%% Optional: the delay before attempt N
+backoff_ms(Attempt) -> 1000 * Attempt.
 
 handle_event(EventType, Event, _Meta, State) ->
     case call_external_api(Event) of
@@ -197,6 +196,11 @@ handle_event(EventType, Event, _Meta, State) ->
         {error, permanent} -> {ok, State}          %% Don't retry, mark as handled
     end.
 ```
+
+`on_error/4` returns the action: `retry`, `{retry, DelayMs}`, `skip`,
+`stop` or `{dead_letter, Reason}`. Without it the framework backs off
+(`evoq_retry_strategy`) up to `max_retries/0` attempts, then dead-letters
+the event. There is no `retry_strategy/0` callback.
 
 ## Dead Letter Queue
 
@@ -227,9 +231,11 @@ Event handlers support two consistency modes:
 
 Events processed asynchronously. Best for most use cases.
 
+`consistency` is an option of `start_link/3`, not something the handler
+declares:
+
 ```erlang
-init(Config) ->
-    {ok, #{}, #{consistency => eventual}}.
+evoq_event_handler:start_link(my_handler, #{}, #{consistency => strong}).
 ```
 
 Properties:
@@ -242,8 +248,7 @@ Properties:
 Events processed before command returns. Use sparingly.
 
 ```erlang
-init(Config) ->
-    {ok, #{}, #{consistency => strong}}.
+evoq_event_handler:start_link(my_handler, #{}, #{consistency => strong}).
 ```
 
 Properties:
@@ -252,18 +257,24 @@ Properties:
 - Higher latency
 - Use only when necessary (audit, compliance)
 
-## Start From Position
+## What the handler is handed
 
-Control where handler starts processing:
+`Metadata` is the event's stored metadata plus the routing keys the store
+subscription adds:
 
-```erlang
-init(Config) ->
-    {ok, #{}, #{
-        start_from => origin    %% Process all historical events
-        %% start_from => current   %% Only new events
-        %% start_from => {position, 1000}  %% From specific position
-    }}.
-```
+| Key | What it is |
+|-----|-----------|
+| `event_id` | the event's id |
+| `stream_id` | the stream it was appended to |
+| `version` | its version in that stream |
+| `stream_version` | the same number, for handlers written against the older name |
+| `global_position` | its index in the store's global log; what a projection checkpoints on |
+| `replaying` | `true` when this is a replay (see below) |
+| `causation_id`, `correlation_id`, `conversation_id` | lineage, read with `evoq_lineage` |
+
+The event map carries `data`, `event_type` and `timestamp`: read the
+timestamp from the event, there is no `aggregate_id` or `timestamp` in the
+metadata.
 
 ## Idempotency
 
@@ -350,7 +361,7 @@ handle_user_registered_test() ->
         event_type => <<"UserRegistered">>,
         data => #{email => <<"test@example.com">>, name => <<"Test User">>}
     },
-    Metadata = #{aggregate_id => <<"user-123">>, version => 1},
+    Metadata = #{stream_id => <<"user-user-123">>, version => 1},
 
     %% Execute
     {ok, _NewState} = email_handler:handle_event(<<"UserRegistered">>, Event, Metadata, State),
@@ -411,8 +422,8 @@ handle_event(EventType, Event, _Meta, State) ->
 
 ```erlang
 handle_event(EventType, Event, Metadata, State) ->
-    logger:info("Processing ~p for aggregate ~p",
-        [EventType, maps:get(aggregate_id, Metadata)]),
+    logger:info("Processing ~p for stream ~p",
+        [EventType, maps:get(stream_id, Metadata)]),
 
     Result = do_work(Event),
 

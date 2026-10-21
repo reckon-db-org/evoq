@@ -1,10 +1,16 @@
 %% @doc Top-level supervisor for evoq.
 %%
 %% Supervises:
+%% - evoq_idempotency: command deduplication
+%% - evoq_dead_letter: events no handler could process
+%% - evoq_checkpoint_store_ets: projection checkpoints
 %% - evoq_aggregates_sup: Partitioned aggregate supervision
+%% - evoq_decisions_sup: decision actors
 %% - evoq_event_handler_sup: Event handler workers
 %% - evoq_pm_sup: Process manager instances
-%% - evoq_subscription_manager: reckon-db subscription management
+%%
+%% Projections, store subscriptions and emitters are started by the
+%% application, which knows its own store ids and read models.
 %%
 %% @author rgfaber
 -module(evoq_sup).

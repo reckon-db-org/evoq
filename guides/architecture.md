@@ -54,14 +54,25 @@ Why this matters:
 
 ## Component Overview
 
-### evoq_dispatcher
+### evoq_router
 
-Entry point for command processing. Routes commands through the middleware pipeline to the target aggregate.
+Entry point for command processing: validates the command, then hands it to
+`evoq_command_router`, which runs it through the middleware pipeline to the
+target aggregate.
 
 ```erlang
 %% Dispatch a command
-{ok, Version, Events} = evoq_dispatcher:dispatch(Command).
+{ok, Version, Events} = evoq_router:dispatch(Command).
+
+%% The same dispatch, also returning the resulting aggregate state
+{ok, Version, Events, AggregateState} =
+    evoq_command_router:dispatch_with_state(Command, #{}).
 ```
+
+Returning events (and, with `dispatch_with_state/2`, state) instead of a
+bare status is evoq's **session consistency**; see
+`integration_actors.md#session-consistency` for why the divergence from the
+reference CQRS model is deliberate.
 
 ### evoq_middleware
 
@@ -127,11 +138,14 @@ handle_event(EventType, Event, Metadata, State) ->
 Features:
 - Retry strategies (exponential backoff)
 - Dead letter queue for failed events
-- Checkpoint-based recovery
+- At-least-once delivery behind the shared `$all` checkpoint: the
+  subscription acknowledges a position for the node, not per handler, so
+  after a crash the events since the last acknowledgement arrive again
 
 ### evoq_process_manager
 
-Coordinate long-running business processes (sagas):
+Coordinate long-running business processes. (The reference book is blunt
+that a process manager is not a saga; evoq used the words interchangeably.)
 
 ```erlang
 -behaviour(evoq_process_manager).
@@ -195,16 +209,19 @@ evoq_sup
 │   ├── evoq_aggregate_partition_sup_1
 │   │   └── ...
 │   └── ... (4 partitions by default)
+├── evoq_decisions_sup            # Decision actors
 ├── evoq_event_handler_sup        # Event handlers
 │   └── evoq_event_handler (email_handler)
 │   └── evoq_event_handler (audit_handler)
-├── evoq_process_manager_sup      # Process managers
-│   └── evoq_process_manager (order_pm, "order-123")
-├── evoq_projection_sup           # Projections
-│   └── evoq_projection (order_summary)
-├── evoq_memory_monitor           # Memory pressure monitoring
-└── evoq_event_router             # Event type registry
+└── evoq_pm_sup                   # Process manager instances
+    └── evoq_pm_instance (order_pm, "order-123")
 ```
+
+Routers, registries, projections and store subscriptions are not under
+`evoq_sup`: the application starts them (`evoq_event_router`,
+`evoq_event_type_registry`, `evoq_pm_router`, `evoq_projection:start_link/3`,
+`evoq_store_subscription:start_link/1`), because it is the one that knows its
+store ids and read models.
 
 ### Partitioned Supervision
 

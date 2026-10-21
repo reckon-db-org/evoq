@@ -231,14 +231,14 @@ Command = evoq_command:new(
     #{amount => 100}   %% payload
 ),
 
-%% With metadata
-CommandWithMeta = evoq_command:with_metadata(Command, #{
-    user_id => <<"user-456">>,
-    correlation_id => <<"corr-789">>
-}),
+%% Metadata is the fifth argument of evoq_command:new/5
+CommandWithMeta = evoq_command:new(deposit, bank_account, <<"acc-123">>,
+                                   #{amount => 100},
+                                   #{user_id => <<"user-456">>,
+                                     correlation_id => <<"corr-789">>}),
 
 %% Dispatch
-case evoq_dispatcher:dispatch(CommandWithMeta) of
+case evoq_router:dispatch(CommandWithMeta) of
     {ok, NewVersion, ProducedEvents} ->
         %% Success - version and events returned
         ok;

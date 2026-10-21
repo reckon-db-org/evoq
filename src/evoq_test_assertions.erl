@@ -1,16 +1,19 @@
 %% @doc Test assertion helpers for evoq.
 %%
-%% Provides macros and functions for testing CQRS/ES applications.
+%% Plain functions for testing CQRS/ES applications. There is no macro
+%% header: include "evoq.hrl" for the records and call these directly.
 %%
 %% == Usage ==
 %%
 %% ```
-%% -include_lib("evoq/include/evoq_test.hrl").
+%% -include_lib("evoq/include/evoq.hrl").
 %%
 %% my_test() ->
 %%     Command = #evoq_command{...},
-%%     ?assert_command_succeeds(Command),
-%%     ?assert_events_produced([<<"OrderCreated">>]).
+%%     {ok, _Version, Events} =
+%%         evoq_test_assertions:assert_command_succeeds(Command),
+%%     ok = evoq_test_assertions:assert_events_produced(
+%%              [<<"order_placed_v1">>], Events).
 %% '''
 %%
 %% @author rgfaber

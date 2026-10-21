@@ -14,9 +14,9 @@
 
 %% Behavior callbacks
 -callback load(ProjectionName :: atom()) ->
-    {ok, Checkpoint :: non_neg_integer()} | {error, not_found | term()}.
+    {ok, Checkpoint :: integer()} | {error, not_found | term()}.
 
--callback save(ProjectionName :: atom(), Checkpoint :: non_neg_integer()) ->
+-callback save(ProjectionName :: atom(), Checkpoint :: integer()) ->
     ok | {error, term()}.
 
 %% Optional: delete checkpoint

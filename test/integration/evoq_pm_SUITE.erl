@@ -30,7 +30,9 @@
     pm_router_correlation_continue_test/1,
     compensation_record_commands_test/1,
     compensation_get_executed_test/1,
-    compensation_build_chain_test/1
+    compensation_build_chain_test/1,
+    pm_lineage_two_hops_test/1,
+    pm_compensation_runs_on_failure_test/1
 ]).
 
 %% Test PM module
@@ -68,6 +70,13 @@ handle(State, #{event_type := <<"PaymentReceived">>}, _Metadata) ->
     {ok, State#{status => paid}};
 handle(State, #{event_type := <<"OrderFailed">>}, _Metadata) ->
     {ok, State#{status => failed}};
+handle(State, #{event_type := <<"lineage_probe_v1">>}, _Metadata) ->
+    %% A command as a process manager writes one: no lineage of its own.
+    {ok, State, [evoq_command:new(probe_command, probe_aggregate, <<"probe-1">>, #{})]};
+handle(State, #{event_type := <<"compensation_probe_v1">>}, _Metadata) ->
+    Charge = evoq_command:new(charge_payment, payment, <<"pay-1">>, #{}),
+    Ship = evoq_command:new(ship_order, shipping, <<"ship-1">>, #{}),
+    {ok, State, [Charge, Ship]};
 handle(State, _Event, _Metadata) ->
     {ok, State}.
 
@@ -89,6 +98,8 @@ compensate(_State, #evoq_command{command_type = process_payment}) ->
         payload = #{amount => 100}
     },
     {ok, [RefundCmd]};
+compensate(_State, #evoq_command{command_type = ship_order}) ->
+    {ok, [evoq_command:new(issue_refund, payment, <<"pay-1">>, #{})]};
 compensate(_State, _FailedCommand) ->
     skip.
 
@@ -101,7 +112,8 @@ all() ->
         {group, pm_registration_tests},
         {group, pm_instance_tests},
         {group, pm_router_tests},
-        {group, compensation_tests}
+        {group, compensation_tests},
+        {group, pm_lineage_tests}
     ].
 
 groups() ->
@@ -123,7 +135,11 @@ groups() ->
         {compensation_tests, [sequence], [
             compensation_record_commands_test,
             compensation_get_executed_test,
-            compensation_build_chain_test
+            compensation_build_chain_test,
+            pm_compensation_runs_on_failure_test
+        ]},
+        {pm_lineage_tests, [sequence], [
+            pm_lineage_two_hops_test
         ]}
     ].
 
@@ -366,4 +382,119 @@ wait_for_instance(PMModule, ProcessId, N) ->
     case evoq_pm_router:get_instance(PMModule, ProcessId) of
         {ok, _} = Found -> Found;
         {error, not_found} -> timer:sleep(20), wait_for_instance(PMModule, ProcessId, N - 1)
+    end.
+
+%%====================================================================
+%% Lineage across a PM hop
+%%====================================================================
+
+%% A process manager is a responder: the command it issues belongs to the
+%% conversation of the event that caused it. It did not before - the command
+%% kept the correlation_id evoq_command:new/4,5 had minted and its
+%% causation_id stayed undefined - so a chain aggregate -> event -> PM ->
+%% command -> event started a new conversation at every hop and "how did I
+%% get here?" had no answer (GY-AW Causation Id / Correlation Id).
+pm_lineage_two_hops_test(_Config) ->
+    Tab = capture_dispatch(fun(_Command) -> {ok, 1, []} end),
+    try
+        {ok, Hop1} = evoq_pm_instance_sup:start_instance(?MODULE, <<"lineage-1">>, #{}),
+        Event1 = #{event_type => <<"lineage_probe_v1">>, event_id => <<"evt-1">>, data => #{}},
+        {ok, _} = evoq_pm_instance:handle_event(Hop1, Event1,
+                                                #{event_id => <<"evt-1">>,
+                                                  correlation_id => <<"conv-1">>}),
+        [First] = dispatched(Tab),
+        ?assertEqual(<<"evt-1">>, First#evoq_command.causation_id),
+        ?assertEqual(<<"conv-1">>, First#evoq_command.correlation_id),
+
+        %% Hop 2. The event that command produced carries the command's id as
+        %% its cause and the same correlation (evoq_aggregate:append_events/5),
+        %% so a second PM must copy the conversation forward again.
+        Event2Meta = #{event_id => <<"evt-2">>,
+                       causation_id => First#evoq_command.command_id,
+                       correlation_id => First#evoq_command.correlation_id},
+        {ok, Hop2} = evoq_pm_instance_sup:start_instance(?MODULE, <<"lineage-2">>, #{}),
+        Event2 = #{event_type => <<"lineage_probe_v1">>, event_id => <<"evt-2">>, data => #{}},
+        {ok, _} = evoq_pm_instance:handle_event(Hop2, Event2, Event2Meta),
+        [_FirstAgain, Second] = dispatched(Tab),
+        ?assertEqual(<<"evt-2">>, Second#evoq_command.causation_id),
+        ?assertEqual(<<"conv-1">>, Second#evoq_command.correlation_id)
+    after
+        stop_instance(<<"lineage-1">>),
+        stop_instance(<<"lineage-2">>),
+        release_capture(Tab)
+    end,
+    ok.
+
+%%====================================================================
+%% Compensation on a failed command
+%%====================================================================
+
+%% process_managers.md described a rollback that never happened: the
+%% instance only logged a failed command and evoq_saga_compensation had no
+%% caller. A saga that charges and then fails to ship refunds the charge.
+pm_compensation_runs_on_failure_test(_Config) ->
+    Tab = capture_dispatch(fun(Command) ->
+        case Command#evoq_command.command_type of
+            ship_order -> {error, declined};
+            _ -> {ok, 1, []}
+        end
+    end),
+    try
+        {ok, Pid} = evoq_pm_instance_sup:start_instance(?MODULE, <<"comp-1">>, #{}),
+        Event = #{event_type => <<"compensation_probe_v1">>, data => #{}},
+        {ok, Results} = evoq_pm_instance:handle_event(Pid, Event, #{event_id => <<"evt-c1">>}),
+
+        [Charge, Ship, Refund] = dispatched(Tab),
+        ?assertEqual(charge_payment, Charge#evoq_command.command_type),
+        ?assertEqual(ship_order, Ship#evoq_command.command_type),
+        ?assertEqual(issue_refund, Refund#evoq_command.command_type),
+
+        %% The command that did run is recorded, so a later compensation can
+        %% see what it has to undo.
+        {ok, PMState} = evoq_pm_instance:get_state(Pid),
+        ?assertEqual([charge_payment],
+                     [C#evoq_command.command_type
+                      || C <- evoq_saga_compensation:get_executed_commands(PMState)]),
+
+        %% The failure is reported, and the compensation's own result follows it.
+        ?assertMatch([{ok, 1, []}, {error, declined}, {ok, 1, []}], Results)
+    after
+        stop_instance(<<"comp-1">>),
+        release_capture(Tab)
+    end,
+    ok.
+
+%%====================================================================
+%% Dispatch capture
+%%====================================================================
+
+%% Stand in for the router: record every command a PM dispatches, in order,
+%% and answer with Responder. Keeps these tests off a real event store while
+%% still exercising the instance's own dispatch path end to end.
+capture_dispatch(Responder) ->
+    Tab = ets:new(evoq_pm_suite_dispatch, [public, duplicate_bag]),
+    ok = meck:new(evoq_router, [passthrough]),
+    ok = meck:expect(evoq_router, dispatch,
+                     fun(Command) ->
+                         ets:insert(Tab, {dispatch, erlang:unique_integer([monotonic]),
+                                          Command}),
+                         Responder(Command)
+                     end),
+    Tab.
+
+dispatched(Tab) ->
+    [Command || {dispatch, _, Command} <- lists:keysort(2, ets:tab2list(Tab))].
+
+release_capture(Tab) ->
+    meck:unload(evoq_router),
+    ets:delete(Tab).
+
+stop_instance(ProcessId) ->
+    case evoq_pm_router:get_instance(?MODULE, ProcessId) of
+        {ok, Pid} ->
+            unlink(Pid),
+            catch gen_server:stop(Pid),
+            ok;
+        {error, not_found} ->
+            ok
     end.
