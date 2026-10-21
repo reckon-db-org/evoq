@@ -300,9 +300,9 @@ the timeout.
 **Each handler answers at its own version.** A dispatch that appends two
 events reaches the handler of the first with version 1 and the handler of the
 second with version 2, and each acknowledges the version it was handed. A
-handler held to the append's last version would never answer — it was never
-given that event — and every multi-event dispatch would end at the deadline.
-A handler subscribed to both events answers at the later one.
+handler held to the append's last version would never answer, because it was
+never given that event, and every multi-event dispatch would end at the
+deadline. A handler subscribed to both events answers at the later one.
 
 The waiter joins the stream's group **before** the append, so a handler fast
 enough to finish before the router gets back from the append still has its
