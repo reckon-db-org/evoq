@@ -200,7 +200,7 @@ project(Event, Metadata, State, ReadModel) ->
 
 ## Supervision Tree
 
-```
+```text
 evoq_sup
 ├── evoq_idempotency              # Command deduplication (starts first)
 ├── evoq_dead_letter              # Events no handler could process
@@ -266,7 +266,7 @@ evoq formalizes the distinction between internal and external data:
 
 Domain events are implementation details. Integration facts are explicit public contracts. A process manager decides which domain events become integration facts, transforming internal structure into stable external schemas.
 
-```
+```text
 Domain Event (internal)           Integration Fact (external)
   venture_initiated_v1       -->    <<"hecate.venture.initiated">>
   (atom keys, full state)          (binary keys, curated subset)

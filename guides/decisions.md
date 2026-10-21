@@ -89,7 +89,7 @@ end.
 
 ## What the runtime does
 
-```
+```text
 loop until budget exhausted:
     Filter   = Mod:context(Command)
     Context  = read events matching Filter from _dcb pseudo-stream

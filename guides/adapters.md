@@ -6,7 +6,7 @@ evoq uses an adapter pattern to integrate with different event store backends. T
 
 evoq doesn't include any specific event store implementation. Instead, it defines adapter behaviors that must be implemented to connect to your chosen backend.
 
-```
+```text
 ┌─────────────────┐     ┌─────────────────┐     ┌─────────────────┐
 │    evoq     │────>│   Adapter       │────>│  Event Store    │
 │  (Framework)    │     │ (Interface)     │     │   (Backend)     │

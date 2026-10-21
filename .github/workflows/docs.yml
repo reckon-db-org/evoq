@@ -1,0 +1,39 @@
+# Every Erlang block the docs publish, in the README and under guides/,
+# compiles against evoq itself, calls only functions that exist, and runs where
+# the doc says it runs (macula-codebase-checks#8).
+#
+# ⚠ NO `paths-ignore`, on purpose. A change to a doc is exactly when this has to
+# run, and macula-codebase-checks reports a publishing repository whose docs
+# check a doc change skips. That is also why this is a workflow of its own:
+# lint-and-test.yml ignores `**.md`, and removing that there would run the whole
+# suite for a typo.
+#
+# The check itself lives in macula-ci-images and travels inside that workflow,
+# pinned by full sha (the same rule as release-guard.yml). When the check is
+# fixed there, this pin moves.
+name: docs
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-docs-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  snippets:
+    permissions:
+      contents: read
+    uses: macula-io/macula-ci-images/.github/workflows/doc-snippets-erlang.yml@711cfee7139bc40559892f4a79b3883982047326
+    with:
+      # From .tool-versions and publish-hex.yml, which is what a developer's
+      # shell and the release resolve here.
+      otp-version: '28.4.3'
+      rebar3-version: '3.27.0'

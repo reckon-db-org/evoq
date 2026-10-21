@@ -203,7 +203,7 @@ version and the events.
 
 ## Complete Desk Example
 
-```
+```text
 apps/guide_venture_lifecycle/src/initiate_venture/
     initiate_venture_v1.erl                 # Command (evoq_command)
     venture_initiated_v1.erl                # Event (evoq_event)

@@ -236,7 +236,7 @@ deserialize(Binary) -> evoq_fact:default_deserialize(Binary).
 
 Per the vertical slicing principle, fact modules belong in the same desk as the event:
 
-```
+```text
 apps/guide_venture_lifecycle/src/initiate_venture/
     initiate_venture_v1.erl           # command
     venture_initiated_v1.erl          # event
