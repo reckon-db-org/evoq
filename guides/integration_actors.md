@@ -84,7 +84,7 @@ Listeners receive integration facts from external transports and dispatch comman
 -module(on_venture_initiated_from_pg_initiate_division).
 -behaviour(evoq_listener).
 
-source_fact() -> <<"hecate.venture.initiated">>.
+source_fact() -> <<"ventures.venture_initiated">>.
 transport() -> pg.
 
 handle_fact(_FactType, Payload, _Metadata) ->

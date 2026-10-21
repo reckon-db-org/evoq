@@ -272,7 +272,7 @@ Domain events are implementation details. Integration facts are explicit public 
 
 ```text
 Domain Event (internal)           Integration Fact (external)
-  venture_initiated_v1       -->    <<"hecate.venture.initiated">>
+  venture_initiated_v1       -->    <<"ventures.venture_initiated">>
   (atom keys, full state)          (binary keys, curated subset)
 ```
 

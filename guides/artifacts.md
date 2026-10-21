@@ -191,7 +191,7 @@ Facts translate domain events into integration payloads for external consumers.
 
 Domain events are implementation details. They may change frequently, use internal identifiers, or contain data that external consumers should not see. Facts are explicit public contracts:
 
-- Different name (event: `venture_initiated_v1`, fact: `<<"hecate.venture.initiated">>`)
+- Different name (event: `venture_initiated_v1`, fact: `<<"ventures.venture_initiated">>`)
 - Different structure (subset of event data, binary keys)
 - Different versioning lifecycle
 
@@ -215,7 +215,7 @@ Domain events are implementation details. They may change frequently, use intern
 -module(venture_initiated_fact_v1).
 -behaviour(evoq_fact).
 
-fact_type() -> <<"hecate.venture.initiated">>.
+fact_type() -> <<"ventures.venture_initiated">>.
 
 from_event(venture_initiated_v1, Data, _Metadata) ->
     {ok, #{

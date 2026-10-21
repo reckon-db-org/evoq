@@ -238,7 +238,7 @@ Facts translate domain events into payloads for external consumption via pg or m
 -behaviour(evoq_fact).
 
 %% Required
--callback fact_type() -> binary().          %% e.g., <<"hecate.venture.initiated">>
+-callback fact_type() -> binary().          %% e.g., <<"ventures.venture_initiated">>
 -callback from_event(EventType :: atom(), EventData :: map(), Metadata :: map()) ->
     {ok, Payload :: map()} | skip.
 

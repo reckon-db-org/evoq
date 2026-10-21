@@ -248,11 +248,16 @@ Two of those actions are worth thinking about before you pick one:
 Events that fail after all retries go to the dead letter queue:
 
 ```erlang
-%% An operator reads the queue, retries one entry, or lets it go. A retry
-%% puts the event back on its store and answers what it dispatched.
+%% An operator reads the queue, then either retries one entry or drops it.
+%%
+%% retry/1 only looks the entry up: it answers the event and the handler
+%% that gave up on it, and leaves the entry in the queue. Re-running the
+%% handler is the operator's step, and delete/1 is what clears the entry
+%% once that has worked.
 Failed = evoq_dead_letter:list(),
 Pending = evoq_dead_letter:count(),
-{ok, _Dispatched, _Handler} = evoq_dead_letter:retry(EventId),
+{ok, Event, Handler} = evoq_dead_letter:retry(EventId),
+ok = evoq_event_handler:notify(HandlerPid, EventType, Event, Metadata),
 ok = evoq_dead_letter:delete(EventId).
 ```
 
