@@ -195,6 +195,24 @@ handle_continue(load, #evoq_aggregate_state{aggregate_module = Module,
 
 %% @private
 handle_call({execute, Command}, _From, State) ->
+    run_command(Command, State, fun reply_after_append/5);
+
+handle_call({execute_with_state, Command}, _From, State) ->
+    run_command(Command, State, fun reply_after_append_with_state/5);
+
+handle_call(get_state, _From, State) ->
+    {reply, {ok, State#evoq_aggregate_state.state}, State, get_remaining_timeout(State)};
+
+handle_call(get_version, _From, State) ->
+    {reply, {ok, State#evoq_aggregate_state.version}, State, get_remaining_timeout(State)};
+
+handle_call(_Request, _From, State) ->
+    {reply, {error, unknown_request}, State, get_remaining_timeout(State)}.
+
+%% Execute a command against the aggregate state and, when it yields events,
+%% append them and answer through Reply (the plain reply or the one carrying
+%% the new state).
+run_command(Command, State, Reply) ->
     #evoq_aggregate_state{
         stream_id = StreamId,
         aggregate_module = Module,
@@ -221,58 +239,15 @@ handle_call({execute, Command}, _From, State) ->
         {ok, Events} when is_list(Events) ->
             %% Apply events to get new state, then append
             NewAggState = apply_events(Module, AggState, Events),
-            reply_after_append(append_events(StoreId, StreamId, Version, Events, Command),
-                               Events, NewAggState, State, StartTime);
+            Reply(append_events(StoreId, StreamId, Version, Events, Command),
+                  Events, NewAggState, State, StartTime);
 
         {error, Reason} = Error ->
             %% Emit exception telemetry
             emit_execute_exception(StreamId, Reason, StartTime),
             Timeout = LifespanModule:after_error(Reason),
             {reply, Error, State, Timeout}
-    end;
-
-handle_call({execute_with_state, Command}, _From, State) ->
-    #evoq_aggregate_state{
-        stream_id = StreamId,
-        aggregate_module = Module,
-        store_id = StoreId,
-        state = AggState,
-        version = Version,
-        lifespan_module = LifespanModule
-    } = State,
-
-    StartTime = evoq_telemetry:monotonic_start(),
-
-    telemetry:execute(?TELEMETRY_AGGREGATE_EXECUTE_START, #{
-        system_time => erlang:system_time()
-    }, #{
-        aggregate_id => StreamId,
-        aggregate_module => Module,
-        store_id => StoreId,
-        command_type => maps:get(command_type, Command#evoq_command.payload, unknown)
-    }),
-
-    case Module:execute(AggState, Command#evoq_command.payload) of
-        {ok, Events} when is_list(Events) ->
-            NewAggState = apply_events(Module, AggState, Events),
-            reply_after_append_with_state(
-                append_events(StoreId, StreamId, Version, Events, Command),
-                Events, NewAggState, State, StartTime);
-
-        {error, Reason} = Error ->
-            emit_execute_exception(StreamId, Reason, StartTime),
-            Timeout = LifespanModule:after_error(Reason),
-            {reply, Error, State, Timeout}
-    end;
-
-handle_call(get_state, _From, State) ->
-    {reply, {ok, State#evoq_aggregate_state.state}, State, get_remaining_timeout(State)};
-
-handle_call(get_version, _From, State) ->
-    {reply, {ok, State#evoq_aggregate_state.version}, State, get_remaining_timeout(State)};
-
-handle_call(_Request, _From, State) ->
-    {reply, {error, unknown_request}, State, get_remaining_timeout(State)}.
+    end.
 
 %% @private Fold new events onto the aggregate state.
 apply_events(Module, State, Events) ->
@@ -480,7 +455,9 @@ is_integrity_violation(_) -> false.
 %% so its retry loop fires exactly once per conflict. Any other error
 %% is returned verbatim.
 -spec reply_after_append_error(term(), #evoq_aggregate_state{}, module(),
-                               atom(), binary(), module()) -> term().
+                               atom(), binary(), module()) ->
+    {reply, {error, term()}, #evoq_aggregate_state{}}
+    | {reply, {error, term()}, #evoq_aggregate_state{}, timeout()}.
 reply_after_append_error(Error, State, Module, StoreId, StreamId, LifespanModule) ->
     case classify_append_error(Error) of
         integrity_violation ->

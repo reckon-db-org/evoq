@@ -42,68 +42,41 @@ init([]) ->
 
     Children = [
         %% Idempotency store (must start first)
-        #{
-            id => evoq_idempotency,
-            start => {evoq_idempotency, start_link, []},
-            restart => permanent,
-            shutdown => 5000,
-            type => worker,
-            modules => [evoq_idempotency]
-        },
+        worker_child(evoq_idempotency),
         %% Dead letter store
-        #{
-            id => evoq_dead_letter,
-            start => {evoq_dead_letter, start_link, []},
-            restart => permanent,
-            shutdown => 5000,
-            type => worker,
-            modules => [evoq_dead_letter]
-        },
+        worker_child(evoq_dead_letter),
         %% Checkpoint store for projections
-        #{
-            id => evoq_checkpoint_store_ets,
-            start => {evoq_checkpoint_store_ets, start_link, []},
-            restart => permanent,
-            shutdown => 5000,
-            type => worker,
-            modules => [evoq_checkpoint_store_ets]
-        },
+        worker_child(evoq_checkpoint_store_ets),
         %% Aggregate supervision tree
-        #{
-            id => evoq_aggregates_sup,
-            start => {evoq_aggregates_sup, start_link, []},
-            restart => permanent,
-            shutdown => infinity,
-            type => supervisor,
-            modules => [evoq_aggregates_sup]
-        },
+        supervisor_child(evoq_aggregates_sup),
         %% Stateful decision-actor supervision tree (Part B)
-        #{
-            id => evoq_decisions_sup,
-            start => {evoq_decisions_sup, start_link, []},
-            restart => permanent,
-            shutdown => infinity,
-            type => supervisor,
-            modules => [evoq_decisions_sup]
-        },
+        supervisor_child(evoq_decisions_sup),
         %% Event handler supervision tree
-        #{
-            id => evoq_event_handler_sup,
-            start => {evoq_event_handler_sup, start_link, []},
-            restart => permanent,
-            shutdown => infinity,
-            type => supervisor,
-            modules => [evoq_event_handler_sup]
-        },
+        supervisor_child(evoq_event_handler_sup),
         %% Process manager supervision tree
-        #{
-            id => evoq_pm_sup,
-            start => {evoq_pm_sup, start_link, []},
-            restart => permanent,
-            shutdown => infinity,
-            type => supervisor,
-            modules => [evoq_pm_sup]
-        }
+        supervisor_child(evoq_pm_sup)
     ],
 
     {ok, {SupFlags, Children}}.
+
+%% A permanent worker started by Module:start_link/0.
+worker_child(Module) ->
+    #{
+        id => Module,
+        start => {Module, start_link, []},
+        restart => permanent,
+        shutdown => 5000,
+        type => worker,
+        modules => [Module]
+    }.
+
+%% A permanent child supervisor started by Module:start_link/0.
+supervisor_child(Module) ->
+    #{
+        id => Module,
+        start => {Module, start_link, []},
+        restart => permanent,
+        shutdown => infinity,
+        type => supervisor,
+        modules => [Module]
+    }.
