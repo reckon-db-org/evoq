@@ -58,11 +58,15 @@
 %% `interested_in/0', which the event type registry does hold, unlike a
 %% process manager instance) is itself in the required set of the dispatch
 %% that triggered it. Dispatching from its `handle_event/4' with `strong'
-%% waits for the read models of the events it just appended, and the
-%% projection that would ack them is still handling the event that ran the
-%% cascade: it cannot pick up the new events until it returns, and the
-%% cascade cannot return until they are acked. Both dispatches end at their
-%% deadline with both writes made. A cascade dispatches `eventual': it does
+%% would wait for the read models of the events it just appended while
+%% holding the event it has not finished, and one of those read models may be
+%% the projection still handling that very event: nothing can end the wait.
+%%
+%% The calling process is therefore never in its own required set
+%% (`await/4' drops `self()'): a dispatcher cannot wait for an ack it owes,
+%% and it still waits for every other handler. What that does NOT fix is a
+%% cascade waiting for a projection that is still busy with the event that
+%% ran it, which no library can see: a cascade dispatches `eventual', it does
 %% not read its own write, and the entry-point dispatch that triggered it is
 %% the one that asked for the guarantee.
 %%
@@ -217,7 +221,26 @@ await(Waiter, Required, Version, Opts) ->
     Timeout = maps:get(timeout, Opts, ?DEFAULT_TIMEOUT),
     Deadline = erlang:monotonic_time(millisecond) + Timeout,
     Range = {maps:get(first_version, Opts, Version), Version},
-    wait_loop(Waiter, Required, #{}, Version, Range, Deadline).
+    wait_loop(Waiter, not_self(Required), #{}, Version, Range, Deadline).
+
+%% @private A dispatcher cannot wait for its own acknowledgement.
+%%
+%% A cascade written as an `evoq_event_handler' dispatches from inside its
+%% own `handle_event/4', and it is registered for the types its command
+%% appends, so the registry names the calling process in its own required
+%% set. It cannot ack while it is waiting: the event it would have to write
+%% is the one it is blocked in the middle of. Left in the set, the wait could
+%% only ever end at the deadline, with every write already made.
+%%
+%% Taking it out is the only reading that is not a lie: the caller's own
+%% write happens after it returns, so it is not "behind" anything, and every
+%% OTHER handler is still waited for. A cascade that dispatches `strong'
+%% therefore returns on the other handlers' acks and then writes its own
+%% event; the doc tells a cascade to ask for `eventual' anyway, because it
+%% does not read its own write.
+not_self(Required) ->
+    Self = self(),
+    [Pair || {Handler, _Version} = Pair <- Required, Handler =/= Self].
 
 %% @doc Acknowledge a handler's or projection's write from the event it was
 %% handed.

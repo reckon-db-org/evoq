@@ -319,14 +319,18 @@ its own event.** A cascade written as an `evoq_event_handler` (a module with
 `interested_in/0`, which the event type registry does hold, unlike a process
 manager instance) is itself one of the handlers the dispatch that triggered it
 is waiting for. If it dispatches a command with `strong`, it waits for the
-read models of the events it just appended; the projection that would ack
-them is still handling the event that ran the cascade, and cannot pick up the
-new events until it returns. Nothing can end that wait: both dispatches reach
-their deadline with both writes made. A cascade dispatches `:eventual`, since
-it does not read its own write; the entry-point dispatch that triggered it is
-the one that asked for the guarantee. (Macula-realm found this with a realm
-membership's revocation: the manager that ends the person's clients waited on
-the same `realm_members` projection that was handling the revocation.)
+read models of the events it just appended while still holding the event it
+has not finished, and one of those read models may be the projection busy with
+that very event.
+
+Two things keep this from being a trap. The calling process is never in its
+own required set: `await/4` drops `self()`, so a dispatcher cannot wait for an
+ack it owes, and every other handler is still waited for. And a cascade
+dispatches `:eventual` regardless, because it does not read its own write; the
+entry-point dispatch that triggered it is the one that asked for the
+guarantee. (Macula-realm found the shape with a membership's revocation: the
+manager that ends the person's clients subscribed to the same event type its
+cascade appends.)
 
 A wait that times out answers `{error, consistency_timeout}` rather than
 `{ok, ...}`: the command's events are appended either way, so a caller must

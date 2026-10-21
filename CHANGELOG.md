@@ -27,12 +27,17 @@ projection.
 - The router passes the append's first version (`required/1` is gone; it is
   `required/2` now), and `{handlers, [...]}` still answers at the version the
   dispatch produced, which is what naming handlers rather than events means.
+- **A dispatcher is never in its own required set.** A handler that dispatches
+  from inside `handle_event/4` (a cascade) is subscribed to the event type its
+  own command appends, so the registry named the calling process in its own
+  required set, and it could never acknowledge while blocked in the wait: the
+  dispatch ended at the deadline with the write made. `await/4` now drops
+  `self()`, so a cascade returns on the other handlers' acks and writes its
+  own event when it returns. It still waits for every other handler.
 - Documented, in `guides/event_handlers.md` and this module's own doc: a
-  cascade written as an `evoq_event_handler` must dispatch `:eventual`, not
-  `:strong`. It is itself in the required set of the dispatch that triggered
-  it, so waiting for the read model of the events it appends waits for the
-  projection still handling its own triggering event, and both dispatches end
-  at the deadline. Found in macula-realm with a membership cascade.
+  cascade should dispatch `:eventual` anyway, because it does not read its own
+  write, and a projection still busy with the event that ran the cascade
+  cannot be waited for by anything.
 
 ## [1.29.0] - 2026-10-21
 

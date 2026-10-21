@@ -18,6 +18,9 @@ execute(_State, #{command_type := <<"emit_quiet_probe">>}) ->
 execute(_State, #{command_type := <<"emit_two_probes">>}) ->
     {ok, [#{event_type => <<"strong_probe_v1">>, marker => <<"one">>},
           #{event_type => <<"other_probe_v1">>, marker => <<"two">>}]};
+%% The event a cascade appends: the same type its own handler subscribes to.
+execute(_State, #{command_type := <<"emit_cascade_probe">>}) ->
+    {ok, [#{event_type => <<"strong_probe_v1">>, marker => <<"cascade">>}]};
 execute(_State, _Command) ->
     {error, unknown_command}.
 

@@ -115,6 +115,34 @@ a_multi_event_append_waits_for_each_handler_at_its_own_version_test_() ->
         end)
     end}.
 
+%% A CASCADE THAT DISPATCHES `strong' FROM ITS OWN handle_event/4 CANNOT WAIT
+%% FOR ITSELF. The cascading handler subscribes to the event type its own
+%% command appends, so the registry names the calling process in the required
+%% set of its own dispatch, and it can never acknowledge while it is blocked
+%% in the wait: the event it owes is the one it is inside of. Left in the set,
+%% the dispatch ends at the deadline with the write made (macula-realm's
+%% membership cascade). The caller is dropped from its own required set, so
+%% the dispatch returns on the OTHER handler's ack, which is the guarantee it
+%% can actually have.
+a_cascade_does_not_wait_for_its_own_acknowledgement_test_() ->
+    {timeout, 30, fun() ->
+        with_cascade_probe(fun() ->
+            %% Eventual, so the test is not the one waiting: the cascade runs
+            %% inside the other handler's handle_event/4.
+            ?assertMatch({ok, ?STREAM_VERSION, [_]},
+                         dispatch(eventual, <<"emit_cascade_probe">>, <<"stream-cascade">>)),
+            Result = receive
+                         {cascade_result, R, Elapsed} -> {R, Elapsed}
+                     after 10000 ->
+                         error(the_cascade_never_returned)
+                     end,
+            ?assertMatch({{ok, ?STREAM_VERSION, [_]}, _}, Result),
+            {_Ok, Waited} = Result,
+            %% It waited for the handler that is NOT itself: 200 ms of write.
+            ?assert(Waited >= 150)
+        end)
+    end}.
+
 %%====================================================================
 %% Helpers
 %%====================================================================
@@ -236,7 +264,46 @@ flush_sink() ->
     after 0 -> ok
     end.
 
-%% @private
+%% A cascading handler and a second handler on the same event type, both
+%% registered, with the store delivering from ANOTHER process: delivering
+%% inline would hand the cascading handler its own event inside its own call
+%% (`notify/4' is a gen_server call), which is a different deadlock.
+with_cascade_probe(Body) ->
+    evoq_test_isolation:stop_leftover_evoq(),
+    flush_sink(),
+    {ok, Started} = application:ensure_all_started(evoq),
+    {ok, Slow} = evoq_event_handler:start_link(evoq_strong_probe_handler,
+                                               #{sink => self(), sleep => 200}),
+    {ok, Cascade} = evoq_event_handler:start_link(evoq_cascading_probe_handler,
+                                                  #{sink => self()}),
+    meck:new(evoq_event_store, [passthrough, no_link]),
+    meck:expect(evoq_event_store, read, 5,
+                fun(_Store, _Stream, _From, _Count, _Dir) -> {ok, []} end),
+    meck:expect(evoq_event_store, append, 4,
+                fun(Store, Stream, _Expected, Events) ->
+                    deliver_all(spawn_delivery, [Slow, Cascade], Store, Stream, Events),
+                    {ok, ?STREAM_VERSION}
+                end),
+    try
+        Body()
+    after
+        catch gen_server:stop(Slow),
+        catch gen_server:stop(Cascade),
+        meck:unload(evoq_event_store),
+        lists:foreach(fun application:stop/1, lists:reverse(Started))
+    end.
+
+%% @private A delivery to several handlers, as a store subscription reaches
+%% every process registered for the type.
+deliver_all(spawn_delivery, Handlers, Store, Stream, Events) when is_list(Handlers) ->
+    _ = spawn(fun() ->
+                  lists:foreach(
+                    fun(Handler) ->
+                            lists:foreach(fun(Event) -> deliver(Handler, Store, Stream, Event) end,
+                                          Events)
+                    end, Handlers)
+              end),
+    ok;
 deliver_all(inline_delivery, Handler, Store, Stream, Events) ->
     lists:foreach(fun(Event) -> deliver(Handler, Store, Stream, Event) end, Events);
 deliver_all(spawn_delivery, Handler, Store, Stream, Events) ->
