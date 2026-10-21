@@ -96,6 +96,78 @@ an_ack_for_another_stream_is_not_counted_test() ->
     ok = evoq_consistency:close(Waiter).
 
 %%====================================================================
+%% What is not in the required set
+%%====================================================================
+
+%% THE REGISTRY IS CLUSTER-WIDE, THE DELIVERY IS NOT. The event type registry
+%% is a pg scope, so its groups name members on every connected node, while
+%% the event router skips a pid on another node ("belongs to another node").
+%% Waiting for such a pid waits for an ack it cannot send for this store:
+%% every strong dispatch would end in a timeout. The fake pid below is what
+%% `pg:get_members/2' returns for a member the cluster has elsewhere; pg
+%% refuses to join one from here (`{nolocal, Pid}'), so a real cluster cannot
+%% be built in a unit test, and the predicate is what the wait is built on.
+a_handler_on_another_node_is_not_waited_for_test() ->
+    ?assertNot(evoq_consistency:waitable(remote_pid())),
+    ?assert(evoq_consistency:waitable(self())),
+    %% A module is called here, and acks through the calling process.
+    ?assert(evoq_consistency:waitable(evoq_consistency_tests)).
+
+%%====================================================================
+%% A handler that dropped the event instead of writing it
+%%====================================================================
+
+%% A handler whose own error policy dropped the event sends `dropped/2', and
+%% the wait answers with it AT ONCE: the write it waits for is not coming, so
+%% holding the caller for the deadline says the same thing later and worse.
+a_dropped_event_ends_the_wait_at_once_test() ->
+    Waiter = evoq_consistency:open(test_store, <<"s-dropped">>),
+    Started = erlang:monotonic_time(millisecond),
+    ?assertEqual({error, {dropped, dropping_handler}},
+                 await_drop(Waiter, dropping_handler, 5)),
+    ?assert(erlang:monotonic_time(millisecond) - Started < 2000),
+    ok = evoq_consistency:close(Waiter).
+
+%% A drop for an event BELOW the one being waited on is not this dispatch's:
+%% the handler may yet write the version the caller waits for.
+a_drop_below_the_waited_version_does_not_end_the_wait_test() ->
+    Waiter = evoq_consistency:open(test_store, <<"s-dropped-old">>),
+    ok = evoq_consistency:dropped(
+           dropping_handler, #{store_id => test_store, stream_id => <<"s-dropped-old">>,
+                               stream_version => 2}),
+    ?assertEqual({error, timeout},
+                 evoq_consistency:await(Waiter, [dropping_handler], 5, #{timeout => 100})),
+    ok = evoq_consistency:close(Waiter).
+
+%% And a drop by a handler this dispatch does not wait for is another
+%% dispatch's business.
+a_drop_by_another_handler_does_not_end_the_wait_test() ->
+    Waiter = evoq_consistency:open(test_store, <<"s-dropped-other">>),
+    ok = evoq_consistency:dropped(
+           other_handler, #{store_id => test_store, stream_id => <<"s-dropped-other">>,
+                            stream_version => 5}),
+    ?assertEqual({error, timeout},
+                 evoq_consistency:await(Waiter, [waited_handler], 5, #{timeout => 100})),
+    ok = evoq_consistency:close(Waiter).
+
+%%====================================================================
+%% Acks the wait did not need
+%%====================================================================
+
+%% Every waiter on a stream's group is sent every ack for that stream, so a
+%% gen_server that dispatches with `strong' is handed acks for handlers it
+%% never waited on. `await/4' takes out only what it needs; `close/1' takes
+%% the rest out, so a caller that dispatches in a loop does not accumulate
+%% them in a mailbox that nothing else reads.
+acks_the_wait_did_not_need_leave_no_message_behind_test() ->
+    Waiter = evoq_consistency:open(test_store, <<"s-stray">>),
+    ok = evoq_consistency:acknowledge(unwanted_handler, test_store, <<"s-stray">>, 3),
+    ok = evoq_consistency:acknowledge(wanted_handler, test_store, <<"s-stray">>, 3),
+    ?assertEqual(ok, evoq_consistency:await(Waiter, [wanted_handler], 3, #{timeout => 1000})),
+    ok = evoq_consistency:close(Waiter),
+    ?assertEqual([], this_stream_messages(drain(), <<"s-stray">>)).
+
+%%====================================================================
 %% Nothing to wait for
 %%====================================================================
 
@@ -118,6 +190,38 @@ closing_a_waiter_twice_is_harmless_test() ->
 %%====================================================================
 %% Helpers
 %%====================================================================
+
+%% A drop sent from another process, as a handler whose error policy let the
+%% event go sends it, and the wait run against a 5 s deadline so the
+%% assertion is about the drop and not about the clock.
+await_drop(Waiter, Module, Version) ->
+    Self = self(),
+    spawn_link(fun() ->
+        ok = evoq_consistency:dropped(
+               Module, #{store_id => test_store, stream_id => <<"s-dropped">>,
+                         stream_version => Version}),
+        Self ! dropped
+    end),
+    evoq_consistency:await(Waiter, [Module], Version, #{timeout => 5000}).
+
+%% A pid whose node is another one, which no local node can join to a pg
+%% group (`{nolocal, Pid}'): what a cluster-wide group names for a member
+%% elsewhere. `list_to_pid/1' refuses a remote pid, so the external term is
+%% built directly (NEW_PID_EXT: node, id, serial, creation).
+remote_pid() ->
+    Node = binary:part(term_to_binary('other@host.example'),
+                       1, byte_size(term_to_binary('other@host.example')) - 1),
+    binary_to_term(<<131, 88, Node/binary, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1>>).
+
+%% Everything in this process's mailbox, oldest first, leaving it empty.
+drain() ->
+    receive Message -> [Message | drain()]
+    after 0 -> []
+    end.
+
+%% The waits and drops for one stream, which are the ones a close flushes.
+this_stream_messages(Messages, StreamId) ->
+    [M || M = {_Tag, _Identity, test_store, StreamId, _Version} <- Messages].
 
 %% A process that acknowledges one stream version, as a handler does after
 %% its write, and reports its pid.

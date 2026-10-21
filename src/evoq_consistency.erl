@@ -28,6 +28,23 @@
 %% handler that was already past the stream answers for it, and one that is
 %% behind does not.
 %%
+%% == What an ack says, and what a drop says ==
+%%
+%% An ack is sent only after the handler's own write. A handler whose error
+%% policy dropped the event instead (`skip' or `{dead_letter, _}' from
+%% `on_error/4') sends `dropped/2', and the wait answers
+%% `{error, {dropped, Handler}}' at once, because that write will never
+%% happen. A projection that deliberately skips an event it does not want
+%% (`{skip, State, ReadModel}' from `project/4') is not a drop: it decided,
+%% and it acks.
+%%
+%% A handler on another node is not in the required set. The registry is a
+%% cluster-wide pg scope, so it names pids on every connected node, while the
+%% router delivers only to local ones.
+%%
+%% Every waiter on a stream's group receives every ack for that stream, so
+%% `close/1' takes the ones this wait did not consume out of the mailbox.
+%%
 %% == What strong does not wait for ==
 %%
 %% A process manager instance. Which instances handle an event is decided at
@@ -44,7 +61,8 @@
 -export([open/2, close/1, await/4]).
 -export([required/1]).
 -export([wait_for/4]).
--export([acknowledge/2, acknowledge/4]).
+-export([acknowledge/2, acknowledge/4, dropped/2]).
+-export([waitable/1]).
 -export([start_pg/0]).
 
 -define(PG_SCOPE, evoq_consistency_pg).
@@ -79,10 +97,19 @@ open(StoreId, StreamId) ->
     #{key => Key, store_id => StoreId, stream_id => StreamId}.
 
 %% @doc Leave the group a waiter joined. Safe to call twice.
+%%
+%% Every waiter in a stream's group receives every ack for that stream, so a
+%% caller that dispatches gets acks for handlers it never waited on, and a
+%% concurrent dispatcher's ack can arrive here too. `await/4' takes out only
+%% what it needs; the rest are taken out here, so a caller that dispatches in
+%% a loop does not accumulate them in its mailbox. An ack already in flight
+%% when the process leaves the group can still land after `close/1' has run:
+%% a caller that keeps its mailbox clean against that uses a catch-all
+%% `handle_info'.
 -spec close(waiter()) -> ok.
-close(#{key := Key}) ->
+close(#{key := Key, store_id := StoreId, stream_id := StreamId}) ->
     _ = pg:leave(?PG_SCOPE, Key, self()),
-    ok.
+    flush(StoreId, StreamId).
 
 %% @doc The handlers and projections subscribed to the types of these events.
 %%
@@ -101,14 +128,38 @@ targets(#{event_type := Type} = Event) when is_atom(Type) ->
     targets(Event#{event_type => atom_to_binary(Type, utf8)});
 targets(Event) ->
     {_DeliveredAs, Handlers} = evoq_event_router:delivery_targets(Event),
-    Handlers.
+    [H || H <- Handlers, waitable(H)].
+
+%% @doc Is this registry entry one this node can wait for?
+%%
+%% The event type registry is a CLUSTER-WIDE pg scope, so `get_handlers/1'
+%% names members of every connected node, while the router delivers only to
+%% local pids and skips a remote one ("belongs to another node"). Waiting for
+%% a remote pid is waiting for an ack that pid cannot send for this store: it
+%% is not subscribed here and never sees the event, so every dispatch would
+%% end in a consistency timeout. The required set is the delivered set, so a
+%% pid on another node is not in it. A module entry stays: the router calls
+%% it here, and it acks through the calling process.
+-spec waitable(pid() | atom()) -> boolean().
+waitable(Pid) when is_pid(Pid) ->
+    node(Pid) =:= node();
+waitable(Module) when is_atom(Module) ->
+    true.
 
 %% @doc Wait until every required handler has acked the given stream version.
 %%
 %% Waits for handlers and projections; a timeout answers as an error, never
 %% as a silent success. An empty required list has nothing to wait for and
 %% answers at once.
--spec await(waiter(), [pid() | atom()], integer(), map()) -> ok | {error, timeout}.
+%%
+%% An ack means the handler wrote its effect. A handler whose own error
+%% policy dropped an event instead (`skip', `{dead_letter, _}' from
+%% `on_error/4') says so with `dropped/2' rather than acknowledging, and this
+%% answers `{error, {dropped, Handler}}' at once: the write did not happen,
+%% and waiting out the deadline for it would say the same thing later and
+%% less clearly.
+-spec await(waiter(), [pid() | atom()], integer(), map()) ->
+    ok | {error, timeout | {dropped, pid() | atom()}}.
 await(Waiter, Required, Version, Opts) ->
     Timeout = maps:get(timeout, Opts, ?DEFAULT_TIMEOUT),
     Deadline = erlang:monotonic_time(millisecond) + Timeout,
@@ -142,12 +193,34 @@ acknowledge_written(_Module, _NotFromAStreamSubscription) ->
 %% are both offered as identities, so a waiter can name either.
 -spec acknowledge(atom(), atom(), binary(), integer()) -> ok.
 acknowledge(Module, StoreId, StreamId, Version) ->
+    notify_waiters({handler_ack, {self(), Module}, StoreId, StreamId, Version}).
+
+%% @doc Say that a handler did NOT write this event: its own error policy
+%% dropped it (`skip' or `{dead_letter, _}' from `on_error/4').
+%%
+%% The counterpart of `acknowledge/2'. It carries the same routing metadata
+%% and is deliberately not an ack: a waiter told `ok' about an event a handler
+%% dropped was told a write happened that did not.
+-spec dropped(atom(), map()) -> ok.
+dropped(Module, Metadata) ->
+    Stores = {maps:get(store_id, Metadata, undefined),
+              maps:get(stream_id, Metadata, undefined),
+              maps:get(stream_version, Metadata, undefined)},
+    dropped_written(Module, Stores).
+
+%% @private
+dropped_written(Module, {StoreId, StreamId, Version})
+  when is_atom(StoreId), is_binary(StreamId), is_integer(Version) ->
+    notify_waiters({handler_dropped, {self(), Module}, StoreId, StreamId, Version});
+dropped_written(_Module, _NotFromAStreamSubscription) ->
+    ok.
+
+%% @private Every waiter listening on this stream hears it; one on another
+%% stream never does.
+notify_waiters(Message = {_Tag, _Identity, StoreId, StreamId, _Version}) ->
     start_pg(),
     Key = waiter_key(StoreId, StreamId),
-    Waiters = pg:get_members(?PG_SCOPE, Key),
-    lists:foreach(fun(Pid) ->
-        Pid ! {handler_ack, {self(), Module}, StoreId, StreamId, Version}
-    end, Waiters),
+    lists:foreach(fun(Pid) -> Pid ! Message end, pg:get_members(?PG_SCOPE, Key)),
     ok.
 
 %% @doc Wait for exactly these handlers to ack this version.
@@ -196,9 +269,41 @@ acked_reply(false, #{store_id := StoreId, stream_id := StreamId} = Waiter,
     Remaining = max(0, Deadline - erlang:monotonic_time(millisecond)),
     receive
         {handler_ack, Identity, StoreId, StreamId, AckedVersion} when is_integer(AckedVersion) ->
-            wait_loop(Waiter, Required, record(Identity, AckedVersion, Acked), Version, Deadline)
+            wait_loop(Waiter, Required, record(Identity, AckedVersion, Acked), Version, Deadline);
+        {handler_dropped, Identity, StoreId, StreamId, DroppedVersion}
+          when is_integer(DroppedVersion) ->
+            drop_reply(Identity, DroppedVersion, Required, Waiter, Acked, Version, Deadline)
     after Remaining ->
         {error, timeout}
+    end.
+
+%% @private A handler this dispatch waits for dropped the event by its own
+%% error policy, so it will never ack: the answer is a drop, at once, not a
+%% deadline. A drop for a handler this dispatch does not wait for, or for an
+%% event below the one being waited on, is about some other dispatch and the
+%% wait carries on.
+drop_reply({Pid, Module} = Identity, DroppedVersion, Required, Waiter, Acked, Version, Deadline) ->
+    WaitedFor = lists:member(Pid, Required) orelse lists:member(Module, Required),
+    drop_verdict(WaitedFor andalso DroppedVersion >= Version,
+                 Identity, Required, Waiter, Acked, Version, Deadline).
+
+%% @private Named by its module: that is what a caller subscribes by, and it
+%% is the same for the pid and the module identity of one handler.
+drop_verdict(true, {_Pid, Module}, _Required, _Waiter, _Acked, _Version, _Deadline) ->
+    {error, {dropped, Module}};
+drop_verdict(false, _Identity, Required, Waiter, Acked, Version, Deadline) ->
+    wait_loop(Waiter, Required, Acked, Version, Deadline).
+
+%% @private Take this stream's acks and drops out of the mailbox, after
+%% leaving the group. `after 0', so an empty mailbox costs nothing.
+flush(StoreId, StreamId) ->
+    receive
+        {handler_ack, _Identity, StoreId, StreamId, _Version} ->
+            flush(StoreId, StreamId);
+        {handler_dropped, _Identity, StoreId, StreamId, _Version} ->
+            flush(StoreId, StreamId)
+    after 0 ->
+        ok
     end.
 
 %% @private Both identities of the acking process, so a required entry

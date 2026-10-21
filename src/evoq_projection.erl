@@ -328,10 +328,16 @@ handle_call({notify, EventType, Event, Metadata}, _From, State) ->
             %% THE READ MODEL IS WRITTEN, AND SAID SO. A dispatch with
             %% `strong' consistency waits for this: a caller that reads its
             %% own write after dispatching is reading what this call just
-            %% wrote. A skip, a halt or a stop wrote nothing and does not
+            %% wrote. A halt or a stop wrote nothing and does not
             %% acknowledge, so a waiter is never told about a write that did
             %% not happen.
             ok = evoq_consistency:acknowledge(State#state.projection_module, Metadata),
+            {reply, ok, NewState};
+        {dropped, NewState} ->
+            %% The projection's own error policy dropped this event, so the
+            %% read model does not have it. A waiting dispatch hears that,
+            %% instead of waiting out its deadline for an ack.
+            ok = evoq_consistency:dropped(State#state.projection_module, Metadata),
             {reply, ok, NewState};
         {stop, Reason} ->
             %% The projection's on_error/4 chose stop: reply first, then end,
@@ -433,7 +439,11 @@ project_with_retry(EventType, Event, Metadata, EventVersion, FailureContext, Sta
                               StartTime, State);
 
         {skip, NewProjectionState, NewReadModel} ->
-            %% Event skipped but checkpoint still advances
+            %% The projection itself declined this event, which is a
+            %% decision, not a failure: nothing was written because nothing
+            %% was wanted. The checkpoint still advances, and a `strong'
+            %% dispatch is acknowledged: dropping is what an ERROR policy
+            %% does, further down, and that is a drop.
             advance_checkpoint(EventVersion,
                                State#state{projection_state = NewProjectionState,
                                            read_model = NewReadModel});
@@ -525,11 +535,12 @@ execute_error_action({retry, DelayMs}, EventType, Event, Metadata, EventVersion,
 
 execute_error_action(skip, _EventType, Event, Metadata, _EventVersion,
                      FailureContext, State) ->
-    %% Skipped, but the checkpoint still advances: the projection said it does
-    %% not want this event, which is not the same as failing to see it. Said
-    %% out loud, because a skip is a hole in the read model.
+    %% The event FAILED and the projection's error policy let it go: the
+    %% checkpoint still advances, and that is a hole in the read model. Said
+    %% out loud in the log, and said to a waiting `strong' dispatch, which is
+    %% told the write did not happen rather than acknowledged for it.
     log_dropped(skip, Event, Metadata, FailureContext, State),
-    advance_checkpoint(position(Metadata), State);
+    dropped_checkpoint(position(Metadata), State);
 
 execute_error_action(stop, _EventType, _Event, _Metadata, _EventVersion,
                      FailureContext, _State) ->
@@ -540,7 +551,7 @@ execute_error_action({dead_letter, Reason}, _EventType, Event, Metadata,
                      #state{projection_module = ProjectionModule} = State) ->
     _ = evoq_dead_letter:store(Event, ProjectionModule, FailureContext, Reason),
     log_dropped({dead_letter, Reason}, Event, Metadata, FailureContext, State),
-    advance_checkpoint(EventVersion, State).
+    dropped_checkpoint(EventVersion, State).
 
 %% @private A retry re-runs project/4 on the same state; nothing has moved.
 increment_attempt(#evoq_failure_context{attempt_number = N} = Ctx) ->
@@ -558,6 +569,13 @@ log_dropped(Why, Event, Metadata, #evoq_failure_context{attempt_number = Attempt
                      position => position(Metadata),
                      attempts => Attempt,
                      error => Error}).
+
+%% @private The same move, for an event the projection's error policy
+%% dropped: the checkpoint advances over it, and the answer says the read
+%% model does not have this event.
+dropped_checkpoint(EventVersion, State) ->
+    {ok, Advanced} = advance_checkpoint(EventVersion, State),
+    {dropped, Advanced}.
 
 %% @private Move the checkpoint (stored and in memory) to EventVersion.
 advance_checkpoint(EventVersion,
@@ -740,6 +758,10 @@ replay_events_list([{Position, {Event, EventMetadata}} | Rest], State) ->
     Metadata = EventMetadata#{global_position => Position, replaying => true},
     case handle_event_internal(EventType, Event, Metadata, State) of
         {ok, NewState} -> replay_events_list(Rest, NewState);
+        %% A drop is not a halt: the event's checkpoint moved past it and the
+        %% replay carries on, exactly as the live feed does. A rebuild would
+        %% otherwise stop at the first event an error policy let go.
+        {dropped, NewState} -> replay_events_list(Rest, NewState);
         {stop, Reason} -> {halted, State, Reason}
     end.
 

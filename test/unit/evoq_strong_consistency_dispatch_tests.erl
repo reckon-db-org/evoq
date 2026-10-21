@@ -80,6 +80,19 @@ a_named_handler_is_waited_for_test_() ->
           end)
     end}.
 
+%% A HANDLER THAT DROPPED THE EVENT IS NOT A WRITE. The handler's own error
+%% policy answered `skip', so the event is in no read model: a strong
+%% dispatch that answered `ok' would hand the caller a guarantee that is
+%% false. It answers with the handler's name, at once, rather than waiting
+%% out its deadline for an ack that is not coming.
+a_handler_that_dropped_the_event_fails_the_dispatch_test_() ->
+    {timeout, 30, fun() ->
+        Started = erlang:monotonic_time(millisecond),
+        ?assertEqual({error, {consistency_dropped, evoq_dropping_probe_handler}},
+                     with_dropping_probe(fun() -> dispatch(strong, <<"stream-dropped">>) end)),
+        ?assert(erlang:monotonic_time(millisecond) - Started < 3000)
+    end}.
+
 %%====================================================================
 %% Helpers
 %%====================================================================
@@ -125,6 +138,30 @@ with_probe(SleepMs, _Stream, Delivery, Body) ->
         %% test would be in the required set of the next one and never ack
         %% it (it is not the one the store delivers to). That turned this
         %% suite green alone and red in the full run.
+        catch gen_server:stop(Handler),
+        meck:unload(evoq_event_store),
+        lists:foreach(fun application:stop/1, lists:reverse(Started))
+    end.
+
+%% The same store and delivery, with a handler that drops the event by its
+%% own error policy. The timeout is the caller's (the dispatch's default), so
+%% a dispatch that answered `ok' by waiting nothing, or that hung on an ack
+%% that was never coming, both show here.
+with_dropping_probe(Body) ->
+    evoq_test_isolation:stop_leftover_evoq(),
+    {ok, Started} = application:ensure_all_started(evoq),
+    {ok, Handler} = evoq_event_handler:start_link(evoq_dropping_probe_handler, #{}),
+    meck:new(evoq_event_store, [passthrough, no_link]),
+    meck:expect(evoq_event_store, read, 5,
+                fun(_Store, _Stream, _From, _Count, _Dir) -> {ok, []} end),
+    meck:expect(evoq_event_store, append, 4,
+                fun(Store, Stream, _Expected, Events) ->
+                    deliver_all(inline_delivery, Handler, Store, Stream, Events),
+                    {ok, ?STREAM_VERSION}
+                end),
+    try
+        Body()
+    after
         catch gen_server:stop(Handler),
         meck:unload(evoq_event_store),
         lists:foreach(fun application:stop/1, lists:reverse(Started))

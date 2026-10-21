@@ -345,7 +345,12 @@ await(Required, Waiter, Version, Timeout, Response) ->
 
 %% @private Map a consistency wait outcome onto the response.
 consistency_outcome(ok, Response) -> Response;
-consistency_outcome({error, timeout}, _Response) -> {error, consistency_timeout}.
+consistency_outcome({error, timeout}, _Response) -> {error, consistency_timeout};
+%% A handler's own error policy dropped the event, so the write strong was
+%% asked to wait for will never happen. Named: the caller needs to know which
+%% handler, to decide between rebuilding its read model and fixing the cause.
+consistency_outcome({error, {dropped, Handler}}, _Response) ->
+    {error, {consistency_dropped, Handler}}.
 
 %% @private
 emit_stop_telemetry(StartTime, Command, Response) ->

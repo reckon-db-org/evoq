@@ -21,10 +21,25 @@ projection writing to SQLite after the test's sandbox owner had exited.
   (`evoq_event_router:delivery_targets/1`, the same lookup the router delivers
   by), so nothing is a hand-kept list and a handler that registers later is in
   the set from the moment it registers.
-- **Handlers and projections acknowledge.** `evoq_event_handler` and
-  `evoq_projection` acknowledge after a successful write, carrying the event's
-  own stream version. A skip, a halt or a stop writes nothing and acknowledges
-  nothing, so a waiter is never told about a write that did not happen.
+- **Handlers and projections acknowledge after a write, and only after one.**
+  `evoq_event_handler` and `evoq_projection` acknowledge after a successful
+  write, carrying the event's own stream version. A halt or a stop writes
+  nothing and acknowledges nothing.
+- **A drop is not a write.** A handler or projection whose own `on_error/4`
+  policy let the event go (`skip`, `{dead_letter, _}`) sends
+  `evoq_consistency:dropped/2` instead of an ack, and the dispatch answers
+  `{error, {consistency_dropped, Handler}}` at once rather than waiting out
+  its deadline for a write that will never happen. A projection declining an
+  event it does not want (`{skip, State, ReadModel}` from `project/4`) is a
+  decision, not a drop: it acks.
+- **A handler on another node is not in the required set.** The event type
+  registry is a cluster-wide `pg` scope, so it names members on every
+  connected node, while the router delivers only to local pids; waiting for a
+  remote pid would end every strong dispatch in a timeout.
+- **`close/1` takes the unneeded acks out of the caller's mailbox.** Every
+  waiter on a stream's group is sent every ack for that stream, and a
+  `gen_server` that dispatches in a loop would otherwise accumulate them. An
+  ack already in flight can still land after `close/1` returns.
 - **An ack cannot arrive before anyone is listening.** The router opens the
   waiter, keyed on (store, stream), before the append. A handler fast enough to
   finish during the append is counted, and the version in the ack means one
@@ -43,8 +58,11 @@ refresh:
   rather than answering `ok`: it sees no events, so it cannot know which
   handlers a dispatch would have to wait for, and `ok` would claim they had all
   written. A dispatch asks for `strong`, which can resolve it.
-- `evoq_consistency:open/2`, `close/1`, `await/4` and `required/1` are new, and
-  `acknowledge/2` acknowledges straight from an event's metadata.
+- `evoq_consistency:open/2`, `close/1`, `await/4`, `required/1` and
+  `waitable/1` are new, `acknowledge/2` acknowledges straight from an event's
+  metadata, and `dropped/2` reports a handler that dropped one. `await/4`
+  gains `{error, {dropped, Handler}}`, which the router answers as
+  `{error, {consistency_dropped, Handler}}`.
 - `strong` does not wait for process manager instances: which instance handles
   an event is decided at delivery time (`correlate/2`, which may start one), so
   the set does not exist when the command is dispatched. A process manager that

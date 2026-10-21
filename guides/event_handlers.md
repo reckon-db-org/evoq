@@ -261,7 +261,7 @@ a handler sees an event, the dispatch that produced it is already over.
 |--------|-------------------|
 | `eventual` (default) | nothing - the command returns once the events are appended |
 | `{handlers, Handlers}` | those handlers and projections, up to their acks on the version this dispatch produced, then returns |
-| `strong` | every event handler and projection subscribed to the event types the command appended, up to their acks on the version this dispatch produced |
+| `strong` | every event handler and projection subscribed to the event types the command appended, on this node, up to their acks on the version this dispatch produced |
 
 `strong` derives its set from the appended events and the event type
 registry, the same lookup the event router delivers by: nothing keeps a list,
@@ -284,6 +284,27 @@ A wait that times out answers `{error, consistency_timeout}` rather than
 `{ok, ...}`: the command's events are appended either way, so a caller must
 treat that error as "written, but not yet seen by those handlers". The wait
 follows the dispatch's `timeout` option (five seconds by default).
+
+**An ack is a write, and a handler that dropped the event does not ack.** A
+handler or projection whose own `on_error/4` policy let the event go (`skip`
+or `{dead_letter, Reason}`) sends a drop instead, and the dispatch answers
+`{error, {consistency_dropped, Handler}}` at once: that write will never
+happen, and holding the caller for the deadline would say the same thing
+later and less clearly. A projection that deliberately declines an event it
+does not want (returning `{skip, State, ReadModel}` from `project/4`) is not
+a drop: it decided, it wrote nothing, and it acks.
+
+A handler on another node is not in the set. The event type registry is a
+cluster-wide `pg` scope, so it names members on every connected node, while
+the event router delivers only to local pids; waiting for a remote pid would
+wait for an ack it cannot send for this store.
+
+Every waiter on a stream's group is sent every ack for that stream, so a
+process that dispatches gets acks for handlers it never waited on. `await/4`
+leaves what it does not need, and `evoq_consistency:close/1` (which the
+router calls) takes the rest out of the caller's mailbox. An ack already in
+flight can still land after `close/1` returns: a `gen_server` that dispatches
+with `strong` should have a `handle_info/2` catch-all.
 
 ## What the handler is handed
 

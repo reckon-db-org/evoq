@@ -151,18 +151,24 @@ handle_call(_Request, _From, State) ->
 notify_reply(skip, _EventType, _Event, Metadata, #state{checkpoint = Checkpoint} = State) ->
     {reply, ok, State#state{checkpoint = maps:get(version, Metadata, Checkpoint)}};
 notify_reply(deliver, EventType, Event, Metadata, State) ->
-    %% handle_event_internal/4 answers {ok, State} or {stop, Reason}: the
-    %% error actions (retry, skip, stop, dead letter) are all resolved inside
-    %% it, so there is no {error, _} for this function to return and no third
-    %% clause to write.
+    %% handle_event_internal/4 answers {ok, State}, {dropped, State} or
+    %% {stop, Reason}: the error actions (retry, skip, stop, dead letter) are
+    %% all resolved inside it, so there is no {error, _} for this function to
+    %% return.
     case handle_event_internal(EventType, Event, Metadata, State) of
         {ok, NewState} ->
             %% THE WRITE IS DONE, AND SAID SO. A dispatch with `strong'
             %% consistency waits for exactly this: every handler and
             %% projection subscribed to the appended events has written. A
-            %% skip, a halt or a stop wrote nothing and acknowledges nothing,
-            %% so a waiter is never told about a write that did not happen.
+            %% stop wrote nothing and acknowledges nothing, so a waiter is
+            %% never told about a write that did not happen.
             ok = evoq_consistency:acknowledge(State#state.handler_module, Metadata),
+            {reply, ok, NewState};
+        {dropped, NewState} ->
+            %% The handler's own error policy dropped this event, so nothing
+            %% was written. Said out loud to a waiting dispatch, which would
+            %% otherwise wait out its deadline for an ack that is not coming.
+            ok = evoq_consistency:dropped(State#state.handler_module, Metadata),
             {reply, ok, NewState};
         {stop, Reason} ->
             %% Handler decided to stop
@@ -342,10 +348,12 @@ execute_error_action({retry, DelayMs}, EventType, Event, Metadata, State, Failur
     handle_event_with_retry(EventType, Event, Metadata, State, NewContext);
 
 execute_error_action(skip, _EventType, _Event, Metadata, State, _FailureContext) ->
-    %% Skip this event, update checkpoint and continue
+    %% Skip this event, update checkpoint and continue. Nothing was written,
+    %% so this is a drop, never a write: a dispatch waiting with `strong'
+    %% consistency hears that, not an ack.
     #state{checkpoint = Checkpoint} = State,
     NewCheckpoint = maps:get(version, Metadata, Checkpoint),
-    {ok, State#state{checkpoint = NewCheckpoint}};
+    {dropped, State#state{checkpoint = NewCheckpoint}};
 
 execute_error_action(stop, _EventType, _Event, _Metadata, _State, FailureContext) ->
     %% Stop the handler - return error to trigger gen_server stop
@@ -358,9 +366,10 @@ execute_error_action({dead_letter, Reason}, _EventType, Event, Metadata, State, 
     %% Store in dead letter
     _ = evoq_dead_letter:store(Event, HandlerModule, FailureContext, Reason),
 
-    %% Update checkpoint and continue
+    %% Update checkpoint and continue. Kept for a later replay is not written
+    %% now, so it is a drop to a waiting dispatch like skip.
     NewCheckpoint = maps:get(version, Metadata, Checkpoint),
-    {ok, State#state{checkpoint = NewCheckpoint}}.
+    {dropped, State#state{checkpoint = NewCheckpoint}}.
 
 %% @private
 increment_attempt(#evoq_failure_context{attempt_number = N} = Ctx) ->
