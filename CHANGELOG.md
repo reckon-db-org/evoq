@@ -45,10 +45,29 @@ PM's `compensate/2` and dispatches what it returns.
 
 **A restarted projection resumes.** It used to come back at its checkpoint
 and never see the events it missed, because the node's shared `$all`
-subscription had already acknowledged past them. `init/1` now replays from
-the checkpoint before serving anything live - only when a checkpoint exists,
-so a first boot still gets the store subscription's backfill and nothing
-doubles.
+subscription had already acknowledged past them. The projection now replays
+from its checkpoint before serving anything live - only when a checkpoint
+exists, so a first boot still gets the store subscription's backfill and
+nothing doubles.
+
+The catch-up runs **before the projection registers**, and a second pass runs
+after. Registration is what makes the event router deliver to the process,
+and it delivers with `gen_server:call(..., infinity)`: replaying while
+registered would hold up every other handler and process manager on the node
+for the length of the catch-up. Replaying first, registering, then replaying
+again from the position reached closes the gap without that stall; the
+checkpoint dedupe makes the overlap free.
+
+**A projection never refuses to boot.** One that cannot catch up - a poison
+event whose `on_error/4` answers `stop`, a store it cannot read - comes up
+halted and behind: the state carries the checkpoint it actually reached, the
+halt is logged (`evoq_projection_halted_behind`) and counted
+(`[evoq, projection, halted]`), and a rebuild recovers it. Before, the resume
+ran in `init/1` and answered `{stop, _}`: a statically supervised projection
+failed the application's boot, and a restarted one looped on the same event.
+A raise in `project/4` and an `{error, _}` from it now report the same way,
+and a store that answers `{error, _}` halts the replay instead of reporting
+an empty success.
 
 **The checkpoint store was probed before it was loaded.** A store named in
 `Opts` had usually never been called, so `function_exported/3` answered
@@ -59,11 +78,6 @@ loaded, none saved.
 checkpoint]` was declared and never fired; it fires on every save now, with
 or without a checkpoint store, which is what makes a stalled projection
 visible.
-
-**A read model's checkpoint starts at -1, not 0.** `evoq_read_model:new/2`
-and `clear/1` both said 0, which reads as "position 0 is done" and is the
-same off-by-one that dropped the first event from `load_checkpoint/1`.
-Positions start at 0, so "nothing yet" sits below them.
 
 #### Changed
 
@@ -84,6 +98,11 @@ list.
 the commands it dispatched, most recent first - cleared once compensation has
 run. A PM that does not export `compensate/2` is not touched. The key is in
 memory only and does not survive a restart.
+
+**A read model's checkpoint starts at -1, not 0.** `evoq_read_model:new/2`
+and `clear/1` both said 0, which reads as "position 0 is done" and is the
+same off-by-one that dropped the first event from `load_checkpoint/1`.
+Positions start at 0, so "nothing yet" sits below them.
 
 **`evoq_saga_compensation` is gone**, replaced by `evoq_pm_compensation`:
 `record_command/2`, `get_executed_commands/1` and `clear/1`. The

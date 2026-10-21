@@ -2,7 +2,9 @@
 
 Process managers coordinate long-running business processes that span multiple aggregates. They react to events and dispatch commands to drive workflows forward.
 
-The reference material is explicit that a process manager is **not** a saga, and these guides follow it: evoq's module and callback names still say `evoq_saga_compensation` for compatibility, but the concept is a process manager.
+The reference material is explicit that a process manager is **not** a saga,
+and these guides follow it: there is no saga module in evoq. What a process
+manager can do on a failure is compensate, through its own `compensate/2`.
 
 ![Process Manager Flow](assets/process-manager.svg)
 
@@ -172,12 +174,16 @@ apply(State, #{event_type := <<"PaymentReceived">>, data := #{amount := Amount}}
 
 ## Compensation (Rollback)
 
-When a command the process manager dispatched fails, the instance runs the
-process manager's `compensate/2` and dispatches what it returns, in order.
-Commands already dispatched are recorded in the process manager's state
-(`executed_commands`, written with `evoq_saga_compensation:record_command/2`)
-so compensation and `build_compensation_chain/2` can see what ran; a command
-after the failed one is not dispatched.
+When a command the process manager dispatched fails, the instance stops
+dispatching the rest of that batch, runs the process manager's `compensate/2`
+with the failed command, and dispatches what it returns, in order.
+
+A process manager that exports `compensate/2` also gets the commands it did
+dispatch recorded in its state (`executed_commands`, most recent first, read
+with `evoq_pm_compensation:get_executed_commands/1`), cleared once the
+compensation has run. It is in memory only and does not survive a restart -
+keep anything a compensation must know across a restart in your own state,
+rebuilt in `apply/2`.
 
 ```erlang
 -module(money_transfer_pm).

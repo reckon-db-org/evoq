@@ -151,14 +151,16 @@ handle_call(_Request, _From, State) ->
 notify_reply(skip, _EventType, _Event, Metadata, #state{checkpoint = Checkpoint} = State) ->
     {reply, ok, State#state{checkpoint = maps:get(version, Metadata, Checkpoint)}};
 notify_reply(deliver, EventType, Event, Metadata, State) ->
+    %% handle_event_internal/4 answers {ok, State} or {stop, Reason}: the
+    %% error actions (retry, skip, stop, dead letter) are all resolved inside
+    %% it, so there is no {error, _} for this function to return and no third
+    %% clause to write.
     case handle_event_internal(EventType, Event, Metadata, State) of
         {ok, NewState} ->
             {reply, ok, NewState};
         {stop, Reason} ->
             %% Handler decided to stop
-            {stop, Reason, {error, Reason}, State};
-        {error, _Reason} = Error ->
-            {reply, Error, State}
+            {stop, Reason, {error, Reason}, State}
     end.
 
 %% @private

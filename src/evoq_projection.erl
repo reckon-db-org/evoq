@@ -187,14 +187,6 @@ init({ProjectionModule, Config, Opts}) ->
             %% Load checkpoint if store available
             Checkpoint = load_checkpoint(ProjectionModule, CheckpointStore),
 
-            %% Register with event type registry
-            ok = evoq_event_type_registry:register_all(EventTypes, self()),
-
-            %% Emit start telemetry
-            telemetry:execute(?TELEMETRY_PROJECTION_START, #{}, #{
-                projection => ProjectionModule
-            }),
-
             State = #state{
                 projection_module = ProjectionModule,
                 config = Config,
@@ -205,11 +197,55 @@ init({ProjectionModule, Config, Opts}) ->
                 checkpoint_store = CheckpointStore,
                 store_id = OverrideStoreId
             },
-            resume_after_checkpoint(State);
+            start_projection(State);
 
         {error, Reason} ->
             {stop, Reason}
     end.
+
+%% @private Catch up on what was missed, then start serving.
+%%
+%% The order matters. Registration is what makes the event router deliver to
+%% this process, and it delivers with gen_server:call(..., infinity): a
+%% projection that replayed while registered would hold up every other
+%% handler and process manager on the node for the length of the catch-up.
+%% So: replay while unregistered, register, then replay again from the
+%% position the first pass reached - events that arrived in between are not
+%% in the live feed for a process that was not registered yet. The checkpoint
+%% dedupe makes the overlap free.
+%%
+%% A projection never refuses to boot. One that cannot catch up comes up
+%% halted and behind: the state carries the checkpoint it actually reached,
+%% the halt is logged and counted in telemetry, and a rebuild recovers it.
+%% Refusing would turn one poison event into a restart loop, and a statically
+%% supervised projection into a failed application boot.
+start_projection(#state{event_types = EventTypes} = State) ->
+    {Resumed, FirstStatus} = resume_after_checkpoint(State),
+
+    ok = evoq_event_type_registry:register_all(EventTypes, self()),
+
+    telemetry:execute(?TELEMETRY_PROJECTION_START, #{}, #{
+        projection => State#state.projection_module
+    }),
+
+    {Final, SecondStatus} = resume_after_checkpoint(Resumed),
+
+    report_halt(State#state.projection_module, FirstStatus),
+    report_halt(State#state.projection_module, SecondStatus),
+    {ok, Final}.
+
+%% @private
+report_halt(_ProjectionModule, ok) ->
+    ok;
+report_halt(ProjectionModule, {halted, Reason}) ->
+    logger:error(#{what => evoq_projection_halted_behind,
+                   projection => ProjectionModule,
+                   error => Reason}),
+    telemetry:execute(?TELEMETRY_PROJECTION_HALTED, #{}, #{
+        projection => ProjectionModule,
+        error => Reason
+    }),
+    ok.
 
 %% @private
 handle_call(get_event_types, _From, #state{event_types = Types} = State) ->
@@ -223,14 +259,16 @@ handle_call(get_read_model, _From, #state{read_model = RM} = State) ->
 
 handle_call({rebuild, _Opts}, _From, State) ->
     case do_rebuild(State) of
-        {ok, NewState} ->
+        {NewState, ok} ->
             {reply, ok, NewState};
-        {stop, Reason} ->
-            %% init/1 failed with the read model already cleared: reply
-            %% first, then end rather than serve from a state that no
-            %% longer matches the data.
-            {stop, Reason, {error, Reason}, State};
+        {NewState, {halted, Reason}} ->
+            %% The read model is cleared and the replay stopped part-way.
+            %% Keep what the replay reached: the old state no longer
+            %% matches the empty read model, and replying ok would serve a
+            %% partial read model as a complete one.
+            {reply, {error, Reason}, NewState};
         {error, Reason} ->
+            %% Nothing was cleared, so nothing has changed.
             {reply, {error, Reason}, State}
     end;
 
@@ -509,14 +547,17 @@ rebuild_with_fresh_state(ProjectionModule, Config, ClearedRM, EventTypes, State)
             },
 
             %% Replay all events from event store
-            replay_safely(InitialState, EventTypes, 0);
+            replay_events(InitialState, EventTypes, 0);
 
         {error, Reason} ->
-            %% The read model is already cleared and the checkpoint at -1;
-            %% the projection now has neither data nor a state that matches
-            %% it. Carrying on would serve events from that state, so the
-            %% projection stops and says why: restart it to init/1's state.
-            {stop, {rebuild_init_failed, ProjectionModule, Reason}}
+            %% The read model is already cleared and the checkpoint at -1,
+            %% and init/1 could not give us a state to match them with. The
+            %% caller is told the rebuild failed and the projection keeps
+            %% the cleared state it has: serving from the state that
+            %% belonged to the old data would be worse than being empty and
+            %% saying so.
+            {State#state{read_model = ClearedRM, checkpoint = -1},
+             {halted, {rebuild_init_failed, ProjectionModule, Reason}}}
     end.
 
 %% @private
@@ -534,48 +575,38 @@ replay_events(State, EventTypes, StartPosition) ->
     BatchSize = application:get_env(evoq, replay_batch_size, 1000),
     replay_page(StoreId, EventTypes, StartPosition, BatchSize, State).
 
-%% @private A projection that stopped - on_error/4 answered stop, or the node
+%% @private Catch up from the checkpoint, if there is one.
+%%
+%% A projection that stopped - on_error/4 answered stop, or the node
 %% restarted - comes back at its checkpoint, but the node's shared `$all'
 %% subscription has already moved past the events it missed and will not
 %% deliver them to it again. Replaying from the checkpoint is what makes a
 %% restart resume instead of leaving a permanent hole behind it.
 %%
-%% Only when there is a checkpoint to resume from: a projection's first boot
-%% must not replay the whole log on top of the backfill the store
-%% subscription already performs for it.
-resume_after_checkpoint(#state{checkpoint = Checkpoint} = State) when Checkpoint >= 0 ->
-    case replay_safely(State, State#state.event_types, Checkpoint + 1) of
-        {ok, Resumed} ->
-            {ok, Resumed};
-        {stop, Reason} ->
-            {stop, Reason};
-        {error, Reason} ->
-            %% The projection still starts: it is behind, and saying so
-            %% beats refusing to boot. The gap shows in the log and in its
-            %% checkpoint.
-            logger:warning(#{what => evoq_projection_resume_failed,
-                             projection => State#state.projection_module,
-                             from_position => Checkpoint + 1,
-                             error => Reason}),
-            {ok, State}
-    end;
+%% Only when there is a checkpoint: a projection's first boot must not replay
+%% the whole log on top of the backfill the store subscription already
+%% performs for it. A store that answers something which is not a position
+%% is not something to resume from either.
+%%
+%% Returns `{State, ok}' when it caught up, `{State, {halted, Reason}}' when
+%% it did not, and `{State, {halted, Reason}}' when it never started. A halt
+%% is not a failure to start: the state carried out is the one the replay
+%% reached, so everything before the poison event is projected exactly once
+%% and the checkpoint says where the replay stopped.
+resume_after_checkpoint(#state{checkpoint = Checkpoint} = State)
+        when is_integer(Checkpoint), Checkpoint >= 0 ->
+    replay_events(State, State#state.event_types, Checkpoint + 1);
 resume_after_checkpoint(State) ->
-    {ok, State}.
-
-%% @private A store that is not configured, or not up, must not stop a
-%% projection from starting: it is behind, which the caller can see in its
-%% checkpoint, and that is better than not booting. The rebuild path uses
-%% this too, so both report an unreachable store the same way.
-replay_safely(State, EventTypes, FromPosition) ->
-    try replay_events(State, EventTypes, FromPosition)
-    catch
-        Class:Reason -> {error, {Class, Reason}}
-    end.
+    {State, ok}.
 
 %% @private Read one page at Offset, project the matching events in it, and
 %% go on to the next page unless this one was short.
+%%
+%% A store that cannot be read halts the replay rather than reporting an
+%% empty success: a rebuild that replied ok over a partial read model is the
+%% same lie as a swallowed projection error.
 replay_page(StoreId, EventTypes, Offset, BatchSize, State) ->
-    case evoq_event_store:read_all_global(StoreId, Offset, BatchSize) of
+    try evoq_event_store:read_all_global(StoreId, Offset, BatchSize) of
         {ok, Events} ->
             Matching = [{Position, Routable}
                         || {Position, {Event, _} = Routable} <- positioned(Events, Offset),
@@ -584,19 +615,21 @@ replay_page(StoreId, EventTypes, Offset, BatchSize, State) ->
             next_page(replay_events_list(Matching, State), length(Events) < BatchSize,
                       StoreId, EventTypes, Offset + length(Events), BatchSize);
         {error, Reason} ->
-            %% Log warning but don't fail - projection will catch up on new events
-            logger:warning("Projection rebuild could not read events: ~p", [Reason]),
-            {ok, State}
+            {State, {halted, {read_all_global, Reason}}}
+    catch
+        Class:Reason:Stack ->
+            {State, {halted, {Class, Reason, Stack}}}
     end.
 
 next_page({ok, State}, true, _StoreId, _EventTypes, _Offset, _BatchSize) ->
-    {ok, State};
+    {State, ok};
 next_page({ok, State}, false, StoreId, EventTypes, Offset, BatchSize) ->
     replay_page(StoreId, EventTypes, Offset, BatchSize, State);
-next_page({stop, Reason}, _Last, _StoreId, _EventTypes, _Offset, _BatchSize) ->
-    %% A projection that asked to stop on a replayed event stops the rebuild
-    %% too: continuing would project on past the event it refused.
-    {stop, Reason}.
+next_page({halted, State, Reason}, _Last, _StoreId, _EventTypes, _Offset, _BatchSize) ->
+    %% Stopped where the failure was, carrying the state reached so far: the
+    %% caller starts from it (resume) or reports it (rebuild), and nothing
+    %% already projected is projected again.
+    {State, {halted, Reason}}.
 
 %% @private Pair each event of a page read at Offset with its global position,
 %% as the {Event, Metadata} the store subscription routes, so a projection
@@ -622,7 +655,7 @@ replay_events_list([{Position, {Event, EventMetadata}} | Rest], State) ->
     Metadata = EventMetadata#{global_position => Position, replaying => true},
     case handle_event_internal(EventType, Event, Metadata, State) of
         {ok, NewState} -> replay_events_list(Rest, NewState);
-        {stop, Reason} -> {stop, Reason}
+        {stop, Reason} -> {halted, State, Reason}
     end.
 
 %% @private

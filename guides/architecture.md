@@ -202,6 +202,9 @@ project(Event, Metadata, State, ReadModel) ->
 
 ```
 evoq_sup
+├── evoq_idempotency              # Command deduplication (starts first)
+├── evoq_dead_letter              # Events no handler could process
+├── evoq_checkpoint_store_ets     # Projection checkpoints, when used
 ├── evoq_aggregates_sup           # Dynamic aggregate supervisors
 │   ├── evoq_aggregate_partition_sup_0
 │   │   └── evoq_aggregate (bank_account, "acc-1")

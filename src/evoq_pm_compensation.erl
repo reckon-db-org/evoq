@@ -14,8 +14,9 @@
 %% What this module is for is the other half: the list of commands that did
 %% run, so a compensate/2 (or an operator looking at get_state/1) can see
 %% what there is to undo. The instance records each successful dispatch here
-%% when the process manager exports compensate/2; a process manager that
-%% does not is left alone.
+%% when the process manager exports compensate/2, and clears it once the
+%% compensation has run; a process manager that does not compensate is left
+%% alone.
 %%
 %% @author rgfaber
 -module(evoq_pm_compensation).
@@ -52,9 +53,11 @@ get_executed_commands(_State) ->
 
 %% @doc Forget what was dispatched.
 %%
-%% Called after a compensation has run and when the instance stops: the list
-%% is a record of what is still un-undone, not a log that grows for the life
-%% of the process manager.
+%% The instance calls this once a compensation has run: the list is a record
+%% of what is still un-undone, not a log that grows for the life of the
+%% process manager. Nothing needs it when the instance stops - the state goes
+%% with it - so this is for the compensation path and for an application that
+%% wants to reset it itself.
 -spec clear(term()) -> term().
 clear(State) when is_map(State) ->
     maps:remove(executed_commands, State);

@@ -86,6 +86,9 @@
 -define(TELEMETRY_PROJECTION_EVENT, [evoq, projection, event]).
 -define(TELEMETRY_PROJECTION_EXCEPTION, [evoq, projection, exception]).
 -define(TELEMETRY_PROJECTION_CHECKPOINT, [evoq, projection, checkpoint]).
+%% A projection that could not catch up at start: it is running, behind, at
+%% the checkpoint it reached. See evoq_projection:start_projection/1.
+-define(TELEMETRY_PROJECTION_HALTED, [evoq, projection, halted]).
 
 %%====================================================================
 %% Memory Monitor Telemetry Events

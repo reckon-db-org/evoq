@@ -1,4 +1,4 @@
-%% @doc Integration tests for process managers (sagas).
+%% @doc Integration tests for process managers.
 %%
 %% Tests:
 %% - Process manager behavior

@@ -40,7 +40,9 @@ start_link(PMModule, ProcessId, Config) ->
 %% dispatched, in order, plus one per compensating command if a dispatch
 %% failed, so the list can be shorter than the commands the PM returned.
 -spec handle_event(pid(), map(), map()) ->
-    {ok, [{ok, non_neg_integer(), [map()]} | {error, term()}]} | {error, term()}.
+    ok
+    | {ok, [{ok, non_neg_integer(), [map()]} | {error, term()}]}
+    | {error, term()}.
 handle_event(Pid, Event, Metadata) ->
     gen_server:call(Pid, {handle_event, Event, Metadata}, infinity).
 

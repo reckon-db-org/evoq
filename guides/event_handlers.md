@@ -214,9 +214,11 @@ Two of those actions are worth thinking about before you pick one:
 - `{retry, DelayMs}` sleeps in the handler's process. Every event behind it
   waits, and the store subscription's ack waits with them.
 - `stop` ends the handler. It comes back at its checkpoint, but the node's
-  shared `$all` subscription has already moved past the event, so it is not
-  delivered again: recovery is `evoq_projection:rebuild/1` (for a
-  projection) or a fresh handler started from the position you choose.
+  shared `$all` subscription has already moved past the event, so the feed
+  does not deliver it again. A **projection** with a checkpoint store
+  replays what it missed when it restarts (see `projections.md`); a plain
+  event handler does not replay on its own, so it is a fresh handler you
+  start from the position you choose.
 
 ## Dead Letter Queue
 

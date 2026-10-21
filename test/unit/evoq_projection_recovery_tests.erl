@@ -60,7 +60,7 @@ skip_action_advances_the_checkpoint_test_() ->
 %% dead letter: the event is stored for an operator and the projection
 %% carries on.
 dead_letter_action_stores_the_event_and_carries_on_test_() ->
-    with_projection(?MODULE, [evoq_dead_letter], fun(Pid) ->
+    with_projection(?MODULE, [evoq_dead_letter], #{}, fun(Pid) ->
         meck:expect(evoq_dead_letter, store, fun(_E, _M, _C, _R) -> ok end),
         fail_times(1, 5),
         set_action({dead_letter, too_many_refunds}),
@@ -99,7 +99,7 @@ stop_action_stops_the_projection_test_() ->
 %% replay gives [1, 2]; keeping the old state gives [1, 9, 1, 2]; and a
 %% rebuild that never replayed gives [1, 9].
 rebuild_replays_on_fresh_state_test_() ->
-    with_projection(?MODULE, [evoq_event_store], fun(Pid) ->
+    with_projection(?MODULE, [evoq_event_store], #{}, fun(Pid) ->
         meck:expect(evoq_event_store, read_all_global,
                     fun(_Store, _Offset, _Batch) ->
                         {ok, [stored_event(1, 0), stored_event(2, 1)]}
@@ -122,9 +122,13 @@ a_restarted_projection_resumes_from_its_checkpoint_test_() ->
     {timeout, 60, fun() ->
         meck:new(evoq_event_store, [passthrough]),
         try
+            %% Honour the offset like the real store does: the resume
+            %% replays twice (unregistered, then registered), and the second
+            %% pass must find nothing left to read.
             meck:expect(evoq_event_store, read_all_global,
-                        fun(_Store, _Offset, _Batch) ->
-                            {ok, [stored_event(2, 1), stored_event(3, 2)]}
+                        fun(_Store, Offset, _Batch) ->
+                            Store = [{1, stored_event(2, 1)}, {2, stored_event(3, 2)}],
+                            {ok, [E || {Pos, E} <- Store, Pos >= Offset]}
                         end),
             ensure_registry(),
             reset_script(),
@@ -143,6 +147,85 @@ a_restarted_projection_resumes_from_its_checkpoint_test_() ->
             meck:unload(evoq_event_store)
         end
     end}.
+
+%% A poison event under `stop` must not make the projection refuse to
+%% boot. Before this, the resume ran in init/1 and answered {stop, _}: a
+%% statically supervised projection failed the whole application's boot, and
+%% a restarted one looped on the same event forever. It comes up halted and
+%% behind now - the checkpoint says where it stopped - and says so.
+a_poison_event_on_resume_boots_halted_and_behind_test_() ->
+    with_checkpointed_projection(?MODULE, [evoq_event_store],
+                                 evoq_projection_resume_checkpoint, fun(Pid) ->
+        meck:expect(evoq_event_store, read_all_global,
+                    fun(_Store, Offset, _Batch) ->
+                        Store = [{1, stored_event(2, 1)}, {2, stored_event(3, 2)}],
+                        {ok, [E || {Pos, E} <- Store, Pos >= Offset]}
+                    end),
+        %% The first replayed event fails and on_error/4 says stop.
+        fail_times(2, 5),
+        set_action(stop),
+
+        ?assert(is_process_alive(Pid)),
+        %% Nothing was projected, and the checkpoint is the one it resumed
+        %% from: behind, not pretending.
+        ?assertEqual([], projected(Pid)),
+        ?assertEqual(0, evoq_projection:get_checkpoint(Pid))
+    end).
+
+%% The catch-up must not stall the node. It runs before the projection
+%% registers, because registration is what makes the event router deliver to
+%% it, and the router delivers with gen_server:call(..., infinity): a
+%% projection replaying while registered would hold up every other handler
+%% and process manager on the node for the length of its catch-up.
+the_resume_runs_before_the_projection_registers_test_() ->
+    {timeout, 30, fun resume_before_registration/0}.
+
+%% @private
+%%
+%% Asked from inside the replay, which runs in the projection's own process:
+%% "am I registered while I am catching up?". The answer must be no for the
+%% first pass - registration is what makes the router call this process, and
+%% it calls with infinity - and yes once start_link returns.
+resume_before_registration() ->
+    meck:new(evoq_event_store, [passthrough]),
+    try
+        ensure_registry(),
+        reset_script(),
+        Test = self(),
+        Registered = fun(Pid) ->
+                         lists:member(Pid, evoq_event_type_registry:get_handlers(?TYPE))
+                     end,
+        meck:expect(evoq_event_store, read_all_global,
+                    fun(_Store, _Offset, _Batch) ->
+                        Test ! {read_seen, self(), Registered(self())},
+                        {ok, []}
+                    end),
+
+        _Starter = spawn(fun() ->
+                             {ok, Pid} = evoq_projection:start_link(
+                                           ?MODULE, #{},
+                                           #{checkpoint_store =>
+                                                 evoq_projection_resume_checkpoint}),
+                             Test ! {started, Pid}
+                         end),
+
+        %% The first read happens during the first replay.
+        ProjPid = receive
+                      {read_seen, P, WasRegistered} ->
+                          ?assertEqual(false, WasRegistered),
+                          P
+                  after 5000 -> ?assert(false)
+                  end,
+
+        {started, StartedPid} = receive {started, P0} -> {started, P0}
+                                 after 5000 -> ?assert(false) end,
+        ?assertEqual(ProjPid, StartedPid),
+        ?assertEqual(true, Registered(StartedPid)),
+        unlink(StartedPid),
+        gen_server:stop(StartedPid)
+    after
+        meck:unload(evoq_event_store)
+    end.
 
 %% A projection without on_error/4 gets the shared default - backoff and
 %% retries - rather than a silent drop: here it fails once and the default
@@ -178,20 +261,23 @@ on_error(_Reason, _Event, _FailureContext, _State) ->
 %%====================================================================
 
 with_raw_projection(Fun) ->
-    with_projection(evoq_projection_recovery_deaf, [], Fun).
+    with_projection(evoq_projection_recovery_deaf, [], #{}, Fun).
 
 with_projection(Fun) ->
-    with_projection(?MODULE, [], Fun).
+    with_projection(?MODULE, [], #{}, Fun).
+
+with_checkpointed_projection(Module, Mecked, CheckpointStore, Fun) ->
+    with_projection(Module, Mecked, #{checkpoint_store => CheckpointStore}, Fun).
 
 %% One test spec, built here rather than nested inside another: a
 %% {timeout, _, Fun} returned from *inside* a running test is just a value,
 %% and a test that returns it passes without ever running.
-with_projection(Module, Mecked, Fun) ->
+with_projection(Module, Mecked, Opts, Fun) ->
     {timeout, 60, fun() ->
         [ok = meck:new(M, [passthrough]) || M <- Mecked],
         ensure_registry(),
         reset_script(),
-        {ok, Pid} = evoq_projection:start_link(Module, #{}, #{}),
+        {ok, Pid} = evoq_projection:start_link(Module, #{}, Opts),
         try
             Fun(Pid)
         after
