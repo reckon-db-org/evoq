@@ -30,8 +30,9 @@
     pm_router_correlation_continue_test/1,
     compensation_record_commands_test/1,
     compensation_get_executed_test/1,
-    compensation_build_chain_test/1,
     pm_lineage_two_hops_test/1,
+    pm_lineage_keeps_a_correlation_the_pm_chose_test/1,
+    a_compensating_pm_records_what_it_dispatched_test/1,
     pm_compensation_runs_on_failure_test/1
 ]).
 
@@ -73,7 +74,18 @@ handle(State, #{event_type := <<"OrderFailed">>}, _Metadata) ->
 handle(State, #{event_type := <<"lineage_probe_v1">>}, _Metadata) ->
     %% A command as a process manager writes one: no lineage of its own.
     {ok, State, [evoq_command:new(probe_command, probe_aggregate, <<"probe-1">>, #{})]};
+handle(State, #{event_type := <<"lineage_own_v1">>}, _Metadata) ->
+    %% A PM that decides this is a conversation of its own says so on the
+    %% command, before the instance stamps anything.
+    Own = evoq_command:set_correlation_id(
+            <<"own-conv">>,
+            evoq_command:new(probe_command, probe_aggregate, <<"probe-1">>, #{})),
+    {ok, State, [Own]};
 handle(State, #{event_type := <<"compensation_probe_v1">>}, _Metadata) ->
+    Charge = evoq_command:new(charge_payment, payment, <<"pay-1">>, #{}),
+    Ship = evoq_command:new(ship_order, shipping, <<"ship-1">>, #{}),
+    {ok, State, [Charge, Ship]};
+handle(State, #{event_type := <<"compensation_probe_ok_v1">>}, _Metadata) ->
     Charge = evoq_command:new(charge_payment, payment, <<"pay-1">>, #{}),
     Ship = evoq_command:new(ship_order, shipping, <<"ship-1">>, #{}),
     {ok, State, [Charge, Ship]};
@@ -135,11 +147,12 @@ groups() ->
         {compensation_tests, [sequence], [
             compensation_record_commands_test,
             compensation_get_executed_test,
-            compensation_build_chain_test,
+            a_compensating_pm_records_what_it_dispatched_test,
             pm_compensation_runs_on_failure_test
         ]},
         {pm_lineage_tests, [sequence], [
-            pm_lineage_two_hops_test
+            pm_lineage_two_hops_test,
+            pm_lineage_keeps_a_correlation_the_pm_chose_test
         ]}
     ].
 
@@ -315,21 +328,21 @@ compensation_record_commands_test(_Config) ->
         payload = #{}
     },
 
-    State1 = evoq_saga_compensation:record_command(Cmd1, State0),
-    State2 = evoq_saga_compensation:record_command(Cmd2, State1),
+    State1 = evoq_pm_compensation:record_command(Cmd1, State0),
+    State2 = evoq_pm_compensation:record_command(Cmd2, State1),
 
-    ExecutedCmds = evoq_saga_compensation:get_executed_commands(State2),
+    ExecutedCmds = evoq_pm_compensation:get_executed_commands(State2),
     ?assertEqual(2, length(ExecutedCmds)),
     ?assertEqual(Cmd2, hd(ExecutedCmds)),  %% Most recent first
     ok.
 
 compensation_get_executed_test(_Config) ->
     %% Empty state
-    ?assertEqual([], evoq_saga_compensation:get_executed_commands(#{})),
+    ?assertEqual([], evoq_pm_compensation:get_executed_commands(#{})),
 
     %% Non-map state
-    ?assertEqual([], evoq_saga_compensation:get_executed_commands(undefined)),
-    ?assertEqual([], evoq_saga_compensation:get_executed_commands(some_atom)),
+    ?assertEqual([], evoq_pm_compensation:get_executed_commands(undefined)),
+    ?assertEqual([], evoq_pm_compensation:get_executed_commands(some_atom)),
 
     %% State with commands
     Cmd = #evoq_command{
@@ -340,40 +353,7 @@ compensation_get_executed_test(_Config) ->
         payload = #{}
     },
     State = #{executed_commands => [Cmd]},
-    ?assertEqual([Cmd], evoq_saga_compensation:get_executed_commands(State)),
-    ok.
-
-compensation_build_chain_test(_Config) ->
-    %% Create state with executed commands
-    Cmd1 = #evoq_command{
-        command_id = <<"cmd-1">>,
-        command_type = process_payment,
-        aggregate_type = payment,
-        aggregate_id = <<"pay-1">>,
-        payload = #{amount => 100}
-    },
-    Cmd2 = #evoq_command{
-        command_id = <<"cmd-2">>,
-        command_type = other_command,  %% This one has no compensation
-        aggregate_type = other,
-        aggregate_id = <<"other-1">>,
-        payload = #{}
-    },
-
-    State = #{executed_commands => [Cmd2, Cmd1]},  %% Cmd2 was executed after Cmd1
-
-    %% Build compensation chain
-    CompensationChain = evoq_saga_compensation:build_compensation_chain(?MODULE, State),
-
-    %% Should have compensation for process_payment (Cmd1) only
-    %% Returned in reverse order, so Cmd2 is checked first (no compensation)
-    %% then Cmd1 (has compensation)
-    ?assertEqual(1, length(CompensationChain)),
-
-    %% The compensation should be a refund command
-    [RefundCmds] = CompensationChain,
-    [RefundCmd] = RefundCmds,
-    ?assertEqual(issue_refund, RefundCmd#evoq_command.command_type),
+    ?assertEqual([Cmd], evoq_pm_compensation:get_executed_commands(State)),
     ok.
 
 wait_for_instance(PMModule, ProcessId, 0) ->
@@ -425,6 +405,44 @@ pm_lineage_two_hops_test(_Config) ->
     end,
     ok.
 
+%% A PM that chose its own conversation keeps it: the explicit id on the
+%% command wins over the event's. That is the opt-out from copy-forward.
+pm_lineage_keeps_a_correlation_the_pm_chose_test(_Config) ->
+    Tab = capture_dispatch(fun(_Command) -> {ok, 1, []} end),
+    try
+        {ok, Pid} = evoq_pm_instance_sup:start_instance(?MODULE, <<"lineage-own">>, #{}),
+        Event = #{event_type => <<"lineage_own_v1">>, data => #{}},
+        {ok, _} = evoq_pm_instance:handle_event(Pid, Event,
+                                                #{event_id => <<"evt-own">>,
+                                                  correlation_id => <<"conv-1">>}),
+        [Command] = dispatched(Tab),
+        ?assertEqual(<<"own-conv">>, Command#evoq_command.correlation_id),
+        ?assertEqual(<<"evt-own">>, Command#evoq_command.causation_id)
+    after
+        stop_instance(<<"lineage-own">>),
+        release_capture(Tab)
+    end,
+    ok.
+
+%% A process manager that declared compensate/2 has each successful
+%% dispatch recorded for it: that is what a compensation, or an operator,
+%% can see there is to undo. A PM that never declared it gets no such key.
+a_compensating_pm_records_what_it_dispatched_test(_Config) ->
+    Tab = capture_dispatch(fun(_Command) -> {ok, 1, []} end),
+    try
+        {ok, Pid} = evoq_pm_instance_sup:start_instance(?MODULE, <<"record-1">>, #{}),
+        Event = #{event_type => <<"compensation_probe_ok_v1">>, data => #{}},
+        {ok, _} = evoq_pm_instance:handle_event(Pid, Event, #{event_id => <<"evt-r1">>}),
+        {ok, PMState} = evoq_pm_instance:get_state(Pid),
+        ?assertEqual([ship_order, charge_payment],
+                     [C#evoq_command.command_type
+                      || C <- evoq_pm_compensation:get_executed_commands(PMState)])
+    after
+        stop_instance(<<"record-1">>),
+        release_capture(Tab)
+    end,
+    ok.
+
 %%====================================================================
 %% Compensation on a failed command
 %%====================================================================
@@ -442,19 +460,26 @@ pm_compensation_runs_on_failure_test(_Config) ->
     try
         {ok, Pid} = evoq_pm_instance_sup:start_instance(?MODULE, <<"comp-1">>, #{}),
         Event = #{event_type => <<"compensation_probe_v1">>, data => #{}},
-        {ok, Results} = evoq_pm_instance:handle_event(Pid, Event, #{event_id => <<"evt-c1">>}),
+        {ok, Results} = evoq_pm_instance:handle_event(Pid, Event,
+                                                      #{event_id => <<"evt-c1">>,
+                                                        correlation_id => <<"conv-comp">>}),
 
         [Charge, Ship, Refund] = dispatched(Tab),
         ?assertEqual(charge_payment, Charge#evoq_command.command_type),
         ?assertEqual(ship_order, Ship#evoq_command.command_type),
         ?assertEqual(issue_refund, Refund#evoq_command.command_type),
 
-        %% The command that did run is recorded, so a later compensation can
-        %% see what it has to undo.
+        %% The undo belongs to the same conversation as the commands it
+        %% undoes: same cause, same correlation. It went out bare at first.
+        ?assertEqual(<<"evt-c1">>, Refund#evoq_command.causation_id),
+        ?assertEqual(<<"conv-comp">>, Refund#evoq_command.correlation_id),
+        ?assertEqual(<<"conv-comp">>, Charge#evoq_command.correlation_id),
+
+        %% Once compensated the transaction is over: what ran has been
+        %% undone and the list starts again, rather than growing for the life
+        %% of the process manager.
         {ok, PMState} = evoq_pm_instance:get_state(Pid),
-        ?assertEqual([charge_payment],
-                     [C#evoq_command.command_type
-                      || C <- evoq_saga_compensation:get_executed_commands(PMState)]),
+        ?assertEqual([], evoq_pm_compensation:get_executed_commands(PMState)),
 
         %% The failure is reported, and the compensation's own result follows it.
         ?assertMatch([{ok, 1, []}, {error, declined}, {ok, 1, []}], Results)

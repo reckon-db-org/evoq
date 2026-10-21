@@ -1,11 +1,11 @@
-%% @doc Process manager (saga) behavior for evoq.
+%% @doc Process manager behavior for evoq.
 %%
 %% Process managers coordinate long-running business processes
 %% that span multiple aggregates. They:
 %% - Subscribe to events by type
 %% - Correlate events to process instances
 %% - Dispatch commands based on events
-%% - Support compensation for saga rollback
+%% - Support compensation when a dispatched command fails
 %%
 %% == Callbacks ==
 %%
@@ -24,7 +24,7 @@
 %%
 %% Optional:
 %% - compensate(State, FailedCommand) -> compensation_result()
-%%   Generate compensating commands for saga rollback
+%%   Generate compensating commands when a dispatched command fails
 %%
 %% - handle_info(Info, State) -> handle_info_result()
 %%   Any other message this process manager's instance receives, most

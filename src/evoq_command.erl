@@ -52,6 +52,12 @@ new(CommandType, AggregateType, AggregateId, Payload) ->
     new(CommandType, AggregateType, AggregateId, Payload, #{}).
 
 %% @doc Create a new command with metadata.
+%%
+%% `correlation_id' is left `undefined' on purpose: it is minted at dispatch
+%% when the command does not carry one (see ensure_id/1). That is what makes
+%% "this command joins the conversation of the event that caused it" a
+%% decision the caller can take, by setting the id before dispatching, rather
+%% than something the constructor has already decided.
 -spec new(atom(), atom(), binary(), map(), map()) -> #evoq_command{}.
 new(CommandType, AggregateType, AggregateId, Payload, Metadata) ->
     #evoq_command{
@@ -62,7 +68,7 @@ new(CommandType, AggregateType, AggregateId, Payload, Metadata) ->
         payload = Payload,
         metadata = Metadata,
         causation_id = undefined,
-        correlation_id = generate_id()
+        correlation_id = undefined
     }.
 
 %% @doc Validate a command using its module's validate/1 callback.
@@ -144,11 +150,29 @@ get_idempotency_key(#evoq_command{idempotency_key = Key}) -> Key.
 set_idempotency_key(Key, Command) ->
     Command#evoq_command{idempotency_key = Key}.
 
-%% @doc Ensure the command has a command_id. If undefined, auto-generates one.
+%% @doc Give the command the identity it needs to be dispatched.
+%%
+%% A command with no `command_id' gets one; a command with no
+%% `correlation_id' gets one too, and that is the only place a correlation is
+%% minted. Called by the command router on every dispatch, so by the time an
+%% aggregate appends the events a command produced, the command has a
+%% conversation to stamp them with. A command that already carries a
+%% correlation - a process manager copying its triggering event's, or an
+%% application choosing its own - keeps it.
 -spec ensure_id(#evoq_command{}) -> #evoq_command{}.
-ensure_id(#evoq_command{command_id = undefined} = Command) ->
-    Command#evoq_command{command_id = generate_id()};
 ensure_id(Command) ->
+    ensure_correlation(ensure_command_id(Command)).
+
+%% @private
+ensure_command_id(#evoq_command{command_id = undefined} = Command) ->
+    Command#evoq_command{command_id = generate_id()};
+ensure_command_id(Command) ->
+    Command.
+
+%% @private
+ensure_correlation(#evoq_command{correlation_id = undefined} = Command) ->
+    Command#evoq_command{correlation_id = generate_id()};
+ensure_correlation(Command) ->
     Command.
 
 %%====================================================================

@@ -1,11 +1,11 @@
 %% @doc Process manager instance GenServer.
 %%
-%% Represents a single running instance of a process manager (saga).
+%% Represents a single running instance of a process manager.
 %% Each instance:
 %% - Has a unique process ID (correlation ID)
 %% - Maintains its own state
 %% - Handles events and dispatches commands
-%% - Supports saga compensation on failures
+%% - Supports compensation on a failed command
 %%
 %% @author rgfaber
 -module(evoq_pm_instance).
@@ -35,7 +35,12 @@ start_link(PMModule, ProcessId, Config) ->
     gen_server:start_link(?MODULE, {PMModule, ProcessId, Config}, []).
 
 %% @doc Handle an event.
--spec handle_event(pid(), map(), map()) -> ok | {error, term()}.
+%%
+%% `{ok, Results}' carries one entry per command the process manager
+%% dispatched, in order, plus one per compensating command if a dispatch
+%% failed, so the list can be shorter than the commands the PM returned.
+-spec handle_event(pid(), map(), map()) ->
+    {ok, [{ok, non_neg_integer(), [map()]} | {error, term()}]} | {error, term()}.
 handle_event(Pid, Event, Metadata) ->
     gen_server:call(Pid, {handle_event, Event, Metadata}, infinity).
 
@@ -222,9 +227,9 @@ dispatch_commands(Commands, Metadata, State) ->
     dispatch_in_order(Commands, Metadata, State, []).
 
 %% @private Commands run in the order the PM returned them, and stop at the
-%% first one that fails: a saga whose third step failed must not run its
+%% first one that fails: a process manager whose third step failed must not run its
 %% fourth. Each success is recorded in the PM's state, so a compensation can
-%% see what actually ran (evoq_saga_compensation:build_compensation_chain/2
+%% see what actually ran (evoq_pm_compensation:get_executed_commands/1
 %% reads it back), and the failure is compensated through the PM's own
 %% compensate/2.
 %%
@@ -240,33 +245,61 @@ dispatch_in_order([Command | Rest], Metadata,
         {ok, _Version, _Events} = Ok ->
             dispatch_in_order(Rest, Metadata, record_dispatched(Stamped, State), [Ok | Acc]);
         {error, Reason} = Error ->
-            {Compensated, CompensatedState} = compensate_after_failure(Stamped, Reason, State),
+            {Compensated, CompensatedState} =
+                compensate_after_failure(Stamped, Reason, Metadata, State),
             {lists:reverse([Error | Acc]) ++ Compensated, CompensatedState}
     end.
 
-%% @private
-record_dispatched(Command, #evoq_pm_state{state = PMState} = State) ->
-    State#evoq_pm_state{state = evoq_saga_compensation:record_command(Command, PMState)}.
+%% @private Only a process manager that declared compensate/2 has its
+%% dispatches recorded: a PM that never opted into compensation is not given
+%% a key in its own state it did not ask for, and does not accumulate one
+%% forever. A compensating PM gets the list `compensate/2' and
+%% evoq_pm_compensation:get_executed_commands/1 read.
+record_dispatched(Command, #evoq_pm_state{pm_module = PMModule, state = PMState} = State) ->
+    State#evoq_pm_state{state = record_if_compensating(PMModule, Command, PMState)}.
 
 %% @private
-compensate_after_failure(Command, Reason, #evoq_pm_state{process_id = ProcessId} = State) ->
+record_if_compensating(PMModule, Command, PMState) ->
+    record_result(erlang:function_exported(PMModule, compensate, 2),
+                  Command, PMState).
+
+record_result(true, Command, PMState) ->
+    evoq_pm_compensation:record_command(Command, PMState);
+record_result(false, _Command, PMState) ->
+    PMState.
+
+%% @private
+compensate_after_failure(Command, Reason, Metadata,
+                         #evoq_pm_state{process_id = ProcessId} = State) ->
     case handle_compensation(Command, State) of
         {ok, CompensatingCommands} ->
             logger:warning("PM ~p: command failed (~p); compensating with ~p command(s)",
                            [ProcessId, Reason, length(CompensatingCommands)]),
-            {[dispatch_compensation(C) || C <- CompensatingCommands], State};
+            {[dispatch_compensation(C, Metadata) || C <- CompensatingCommands],
+             forget_dispatched(State)};
         skip ->
             logger:warning("PM ~p: command failed (~p); no compensation",
                            [ProcessId, Reason]),
-            {[], State}
+            {[], forget_dispatched(State)}
     end.
 
-%% @private A compensating command that fails is logged rather than raised:
-%% the saga is already unwinding, and stopping the instance would lose the
-%% record of what it did run.
-dispatch_compensation(Command) ->
-    compensation_dispatch_result(evoq_router:dispatch(Command), Command).
+%% @private The transaction is over: what ran has been undone, or nobody
+%% asked for it to be. Starting the list again keeps it a record of what is
+%% still outstanding rather than a log that grows for the life of the
+%% process manager.
+forget_dispatched(#evoq_pm_state{state = PMState} = State) ->
+    State#evoq_pm_state{state = evoq_pm_compensation:clear(PMState)}.
 
+%% @private A compensating command is still the PM responding to the same
+%% event, so it carries the same lineage as the command that failed. It
+%% went out bare at first, which put the undo in a conversation of its own.
+dispatch_compensation(Command, Metadata) ->
+    compensation_dispatch_result(evoq_router:dispatch(stamp_lineage(Command, Metadata)),
+                                 Command).
+
+%% @private A compensating command that fails is logged rather than raised:
+%% the transaction is already unwinding, and stopping the instance would
+%% lose the record of what it did run.
 compensation_dispatch_result({ok, _Version, _Events} = Ok, _Command) ->
     Ok;
 compensation_dispatch_result({error, Reason} = Error, Command) ->
@@ -283,17 +316,23 @@ compensation_dispatch_result({error, Reason} = Error, Command) ->
 %% aggregate -> event -> PM -> command -> event lost both ids that make
 %% "how did I get here?" answerable.
 %%
-%% causation_id is only set when the PM has not named a cause itself; the
-%% correlation is taken from the event whenever the event carries one, which
-%% is what "copy the correlation id of the message it is responding to onto
-%% the new messages" asks for. A PM that wants a different conversation sets
-%% the id on the command *before* returning it from handle/3.
+%% Both are only set when the PM has not set them itself. The command a PM
+%% returns carries no correlation unless the PM put one there (see
+%% evoq_command:ensure_id/1: the router mints one at dispatch, never the
+%% constructor), so:
+%%
+%%   - a PM that returns a plain command inherits the triggering event's
+%%     conversation, which is the pattern: copy the correlation id of the
+%%     message you are responding to onto the new messages;
+%%   - a PM that calls evoq_command:set_correlation_id/2 deliberately starts
+%%     a new conversation, and keeps it. That is the explicit opt-out, and
+%%     it is explicit because the id is there before dispatch.
 stamp_lineage(Command, Metadata) when is_map(Metadata) ->
     Command#evoq_command{
         causation_id = first_defined(Command#evoq_command.causation_id,
                                      maps:get(event_id, Metadata, undefined)),
-        correlation_id = first_defined(evoq_lineage:correlation_id(Metadata),
-                                       Command#evoq_command.correlation_id)
+        correlation_id = first_defined(Command#evoq_command.correlation_id,
+                                       evoq_lineage:correlation_id(Metadata))
     }.
 
 %% @private

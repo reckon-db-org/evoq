@@ -114,6 +114,36 @@ rebuild_replays_on_fresh_state_test_() ->
         ?assertEqual(1, evoq_projection:get_checkpoint(Pid))
     end).
 
+%% A projection that stopped, or that the node restarted, comes back at its
+%% checkpoint - and the events it missed are replayed from the store, because
+%% the node's shared $all subscription has already moved past them and will
+%% not deliver them again.
+a_restarted_projection_resumes_from_its_checkpoint_test_() ->
+    {timeout, 60, fun() ->
+        meck:new(evoq_event_store, [passthrough]),
+        try
+            meck:expect(evoq_event_store, read_all_global,
+                        fun(_Store, _Offset, _Batch) ->
+                            {ok, [stored_event(2, 1), stored_event(3, 2)]}
+                        end),
+            ensure_registry(),
+            reset_script(),
+            {ok, Pid} = evoq_projection:start_link(
+                          ?MODULE, #{},
+                          #{checkpoint_store => evoq_projection_resume_checkpoint}),
+            try
+                %% Position 0 was already projected before the restart; the
+                %% events after it were missed and arrive through the resume.
+                ?assertEqual([2, 3], projected(Pid)),
+                ?assertEqual(2, evoq_projection:get_checkpoint(Pid))
+            after
+                stop(Pid)
+            end
+        after
+            meck:unload(evoq_event_store)
+        end
+    end}.
+
 %% A projection without on_error/4 gets the shared default - backoff and
 %% retries - rather than a silent drop: here it fails once and the default
 %% retry succeeds.

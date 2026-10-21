@@ -273,27 +273,33 @@ evoq handles this automatically with retries when appropriate.
 
 ## Testing Aggregates
 
-Test aggregates in isolation:
+Test an aggregate in isolation, in the shape the event-sourcing literature
+uses: **given** these events, **when** this command, **then** these events
+(or this error). No store, no process, no time.
 
 ```erlang
 -module(bank_account_tests).
 -include_lib("eunit/include/eunit.hrl").
 
 deposit_test() ->
+    %% given: nothing has happened yet
     {ok, State0} = bank_account:init(<<"test-acc">>),
 
-    %% Execute command
+    %% when: a deposit is executed
     Command = #{command_type => deposit, amount => 100},
     {ok, Events} = bank_account:execute(State0, Command),
 
-    %% Apply events
+    %% then: one event, and applying it leaves the balance at 100
+    ?assertMatch([#{event_type := money_deposited}], Events),
     State1 = lists:foldl(fun bank_account:apply/2, State0, Events),
-
     ?assertEqual(100, maps:get(balance, State1)).
 
 insufficient_funds_test() ->
+    %% given: an empty account
     {ok, State0} = bank_account:init(<<"test-acc">>),
 
+    %% when: it is asked to pay out
+    %% then: the command is refused and nothing is produced
     Command = #{command_type => withdraw, amount => 100},
     ?assertEqual({error, insufficient_funds}, bank_account:execute(State0, Command)).
 ```

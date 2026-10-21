@@ -245,9 +245,9 @@ store subscription adds:
 |-----|-----------|
 | `event_id` | the event's id |
 | `stream_id` | the stream it was appended to |
-| `version` | its version in that stream |
-| `stream_version` | the same number, under the name handlers used before |
-| `global_position` | its index in the store's global log |
+| `version` | the store subscription's per-boot delivery counter (its sequence number), **not** the event's version in its stream |
+| `stream_version` | the event's version in its stream |
+| `global_position` | its index in the store's global log: what a projection checkpoints on |
 | `replaying` | `true` when the event is a replay after a restart |
 
 The event's own `timestamp` is on the event map, not in the metadata.

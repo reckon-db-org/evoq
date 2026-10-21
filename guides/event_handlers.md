@@ -178,29 +178,45 @@ Event handlers can fail (network issues, service unavailable). evoq supports ret
 -module(my_handler).
 -behaviour(evoq_event_handler).
 
--export([interested_in/0, init/1, handle_event/4, on_error/4, max_retries/0, backoff_ms/1]).
+-include_lib("evoq/include/evoq.hrl").
 
-%% Optional: decide what happens on a failure
-on_error(_Reason, _Event, _FailureContext, _State) -> retry.
+-export([interested_in/0, init/1, handle_event/4, on_error/4]).
 
-%% Optional: how many attempts before the default gives up
-max_retries() -> 5.
-
-%% Optional: the delay before attempt N
-backoff_ms(Attempt) -> 1000 * Attempt.
+%% Optional: decide what happens on a failure.
+%%
+%% This REPLACES the framework's default policy, including its retry cap:
+%% max_retries/0 and backoff_ms/1 are only read when on_error/4 is absent.
+%% An on_error/4 that always answers `retry' retries forever, inside the
+%% handler's gen_server, holding up every event behind it.
+on_error(Reason, _Event, #evoq_failure_context{attempt_number = Attempt}, _State) ->
+    case Attempt >= 3 of
+        true -> {dead_letter, Reason};      %% give up, keep it for an operator
+        false -> {retry, 1000 * Attempt}    %% 1s, then 2s
+    end.
 
 handle_event(EventType, Event, _Meta, State) ->
     case call_external_api(Event) of
         {ok, _} -> {ok, State};
-        {error, temporary} -> {error, temporary};  %% Will retry
+        {error, temporary} -> {error, temporary};  %% on_error/4 decides
         {error, permanent} -> {ok, State}          %% Don't retry, mark as handled
     end.
 ```
 
 `on_error/4` returns the action: `retry`, `{retry, DelayMs}`, `skip`,
-`stop` or `{dead_letter, Reason}`. Without it the framework backs off
-(`evoq_retry_strategy`) up to `max_retries/0` attempts, then dead-letters
-the event. There is no `retry_strategy/0` callback.
+`stop` or `{dead_letter, Reason}`, and it is used **as given**. Without
+`on_error/4` the framework backs off (`evoq_retry_strategy`) up to
+`max_retries/0` attempts, then dead-letters the event; that default is the
+only thing `max_retries/0` and `backoff_ms/1` change. There is no
+`retry_strategy/0` callback.
+
+Two of those actions are worth thinking about before you pick one:
+
+- `{retry, DelayMs}` sleeps in the handler's process. Every event behind it
+  waits, and the store subscription's ack waits with them.
+- `stop` ends the handler. It comes back at its checkpoint, but the node's
+  shared `$all` subscription has already moved past the event, so it is not
+  delivered again: recovery is `evoq_projection:rebuild/1` (for a
+  projection) or a fresh handler started from the position you choose.
 
 ## Dead Letter Queue
 
@@ -223,39 +239,31 @@ Dead letters include:
 - Number of attempts
 - Timestamps
 
-## Consistency Modes
+## Consistency
 
-Event handlers support two consistency modes:
-
-### Eventual Consistency (Default)
-
-Events processed asynchronously. Best for most use cases.
-
-`consistency` is an option of `start_link/3`, not something the handler
-declares:
+Consistency is a property of the **dispatch**, not of the handler. A
+handler does not declare it and `start_link/3` does not take it: by the time
+a handler sees an event, the dispatch that produced it is already over.
 
 ```erlang
-evoq_event_handler:start_link(my_handler, #{}, #{consistency => strong}).
+%% Default: the command returns as soon as the events are appended.
+%% The handler catches up on its own.
+{ok, Version, Events} = evoq_router:dispatch(Command).
+
+%% Wait for named handlers to ack the events this command produced.
+{ok, Version, Events} =
+    evoq_router:dispatch(Command, #{consistency => {handlers, [audit_handler]}}).
 ```
 
-Properties:
-- Non-blocking command dispatch
-- Handler may lag behind writes
-- Failures don't affect command success
+| Option | What it waits for |
+|--------|-------------------|
+| `eventual` (default) | nothing - the command returns once the events are appended |
+| `{handlers, Handlers}` | those handlers, up to their acks, then returns |
+| `strong` | **nothing today**: it resolves to "wait for all handlers", the required set is empty, and the wait returns at once. Use `{handlers, [...]}` when you need the guarantee |
 
-### Strong Consistency
-
-Events processed before command returns. Use sparingly.
-
-```erlang
-evoq_event_handler:start_link(my_handler, #{}, #{consistency => strong}).
-```
-
-Properties:
-- Blocks until handler completes
-- Handler failure fails the command
-- Higher latency
-- Use only when necessary (audit, compliance)
+A wait that times out answers `{error, consistency_timeout}` rather than
+`{ok, ...}`: the command's events are appended either way, so a caller must
+treat that error as "written, but not yet seen by those handlers".
 
 ## What the handler is handed
 
@@ -266,8 +274,8 @@ subscription adds:
 |-----|-----------|
 | `event_id` | the event's id |
 | `stream_id` | the stream it was appended to |
-| `version` | its version in that stream |
-| `stream_version` | the same number, for handlers written against the older name |
+| `version` | the store subscription's per-boot delivery counter, **not** the event's version in its stream |
+| `stream_version` | the event's version in its stream |
 | `global_position` | its index in the store's global log; what a projection checkpoints on |
 | `replaying` | `true` when this is a replay (see below) |
 | `causation_id`, `correlation_id`, `conversation_id` | lineage, read with `evoq_lineage` |

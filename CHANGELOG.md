@@ -7,75 +7,120 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [1.28.0] - 2026-10-21
 
-### Fixed: lineage across a process manager, projection errors, rebuild state and compensation (evoq#22)
+### Fixed and changed: lineage, projection errors, rebuild state and compensation (evoq#22)
 
-Read against the GY-AW reference book. Four places where evoq did something
-other than what it documents, and a batch of guide statements that no longer
-matched the code. No wire format and no on-disk format changes.
+Read against the GY-AW reference book. Four defects where evoq did something
+other than what it documents, plus the guide statements that no longer
+matched the code. No wire format and no on-disk format changes, but several
+observable behaviour changes - those are listed under **Changed**, because a
+consumer floating `~> 1.27` picks this release up on its next lock refresh.
 
-**A process manager threw the conversation away.** `evoq_command:new/4,5`
-mints a fresh `correlation_id` and leaves `causation_id` undefined, and the
-instance dispatched the PM's commands as they were - so a chain aggregate ->
-event -> PM -> command -> event started a new conversation at every hop and
-`causation_id` was never set. A PM is a responder: its commands now carry
+#### Fixed
+
+**A process manager threw the conversation away.** Its commands now carry
 `causation_id` = the triggering event's id and `correlation_id` = that
-event's correlation, on both dispatch paths. An explicitly set
-`causation_id` is kept. A self-scheduled message (`handle_info/2`) has no
-triggering event and nothing is stamped. **Behaviour change for a PM that
-deliberately wanted its own conversation**: set the id on the command before
-returning it from `handle/3`, or the instance's inherited one is used.
+event's correlation, on both dispatch paths, and the compensating commands
+carry the same. A self-scheduled message (`handle_info/2`) has no triggering
+event and nothing is stamped.
 
 **A projection's `{error, Reason}` dropped the event forever.** `on_error/4`
 was called and the action it returned thrown away; the error went back to a
 router that discarded the reply; the next successfully projected event moved
 the checkpoint past the failed one. It is now handled exactly as an event
 handler is: `retry`, `{retry, DelayMs}`, `skip`, `stop` or
-`{dead_letter, Reason}`, and the shared default (backoff, then dead letter)
-when the projection has no `on_error/4`. `max_retries/0` and `backoff_ms/1`
-are optional projection callbacks now. A skip or a dead letter is logged
-with the event id and the position.
+`{dead_letter, Reason}`, and the shared default (bounded backoff, then dead
+letter) when the projection has no `on_error/4`. `max_retries/0` and
+`backoff_ms/1` are optional projection callbacks now. A skip or a dead letter
+is logged with the event id and the position. A rebuild replays through the
+same path, so a failure during a rebuild means what it means live.
 
 **A rebuild kept the projection's state.** It cleared the read model and
 reset the checkpoint, then replayed the whole log on top of state that
 already reflected it. The Config is kept and `init/1` runs again.
-`evoq_read_model:clear/1` now leaves the checkpoint at -1 rather than 0, for
-the same reason `load_checkpoint/1` does: positions start at 0, so "nothing
-yet" must sit below them.
 
 **Compensation was documented and never ran.** A failed command was logged
 and the rest of the saga's commands still ran. The instance now stops at the
-first failure, records each successful dispatch in the PM's state
-(`executed_commands`, what `evoq_saga_compensation:build_compensation_chain/2`
-reads), and runs the PM's `compensate/2`, dispatching what it returns. **A
-process manager that relied on later commands running after a failure sees
-them stop.** `{ok, Results}` from `evoq_pm_instance:handle_event/3` now
-carries one result per dispatched command plus the compensation results, so
-it can be shorter than the command list.
+first failure, records each successful dispatch in the PM's state, runs the
+PM's `compensate/2` and dispatches what it returns.
+
+**A restarted projection resumes.** It used to come back at its checkpoint
+and never see the events it missed, because the node's shared `$all`
+subscription had already acknowledged past them. `init/1` now replays from
+the checkpoint before serving anything live - only when a checkpoint exists,
+so a first boot still gets the store subscription's backfill and nothing
+doubles.
+
+**The checkpoint store was probed before it was loaded.** A store named in
+`Opts` had usually never been called, so `function_exported/3` answered
+false and the projection started as if it had no store at all: no checkpoint
+loaded, none saved.
 
 **The projection checkpoint telemetry is emitted.** `[evoq, projection,
 checkpoint]` was declared and never fired; it fires on every save now, with
 or without a checkpoint store, which is what makes a stalled projection
 visible.
 
-Also removed: the `handler_defaults` application environment, which nothing
-read (`consistency` is a `start_link/3` option), and the guide's "Start From
-Position", which described an option that never existed.
+**A read model's checkpoint starts at -1, not 0.** `evoq_read_model:new/2`
+and `clear/1` both said 0, which reads as "position 0 is done" and is the
+same off-by-one that dropped the first event from `load_checkpoint/1`.
+Positions start at 0, so "nothing yet" sits below them.
 
-### Guides
+#### Changed
 
-Corrected against the code: `aggregate_id` -> `stream_id` in the delivered
-metadata (the event's `timestamp` is on the event, not the metadata);
-`evoq_dispatcher` -> `evoq_router` / `evoq_command_router:dispatch_with_state/2`;
-`evoq_read_model_postgres`, `evoq_projection_sup`, `evoq_subscription_manager`
-and `evoq_test.hrl` do not exist; `table_name` -> `name`; `list/1` -> `list/2`,
-`new/1` -> `init/1`; `retry_strategy/0` is not a callback (`on_error/4`,
-`max_retries/0`, `backoff_ms/1` are); event types are
-`{subject}_{verb_past}_v{N}`, not `OrderPlaced.v1`; delivery is at-least-once
-behind the shared `$all` checkpoint, not exactly-once, and a checkpoint save
-is a second write, so the last event may repeat after a crash; compensation
-carries the `#evoq_command{}` record, not a map; a process manager is not a
-saga; `evoq_emitter` is a contract the application runs, and emitting is the
-desk's decision rather than a reflex on every event.
+**A correlation is minted at dispatch, not at construction.**
+`evoq_command:new/4,5` leaves `correlation_id` undefined; the command router
+mints one when the command reaches it with none (`evoq_command:ensure_id/1`).
+This is what makes "join the conversation that caused me" a decision the
+caller can take: a process manager sets the id on the command and keeps it,
+and one that does not inherits the triggering event's correlation.
+
+**A process manager stops at the first failed command.** Later commands the
+PM returned in the same batch are not dispatched. `{ok, Results}` from
+`evoq_pm_instance:handle_event/3` carries one entry per dispatched command
+plus one per compensating command, so it can be shorter than the command
+list.
+
+**A compensating process manager gets `executed_commands` in its state** -
+the commands it dispatched, most recent first - cleared once compensation has
+run. A PM that does not export `compensate/2` is not touched. The key is in
+memory only and does not survive a restart.
+
+**`evoq_saga_compensation` is gone**, replaced by `evoq_pm_compensation`:
+`record_command/2`, `get_executed_commands/1` and `clear/1`. The
+per-executed-command `build_compensation_chain/2` and `execute_compensation/3`
+are deleted - there is one compensation contract now, `compensate(State,
+FailedCommand)`.
+
+**The `consistency` option on `evoq_event_handler:start_link/3` is gone.** It
+was stored and never read. Consistency is a dispatch option:
+`evoq_router:dispatch(Command, #{consistency => {handlers, [...]}})`. And
+`strong` waits for nothing today - the required handler set resolves empty -
+so the guides now say that.
+
+**`handler_defaults` is removed from the application environment.** Nothing
+read it.
+
+#### Guides
+
+Corrected against the code: the delivered `version` is the subscription's
+per-boot counter and `stream_version` is the event's version in its stream;
+`aggregate_id` -> `stream_id` where the metadata key is meant, and a read
+model is keyed on a business id from the event, not on the stream name;
+`evoq_dispatcher` -> `evoq_router` /
+`evoq_command_router:dispatch_with_state/2`; `evoq_read_model_postgres`,
+`evoq_projection_sup`, `evoq_subscription_manager` and `evoq_test.hrl` do not
+exist; `table_name` -> `name`; `list/1` -> `list/2`, `new/1` -> `init/1`;
+`retry_strategy/0` is not a callback (`on_error/4`, `max_retries/0`,
+`backoff_ms/1` are, and `on_error/4` replaces the default policy rather than
+extending it); event types are `{subject}_{verb_past}_v{N}`, not
+`OrderPlaced.v1`; delivery is at-least-once behind the shared `$all`
+checkpoint, not exactly-once, and a checkpoint save is a second write, so the
+last event may repeat after a crash; compensation carries the
+`#evoq_command{}` record, not a map; a process manager is not a saga;
+`evoq_emitter` is a contract the application runs, and emitting is the desk's
+decision rather than a reflex on every event. `projections.md` gains the
+error-handling section it never had, and `aggregates.md` tests aggregates the
+way the literature does: given events, when a command, then events.
 
 New: **session consistency** is documented as a named, deliberate concept in
 `guides/integration_actors.md`, `guides/state_modules.md` and

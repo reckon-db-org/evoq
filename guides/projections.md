@@ -40,7 +40,8 @@ and the metadata is the routing envelope:
 ```erlang
 #{
     stream_id => <<"order-ord-123">>,      %% the stream the event was appended to
-    version => 7,                          %% its version in that stream
+    version => 7,                          %% the subscription's per-boot counter
+    stream_version => 3,                   %% the event's version in its stream
     global_position => 412,                %% its index in the store's global log
     event_id => <<"01J8...">>,
     correlation_id => <<"req-abc">>,       %% lineage, see evoq_lineage
@@ -76,9 +77,11 @@ init(_Config) ->
     {ok, ReadModel} = evoq_read_model:new(evoq_read_model_ets, #{}),
     {ok, #{}, ReadModel}.
 
-%% Project each event into the read model
+%% Project each event into the read model. The read model is keyed on the
+%% order, which comes from the event's data: stream_id names the stream
+%% (<<"order-ord-123">>), not the order.
 project(#{event_type := <<"OrderPlaced">>, data := Data} = Event, Metadata, State, ReadModel) ->
-    OrderId = maps:get(stream_id, Metadata),
+    OrderId = maps:get(order_id, Data),
     Summary = #{
         order_id => OrderId,
         customer_id => maps:get(customer_id, Data),
@@ -91,7 +94,7 @@ project(#{event_type := <<"OrderPlaced">>, data := Data} = Event, Metadata, Stat
     {ok, State, NewRM};
 
 project(#{event_type := <<"OrderShipped">>, data := Data} = Event, Metadata, State, ReadModel) ->
-    OrderId = maps:get(stream_id, Metadata),
+    OrderId = maps:get(order_id, Data),
     case evoq_read_model:get(OrderId, ReadModel) of
         {ok, Summary} ->
             Updated = Summary#{
@@ -106,8 +109,8 @@ project(#{event_type := <<"OrderShipped">>, data := Data} = Event, Metadata, Sta
             {skip, State, ReadModel}
     end;
 
-project(#{event_type := <<"OrderCancelled">>} = Event, Metadata, State, ReadModel) ->
-    OrderId = maps:get(stream_id, Metadata),
+project(#{event_type := <<"OrderCancelled">>, data := Data} = Event, Metadata, State, ReadModel) ->
+    OrderId = maps:get(order_id, Data),
     case evoq_read_model:get(OrderId, ReadModel) of
         {ok, Summary} ->
             Updated = Summary#{
@@ -255,7 +258,7 @@ survive a restart either.
 
 A checkpoint save is a **second write**. The read model rows are written
 first, then the checkpoint; a crash between the two leaves the read model
-ahead of the checkpoint, so the last event is projected again on the next
+ahead of the checkpoint, so the last event may be projected again on the next
 boot. Delivery is therefore at-least-once, not exactly-once: make
 `project/4` idempotent (put, do not increment a counter you read back
 blindly) and expect the last event to repeat after a crash.
@@ -323,11 +326,62 @@ handler has registered (from the application listed last in the release),
 so catch-up delivers everything in store order and no backfill runs, or
 call `evoq_projection:rebuild/1` once the projection is registered.
 
+## Handling Projection Errors
+
+A projection's `project/4` can answer `{error, Reason}`. That is handled
+exactly as an event handler's failure is: the optional `on_error/4` decides
+between `retry`, `{retry, DelayMs}`, `skip`, `stop` and
+`{dead_letter, Reason}`, and without it the framework's default applies -
+backoff, then dead letter after `max_retries/0` attempts.
+
+```erlang
+-spec on_error(term(), map(), #evoq_failure_context{}, term()) ->
+    evoq_error_handler:error_action().
+
+on_error(Reason, _Event, #evoq_failure_context{attempt_number = Attempt}, _State) ->
+    case Attempt >= 3 of
+        true -> {dead_letter, Reason};
+        false -> {retry, 500}
+    end.
+```
+
+What each action does to the checkpoint:
+
+| Action | Checkpoint | Event comes back? |
+|--------|-----------|-------------------|
+| `retry`, `{retry, D}` | unchanged | yes, immediately (or after D) |
+| `skip` | advanced | no - the projection said it does not want it |
+| `{dead_letter, R}` | advanced | no - stored for an operator (`evoq_dead_letter:list/0`) |
+| `stop` | unchanged | **not automatically** - see below |
+
+`on_error/4` is used as given: it replaces the default policy including its
+retry cap, so an `on_error/4` that always answers `retry` retries forever,
+inside the projection's process, and `{retry, D}` sleeps there, holding up
+every event behind it. Bound it yourself, with
+`FailureContext#evoq_failure_context.attempt_number` or your own state.
+
+The default (no `on_error/4`) is bounded: `max_retries/0` attempts
+(5 unless the module says otherwise) with `evoq_retry_strategy`'s backoff,
+which adds up to a few seconds per failing event before it is dead-lettered.
+
+**`stop` ends the process.** The node's shared `$all` subscription has
+already acknowledged past the event, so the feed will not hand it back. A
+restart resumes from the projection's checkpoint, replaying what it missed
+from the store; a projection with no checkpoint store has nothing to resume
+from and needs `evoq_projection:rebuild/1`.
+
+`skip` and `{dead_letter, _}` are logged with the event id and the position,
+so a silent gap is not possible: a check that the read model is behind shows
+up in the log.
+
 ## Rebuilding Projections
 
 A rebuild clears the read model, sets the checkpoint back to -1, and
 replays every event of the projection's types from the store, page by page
-through the global log, so it is not capped at one read batch:
+through the global log, so it is not capped at one read batch. It also runs
+`init/1` again, so the projection's own state starts as empty as the read
+model: without that, the replay landed on top of state that already
+reflected it and counted every event twice.
 
 ```erlang
 ok = evoq_projection:rebuild(ProjectionPid).
@@ -343,6 +397,18 @@ This is powerful:
 - Migrate to a new storage backend
 - Test projection changes safely
 
+Two things to know about `init/1` running again:
+
+- A backend that allocates a resource in `init/1` allocates one per
+  rebuild. The ETS backend takes a `name`, and a named table is reused, so
+  `#{name => order_summaries}` is what keeps rebuilds from leaving an
+  anonymous table behind each time.
+- If `init/1` fails during a rebuild the read model has already been
+  cleared, so the projection stops rather than serve events from state that
+  no longer matches the data. It comes back on restart with a fresh
+  `init/1` state; the read model is empty until it catches up or is
+  rebuilt again.
+
 ## Cross-Aggregate Projections
 
 Projections can combine data from multiple aggregates:
@@ -355,7 +421,7 @@ interested_in() ->
     [<<"CustomerRegistered">>, <<"OrderPlaced">>, <<"OrderShipped">>].
 
 project(#{event_type := <<"CustomerRegistered">>, data := Data}, Meta, State, RM) ->
-    CustomerId = maps:get(stream_id, Meta),
+    CustomerId = maps:get(customer_id, Data),
     Customer = #{
         customer_id => CustomerId,
         name => maps:get(name, Data),
@@ -484,11 +550,17 @@ Projections emit telemetry:
 | `[evoq, projection, stop]` | duration | projection, event_type |
 | `[evoq, projection, stop]` | (none) | projection (the projection process stopping) |
 | `[evoq, projection, exception]` | duration | projection, event_type, error |
+| `[evoq, projection, checkpoint]` | (none) | projection, position |
 
 `[evoq, projection, stop]` is emitted both per projected event (with a
 duration) and when the projection process stops (without); tell them apart
 by the `duration` measurement or the `event_type` metadata. A rebuild emits
 no events of its own.
+
+`[evoq, projection, checkpoint]` fires on every checkpoint save, with or
+without a checkpoint store, and carries the position it saved. It is the
+number that says whether a projection is still moving: a projection whose
+checkpoint has stopped advancing is stuck, however quiet it is.
 
 Units: `duration` is monotonic elapsed time and `system_time` is wall-clock
 time, both in native units (convert with

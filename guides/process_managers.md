@@ -183,6 +183,8 @@ after the failed one is not dispatched.
 -module(money_transfer_pm).
 -behaviour(evoq_process_manager).
 
+-include_lib("evoq/include/evoq.hrl").
+
 -export([interested_in/0, correlate/2, handle/3, apply/2, compensate/2]).
 
 interested_in() ->

@@ -160,12 +160,14 @@ init(_Config) ->
     {ok, ReadModel} = evoq_read_model:new(evoq_read_model_ets, #{}),
     {ok, #{}, ReadModel}.
 
-project(#{event_type := <<"AccountOpened">>, data := #{balance := B}},
-        #{stream_id := Id}, State, ReadModel) ->
+%% The read model is keyed on the account, which is the event's business
+%% id. stream_id is the stream's name, so derive the entity from the data.
+project(#{event_type := <<"AccountOpened">>, data := #{account_id := Id, balance := B}},
+        _Metadata, State, ReadModel) ->
     {ok, NewRM} = evoq_read_model:put(Id, #{balance => B, tx_count => 0}, ReadModel),
     {ok, State, NewRM};
-project(#{event_type := <<"MoneyDeposited">>, data := #{amount := A}},
-        #{stream_id := Id}, State, ReadModel) ->
+project(#{event_type := <<"MoneyDeposited">>, data := #{account_id := Id, amount := A}},
+        _Metadata, State, ReadModel) ->
     {ok, Current} = evoq_read_model:get(Id, ReadModel),
     Updated = Current#{
         balance => maps:get(balance, Current) + A,
@@ -354,9 +356,10 @@ Intercept command dispatch.
 ]}].
 ```
 
-An event handler's `consistency` is not application config: it is passed to
-`evoq_event_handler:start_link(Module, Config, Opts)` as `#{consistency =>
-eventual | strong | {handlers, [...]}}`.
+Consistency is a dispatch option, not application config and not a handler
+option: `evoq_router:dispatch(Command, #{consistency => {handlers, [...]}})`
+waits for those handlers to ack before returning. See the consistency
+section of `guides/event_handlers.md` (`strong` currently waits for nothing).
 
 ## Memory Pressure Handling
 

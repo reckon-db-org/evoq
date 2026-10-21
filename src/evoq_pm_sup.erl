@@ -1,6 +1,6 @@
 %% @doc Supervisor for process manager instances.
 %%
-%% Process managers (sagas) coordinate long-running business processes
+%% Process managers coordinate long-running business processes
 %% that span multiple aggregates. Each PM instance is correlated by
 %% a process_id derived from event metadata.
 %%

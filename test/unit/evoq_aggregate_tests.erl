@@ -211,10 +211,23 @@ command_new_auto_generates_id_test() ->
     ?assertNotEqual(undefined, Cmd#evoq_command.command_id),
     ?assert(is_binary(Cmd#evoq_command.command_id)).
 
-command_new_auto_generates_correlation_id_test() ->
+%% A correlation is minted at dispatch, not at construction: that is what
+%% lets a caller (a process manager, an application) choose the conversation
+%% by setting the id before it dispatches.
+command_new_leaves_correlation_for_dispatch_test() ->
     Cmd = evoq_command:new(increment, ?MODULE, <<"agg-1">>, #{amount => 1}),
-    ?assertNotEqual(undefined, Cmd#evoq_command.correlation_id),
-    ?assert(is_binary(Cmd#evoq_command.correlation_id)).
+    ?assertEqual(undefined, Cmd#evoq_command.correlation_id).
+
+ensure_id_mints_a_correlation_when_none_is_set_test() ->
+    Cmd = evoq_command:new(increment, ?MODULE, <<"agg-1">>, #{amount => 1}),
+    Ready = evoq_command:ensure_id(Cmd),
+    ?assert(is_binary(Ready#evoq_command.correlation_id)).
+
+ensure_id_keeps_a_correlation_the_caller_chose_test() ->
+    Cmd = evoq_command:new(increment, ?MODULE, <<"agg-1">>, #{amount => 1}),
+    Chosen = evoq_command:set_correlation_id(<<"conv-1">>, Cmd),
+    ?assertEqual(<<"conv-1">>,
+                 (evoq_command:ensure_id(Chosen))#evoq_command.correlation_id).
 
 command_new_unique_ids_test() ->
     Cmd1 = evoq_command:new(increment, ?MODULE, <<"agg-1">>, #{amount => 1}),

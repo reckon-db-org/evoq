@@ -205,7 +205,7 @@ init({ProjectionModule, Config, Opts}) ->
                 checkpoint_store = CheckpointStore,
                 store_id = OverrideStoreId
             },
-            {ok, State};
+            resume_after_checkpoint(State);
 
         {error, Reason} ->
             {stop, Reason}
@@ -225,6 +225,11 @@ handle_call({rebuild, _Opts}, _From, State) ->
     case do_rebuild(State) of
         {ok, NewState} ->
             {reply, ok, NewState};
+        {stop, Reason} ->
+            %% init/1 failed with the read model already cleared: reply
+            %% first, then end rather than serve from a state that no
+            %% longer matches the data.
+            {stop, Reason, {error, Reason}, State};
         {error, Reason} ->
             {reply, {error, Reason}, State}
     end;
@@ -504,13 +509,14 @@ rebuild_with_fresh_state(ProjectionModule, Config, ClearedRM, EventTypes, State)
             },
 
             %% Replay all events from event store
-            replay_events(InitialState, EventTypes);
+            replay_safely(InitialState, EventTypes, 0);
 
         {error, Reason} ->
-            %% The checkpoint is already at -1 and the read model cleared;
+            %% The read model is already cleared and the checkpoint at -1;
             %% the projection now has neither data nor a state that matches
-            %% it, so the failure is reported rather than papered over.
-            {error, {rebuild_init_failed, ProjectionModule, Reason}}
+            %% it. Carrying on would serve events from that state, so the
+            %% projection stops and says why: restart it to init/1's state.
+            {stop, {rebuild_init_failed, ProjectionModule, Reason}}
     end.
 
 %% @private
@@ -520,13 +526,51 @@ rebuild_with_fresh_state(ProjectionModule, Config, ClearedRM, EventTypes, State)
 %% store subscription gives it (see position/1). A rebuild and the live feed
 %% then agree on which events the checkpoint covers.
 %% Uses store_id from Opts if provided, otherwise falls back to app env.
-replay_events(State, EventTypes) ->
+replay_events(State, EventTypes, StartPosition) ->
     StoreId = case State#state.store_id of
         undefined -> application:get_env(evoq, store_id, default_store);
         Id -> Id
     end,
     BatchSize = application:get_env(evoq, replay_batch_size, 1000),
-    replay_page(StoreId, EventTypes, 0, BatchSize, State).
+    replay_page(StoreId, EventTypes, StartPosition, BatchSize, State).
+
+%% @private A projection that stopped - on_error/4 answered stop, or the node
+%% restarted - comes back at its checkpoint, but the node's shared `$all'
+%% subscription has already moved past the events it missed and will not
+%% deliver them to it again. Replaying from the checkpoint is what makes a
+%% restart resume instead of leaving a permanent hole behind it.
+%%
+%% Only when there is a checkpoint to resume from: a projection's first boot
+%% must not replay the whole log on top of the backfill the store
+%% subscription already performs for it.
+resume_after_checkpoint(#state{checkpoint = Checkpoint} = State) when Checkpoint >= 0 ->
+    case replay_safely(State, State#state.event_types, Checkpoint + 1) of
+        {ok, Resumed} ->
+            {ok, Resumed};
+        {stop, Reason} ->
+            {stop, Reason};
+        {error, Reason} ->
+            %% The projection still starts: it is behind, and saying so
+            %% beats refusing to boot. The gap shows in the log and in its
+            %% checkpoint.
+            logger:warning(#{what => evoq_projection_resume_failed,
+                             projection => State#state.projection_module,
+                             from_position => Checkpoint + 1,
+                             error => Reason}),
+            {ok, State}
+    end;
+resume_after_checkpoint(State) ->
+    {ok, State}.
+
+%% @private A store that is not configured, or not up, must not stop a
+%% projection from starting: it is behind, which the caller can see in its
+%% checkpoint, and that is better than not booting. The rebuild path uses
+%% this too, so both report an unreachable store the same way.
+replay_safely(State, EventTypes, FromPosition) ->
+    try replay_events(State, EventTypes, FromPosition)
+    catch
+        Class:Reason -> {error, {Class, Reason}}
+    end.
 
 %% @private Read one page at Offset, project the matching events in it, and
 %% go on to the next page unless this one was short.
@@ -549,8 +593,10 @@ next_page({ok, State}, true, _StoreId, _EventTypes, _Offset, _BatchSize) ->
     {ok, State};
 next_page({ok, State}, false, StoreId, EventTypes, Offset, BatchSize) ->
     replay_page(StoreId, EventTypes, Offset, BatchSize, State);
-next_page({error, _} = Error, _Last, _StoreId, _EventTypes, _Offset, _BatchSize) ->
-    Error.
+next_page({stop, Reason}, _Last, _StoreId, _EventTypes, _Offset, _BatchSize) ->
+    %% A projection that asked to stop on a replayed event stops the rebuild
+    %% too: continuing would project on past the event it refused.
+    {stop, Reason}.
 
 %% @private Pair each event of a page read at Offset with its global position,
 %% as the {Event, Metadata} the store subscription routes, so a projection
@@ -563,57 +609,31 @@ positioned(Events, Offset) ->
 routable(#evoq_event{} = E) ->
     evoq_store_subscription:evoq_event_to_routable(E).
 
-%% @private
-%% Replay positioned events through the projection
+%% @private Replay positioned events through the projection.
+%%
+%% The same path the live feed takes - checkpoint dedupe, project/4, the
+%% on_error/4 actions - so a rebuild and a restart cannot disagree about
+%% what a failure means, and an event already covered is skipped rather than
+%% projected twice.
 replay_events_list([], State) ->
     {ok, State};
 replay_events_list([{Position, {Event, EventMetadata}} | Rest], State) ->
-    #state{
-        projection_module = ProjectionModule,
-        projection_state = ProjectionState,
-        read_model = ReadModel,
-        checkpoint_store = CheckpointStore
-    } = State,
-
     EventType = maps:get(event_type, Event, <<"unknown">>),
     Metadata = EventMetadata#{global_position => Position, replaying => true},
-
-    %% Project the event
-    FullEvent = Event#{event_type => EventType},
-    case ProjectionModule:project(FullEvent, Metadata, ProjectionState, ReadModel) of
-        {ok, NewProjectionState, NewReadModel} ->
-            %% Update checkpoint
-            NewRM = evoq_read_model:set_checkpoint(Position, NewReadModel),
-            save_checkpoint(ProjectionModule, CheckpointStore, Position),
-
-            NewState = State#state{
-                projection_state = NewProjectionState,
-                read_model = NewRM,
-                checkpoint = Position
-            },
-            replay_events_list(Rest, NewState);
-
-        {skip, NewProjectionState, NewReadModel} ->
-            NewRM = evoq_read_model:set_checkpoint(Position, NewReadModel),
-            save_checkpoint(ProjectionModule, CheckpointStore, Position),
-
-            NewState = State#state{
-                projection_state = NewProjectionState,
-                read_model = NewRM,
-                checkpoint = Position
-            },
-            replay_events_list(Rest, NewState);
-
-        {error, Reason} ->
-            logger:error("Projection rebuild failed on event ~p: ~p",
-                        [EventType, Reason]),
-            {error, {replay_failed, Reason}}
+    case handle_event_internal(EventType, Event, Metadata, State) of
+        {ok, NewState} -> replay_events_list(Rest, NewState);
+        {stop, Reason} -> {stop, Reason}
     end.
 
 %% @private
 load_checkpoint(_ProjectionModule, undefined) ->
     -1;
 load_checkpoint(ProjectionModule, CheckpointStore) ->
+    %% Loaded first: function_exported/3 answers false for a module that is
+    %% not loaded yet, and a store named in Opts has usually never been
+    %% called before this - which read as "no store", so a projection that
+    %% had one started with nothing to resume from.
+    _ = code:ensure_loaded(CheckpointStore),
     load_checkpoint(erlang:function_exported(CheckpointStore, load, 1),
                     ProjectionModule, CheckpointStore).
 
@@ -645,6 +665,7 @@ save_checkpoint(ProjectionModule, CheckpointStore, Position) ->
 save_checkpoint_to_store(undefined, _ProjectionModule, _Position) ->
     ok;
 save_checkpoint_to_store(CheckpointStore, ProjectionModule, Position) ->
+    _ = code:ensure_loaded(CheckpointStore),
     case erlang:function_exported(CheckpointStore, save, 2) of
         true ->
             CheckpointStore:save(ProjectionModule, Position);

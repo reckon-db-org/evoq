@@ -76,7 +76,6 @@
     handler_module :: atom(),
     handler_state :: term(),
     event_types :: [binary()],
-    consistency :: eventual | strong,
     checkpoint :: non_neg_integer(),
     %% Whether this boot has already warned that the handler receives
     %% replay without declaring replay_policy/0. Once per boot, not once
@@ -121,15 +120,13 @@ init({HandlerModule, Config, Opts}) ->
     handle_init(HandlerModule:init(Config), HandlerModule, EventTypes, Opts).
 
 %% @private
-handle_init({ok, HandlerState}, HandlerModule, EventTypes, Opts) ->
-    Consistency = maps:get(consistency, Opts, eventual),
+handle_init({ok, HandlerState}, HandlerModule, EventTypes, _Opts) ->
     %% Register with event type registry
     ok = evoq_event_type_registry:register_all(EventTypes, self()),
     State = #state{
         handler_module = HandlerModule,
         handler_state = HandlerState,
         event_types = EventTypes,
-        consistency = Consistency,
         checkpoint = 0
     },
     {ok, State};
