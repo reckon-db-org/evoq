@@ -288,7 +288,7 @@ a handler sees an event, the dispatch that produced it is already over.
 |--------|-------------------|
 | `eventual` (default) | nothing - the command returns once the events are appended |
 | `{handlers, Handlers}` | those handlers and projections, up to their acks on the version this dispatch produced, then returns |
-| `strong` | every event handler and projection subscribed to the event types the command appended, on this node, up to their acks on the version this dispatch produced |
+| `strong` | every event handler and projection subscribed to the event types the command appended, on this node, each up to its ack of the event it was handed |
 
 `strong` derives its set from the appended events and the event type
 registry, the same lookup the event router delivers by: nothing keeps a list,
@@ -296,6 +296,13 @@ and a handler that registers later is in the set from the moment it
 registers. When nothing subscribes to what was appended there is nothing that
 could be behind it, so the dispatch answers at once rather than waiting out
 the timeout.
+
+**Each handler answers at its own version.** A dispatch that appends two
+events reaches the handler of the first with version 1 and the handler of the
+second with version 2, and each acknowledges the version it was handed. A
+handler held to the append's last version would never answer — it was never
+given that event — and every multi-event dispatch would end at the deadline.
+A handler subscribed to both events answers at the later one.
 
 The waiter joins the stream's group **before** the append, so a handler fast
 enough to finish before the router gets back from the append still has its

@@ -36,7 +36,7 @@ a_handler_that_writes_before_the_timeout_is_counted_test() ->
     end),
     Acker ! go,
     Started = erlang:monotonic_time(millisecond),
-    ?assertEqual(ok, evoq_consistency:await(Waiter, [slow_handler], 3, #{timeout => 5000})),
+    ?assertEqual(ok, evoq_consistency:await(Waiter, [{slow_handler, 3}], 3, #{timeout => 5000})),
     ?assert(erlang:monotonic_time(millisecond) - Started < 2000),
     ok = evoq_consistency:close(Waiter).
 
@@ -48,7 +48,7 @@ an_ack_that_arrives_before_the_wait_counts_test() ->
     Waiter = evoq_consistency:open(test_store, <<"s-early">>),
     ok = evoq_consistency:acknowledge(eager_handler, test_store, <<"s-early">>, 4),
     Started = erlang:monotonic_time(millisecond),
-    ?assertEqual(ok, evoq_consistency:await(Waiter, [eager_handler], 4, #{timeout => 5000})),
+    ?assertEqual(ok, evoq_consistency:await(Waiter, [{eager_handler, 4}], 4, #{timeout => 5000})),
     %% Proves the ack was used and not the clock: the timeout is 5 s.
     ?assert(erlang:monotonic_time(millisecond) - Started < 1000),
     ok = evoq_consistency:close(Waiter).
@@ -58,7 +58,7 @@ an_ack_that_arrives_before_the_wait_counts_test() ->
 an_ack_past_the_waited_version_counts_test() ->
     Waiter = evoq_consistency:open(test_store, <<"s-ahead">>),
     ok = evoq_consistency:acknowledge(ahead_handler, test_store, <<"s-ahead">>, 9),
-    ?assertEqual(ok, evoq_consistency:await(Waiter, [ahead_handler], 5, #{timeout => 500})),
+    ?assertEqual(ok, evoq_consistency:await(Waiter, [{ahead_handler, 5}], 5, #{timeout => 500})),
     ok = evoq_consistency:close(Waiter).
 
 %% AND AN ACK BEHIND IT DOES NOT. A handler that has written version 2 has
@@ -68,7 +68,42 @@ an_ack_behind_the_waited_version_does_not_count_test() ->
     Waiter = evoq_consistency:open(test_store, <<"s-behind">>),
     ok = evoq_consistency:acknowledge(behind_handler, test_store, <<"s-behind">>, 2),
     ?assertEqual({error, timeout},
-                 evoq_consistency:await(Waiter, [behind_handler], 5, #{timeout => 100})),
+                 evoq_consistency:await(Waiter, [{behind_handler, 5}], 5, #{timeout => 100})),
+    ok = evoq_consistency:close(Waiter).
+
+%%====================================================================
+%% Two handlers of one append: each answered at its own version
+%%====================================================================
+
+%% A COMMAND THAT APPENDED TWO EVENTS REACHES EACH HANDLER AT THE VERSION IT
+%% WAS HANDED. The handler of the first event wrote that event and nothing
+%% else; the handler of the second wrote the later one. Held to the append's
+%% last version, the first would never answer and every multi-event dispatch
+%% would end at the deadline (found in macula-realm#92: a realm's initiation
+%% appends two events, each with its own projection).
+each_handler_is_answered_at_its_own_version_test() ->
+    Waiter = evoq_consistency:open(test_store, <<"s-two">>),
+    ok = evoq_consistency:acknowledge(first_event_handler, test_store, <<"s-two">>, 7),
+    ok = evoq_consistency:acknowledge(second_event_handler, test_store, <<"s-two">>, 8),
+    Started = erlang:monotonic_time(millisecond),
+    ?assertEqual(ok, evoq_consistency:await(
+                       Waiter, [{first_event_handler, 7}, {second_event_handler, 8}], 8,
+                       #{timeout => 5000, first_version => 7})),
+    ?assert(erlang:monotonic_time(millisecond) - Started < 2000),
+    ok = evoq_consistency:close(Waiter).
+
+%% AND AN EARLIER VERSION DOES NOT ANSWER FOR A LATER ONE. The handler of the
+%% second event having written the first event's version is not the second
+%% event's write, and answering `ok' there would tell the caller its read
+%% model is current when it is missing the event it asked about.
+an_earlier_version_does_not_answer_for_a_later_one_test() ->
+    Waiter = evoq_consistency:open(test_store, <<"s-two-behind">>),
+    ok = evoq_consistency:acknowledge(first_event_handler, test_store, <<"s-two-behind">>, 7),
+    ok = evoq_consistency:acknowledge(second_event_handler, test_store, <<"s-two-behind">>, 7),
+    ?assertEqual({error, timeout},
+                 evoq_consistency:await(
+                   Waiter, [{first_event_handler, 7}, {second_event_handler, 8}], 8,
+                   #{timeout => 100, first_version => 7})),
     ok = evoq_consistency:close(Waiter).
 
 %%====================================================================
@@ -78,13 +113,13 @@ an_ack_behind_the_waited_version_does_not_count_test() ->
 an_ack_counts_for_the_module_it_names_test() ->
     Waiter = evoq_consistency:open(test_store, <<"s-module">>),
     acker(mod_b, <<"s-module">>, 8),
-    ?assertEqual(ok, evoq_consistency:await(Waiter, [mod_b], 8, #{timeout => 1000})),
+    ?assertEqual(ok, evoq_consistency:await(Waiter, [{mod_b, 8}], 8, #{timeout => 1000})),
     ok = evoq_consistency:close(Waiter).
 
 an_ack_counts_for_the_process_that_wrote_test() ->
     Waiter = evoq_consistency:open(test_store, <<"s-pid">>),
     Acker = acker(mod_c, <<"s-pid">>, 8),
-    ?assertEqual(ok, evoq_consistency:await(Waiter, [Acker], 8, #{timeout => 1000})),
+    ?assertEqual(ok, evoq_consistency:await(Waiter, [{Acker, 8}], 8, #{timeout => 1000})),
     ok = evoq_consistency:close(Waiter).
 
 %% A waiter is told about its own stream only: another stream's ack, even
@@ -92,7 +127,7 @@ an_ack_counts_for_the_process_that_wrote_test() ->
 an_ack_for_another_stream_is_not_counted_test() ->
     Waiter = evoq_consistency:open(test_store, <<"s-mine">>),
     ok = evoq_consistency:acknowledge(handler_a, test_store, <<"s-other">>, 5),
-    ?assertEqual({error, timeout}, evoq_consistency:await(Waiter, [handler_a], 5, #{timeout => 100})),
+    ?assertEqual({error, timeout}, evoq_consistency:await(Waiter, [{handler_a, 5}], 5, #{timeout => 100})),
     ok = evoq_consistency:close(Waiter).
 
 %%====================================================================
@@ -136,7 +171,7 @@ a_drop_below_the_waited_version_does_not_end_the_wait_test() ->
            dropping_handler, #{store_id => test_store, stream_id => <<"s-dropped-old">>,
                                stream_version => 2}),
     ?assertEqual({error, timeout},
-                 evoq_consistency:await(Waiter, [dropping_handler], 5, #{timeout => 100})),
+                 evoq_consistency:await(Waiter, [{dropping_handler, 5}], 5, #{timeout => 100})),
     ok = evoq_consistency:close(Waiter).
 
 %% And a drop by a handler this dispatch does not wait for is another
@@ -147,7 +182,7 @@ a_drop_by_another_handler_does_not_end_the_wait_test() ->
            other_handler, #{store_id => test_store, stream_id => <<"s-dropped-other">>,
                             stream_version => 5}),
     ?assertEqual({error, timeout},
-                 evoq_consistency:await(Waiter, [waited_handler], 5, #{timeout => 100})),
+                 evoq_consistency:await(Waiter, [{waited_handler, 5}], 5, #{timeout => 100})),
     ok = evoq_consistency:close(Waiter).
 
 %% A DROP FROM THE NEXT APPEND IS NOT THIS DISPATCH'S. A stream is a sequence
@@ -162,7 +197,7 @@ a_drop_above_this_dispatch_s_range_does_not_fail_it_test() ->
                               stream_version => 6}),
     async_ack(other_required_handler, <<"s-range-later">>, 5),
     ?assertEqual(ok, evoq_consistency:await(
-                       Waiter, [writing_handler, other_required_handler], 5,
+                       Waiter, [{writing_handler, 5}, {other_required_handler, 5}], 5,
                        #{timeout => 2000, first_version => 5})),
     ok = evoq_consistency:close(Waiter).
 
@@ -177,7 +212,7 @@ a_drop_inside_this_append_fails_the_wait_after_a_later_write_test() ->
                             stream_version => 4}),
     ok = evoq_consistency:acknowledge(multi_handler, test_store, <<"s-range-multi">>, 5),
     ?assertEqual({error, {dropped, multi_handler}},
-                 evoq_consistency:await(Waiter, [multi_handler], 5,
+                 evoq_consistency:await(Waiter, [{multi_handler, 5}], 5,
                                         #{timeout => 2000, first_version => 4})),
     ok = evoq_consistency:close(Waiter).
 
@@ -194,7 +229,7 @@ acks_the_wait_did_not_need_leave_no_message_behind_test() ->
     Waiter = evoq_consistency:open(test_store, <<"s-stray">>),
     ok = evoq_consistency:acknowledge(unwanted_handler, test_store, <<"s-stray">>, 3),
     ok = evoq_consistency:acknowledge(wanted_handler, test_store, <<"s-stray">>, 3),
-    ?assertEqual(ok, evoq_consistency:await(Waiter, [wanted_handler], 3, #{timeout => 1000})),
+    ?assertEqual(ok, evoq_consistency:await(Waiter, [{wanted_handler, 3}], 3, #{timeout => 1000})),
     ok = evoq_consistency:close(Waiter),
     ?assertEqual([], this_stream_messages(drain(), <<"s-stray">>)).
 
@@ -233,7 +268,7 @@ await_drop(Waiter, Module, Version) ->
                          stream_version => Version}),
         Self ! dropped
     end),
-    evoq_consistency:await(Waiter, [Module], Version, #{timeout => 5000}).
+    evoq_consistency:await(Waiter, [{Module, Version}], Version, #{timeout => 5000}).
 
 %% An ack from another process, after a short wait, so the wait is already
 %% listening when it arrives: what the drops in between are judged against.

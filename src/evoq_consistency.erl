@@ -59,7 +59,7 @@
 
 %% API
 -export([open/2, close/1, await/4]).
--export([required/1]).
+-export([required/2]).
 -export([wait_for/4]).
 -export([acknowledge/2, acknowledge/4, dropped/2]).
 -export([waitable/1]).
@@ -111,14 +111,34 @@ close(#{key := Key, store_id := StoreId, stream_id := StreamId}) ->
     _ = pg:leave(?PG_SCOPE, Key, self()),
     flush(StoreId, StreamId).
 
-%% @doc The handlers and projections subscribed to the types of these events.
+%% @doc The handlers and projections subscribed to these appended events,
+%% each with the LAST version of the append it is required for.
 %%
 %% Taken from the appended events and the event type registry, which is the
 %% set the event router delivers to: no list is kept anywhere. An event type
 %% no handler subscribes to contributes nothing, which is the truth.
--spec required([map()]) -> [pid()].
-required(Events) ->
-    lists:usort(lists:flatmap(fun targets/1, Events)).
+%%
+%% `FirstVersion' is the version the append's first event got, so the events
+%% are handed `FirstVersion', `FirstVersion + 1', ... in the order they were
+%% appended (the router derives it the same way when it computes the range).
+%%
+%% A handler answers for the version it was HANDED, not for the append's
+%% last one: a handler subscribed to one of two appended events writes that
+%% event and nothing else, so holding it to the second version is waiting for
+%% a write it was never given, and every multi-event dispatch would end at
+%% the deadline. A handler subscribed to both is required at the later one.
+-spec required([map()], integer()) -> [{pid() | atom(), integer()}].
+required(Events, FirstVersion) ->
+    {Pairs, _Last} =
+        lists:foldl(
+          fun(Event, {Acc, Version}) ->
+                  {[{Handler, Version} || Handler <- targets(Event)] ++ Acc, Version + 1}
+          end, {[], FirstVersion}, Events),
+    Wanted = lists:foldl(
+               fun({Handler, Version}, M) ->
+                       maps:put(Handler, max(Version, maps:get(Handler, M, 0)), M)
+               end, #{}, Pairs),
+    lists:sort(maps:to_list(Wanted)).
 
 %% @private The pids the event router would notify for one event, from the
 %% type it delivers it as (an upcaster can rename it). An appended event
@@ -152,11 +172,14 @@ waitable(Pid) when is_pid(Pid) ->
 waitable(Module) when is_atom(Module) ->
     true.
 
-%% @doc Wait until every required handler has acked the given stream version.
+%% @doc Wait until every required handler has acked the version IT was
+%% required for.
 %%
-%% Waits for handlers and projections; a timeout answers as an error, never
-%% as a silent success. An empty required list has nothing to wait for and
-%% answers at once.
+%% `Required' pairs each handler (a pid or a module) with the last version of
+%% the append it was handed, as `required/2' answers for a derived set. Waits
+%% for handlers and projections; a timeout answers as an error, never as a
+%% silent success. An empty required list has nothing to wait for and answers
+%% at once.
 %%
 %% An ack means the handler wrote its effect. A handler whose own error
 %% policy dropped an event instead (`skip', `{dead_letter, _}' from
@@ -174,13 +197,13 @@ waitable(Module) when is_atom(Module) ->
 %% this append began. Inside it, a drop fails the wait even when the same
 %% handler went on to write a later version of the append, because that is
 %% exactly the event the read model is missing.
--spec await(waiter(), [pid() | atom()], integer(), map()) ->
+-spec await(waiter(), [{pid() | atom(), integer()}], integer(), map()) ->
     ok | {error, timeout | {dropped, pid() | atom()}}.
 await(Waiter, Required, Version, Opts) ->
     Timeout = maps:get(timeout, Opts, ?DEFAULT_TIMEOUT),
     Deadline = erlang:monotonic_time(millisecond) + Timeout,
     Range = {maps:get(first_version, Opts, Version), Version},
-    wait_loop(Waiter, lists:usort(Required), #{}, Version, Range, Deadline).
+    wait_loop(Waiter, Required, #{}, Version, Range, Deadline).
 
 %% @doc Acknowledge a handler's or projection's write from the event it was
 %% handed.
@@ -262,7 +285,7 @@ named(all, _StoreId, _StreamId, _Version, _Opts) ->
     {error, all_needs_events};
 named(Handlers, StoreId, StreamId, Version, Opts) when is_list(Handlers) ->
     Waiter = open(StoreId, StreamId),
-    try await(Waiter, Handlers, Version, Opts)
+    try await(Waiter, [{Handler, Version} || Handler <- lists:usort(Handlers)], Version, Opts)
     after close(Waiter)
     end.
 
@@ -280,7 +303,7 @@ wait_loop(_Waiter, [], _Acked, _Version, _Range, _Deadline) ->
     ok;
 
 wait_loop(Waiter, Required, Acked, Version, Range, Deadline) ->
-    acked_reply(all_acked(Required, Acked, Version), Waiter, Required, Acked, Version,
+    acked_reply(all_acked(Required, Acked), Waiter, Required, Acked, Version,
                 Range, Deadline).
 
 %% @private
@@ -311,9 +334,10 @@ acked_reply(false, #{store_id := StoreId, stream_id := StreamId} = Waiter,
 %% already written the version this call waits for.
 drop_reply({Pid, Module} = Identity, DroppedVersion, Required, Waiter, Acked, Version,
            Range, Deadline) ->
-    ThisDispatch = lists:member(Pid, Required) orelse lists:member(Module, Required),
+    Wanted = required_version(Identity, Required),
+    ThisDispatch = Wanted =/= undefined,
     drop_verdict(ThisDispatch andalso in_range(DroppedVersion, Range)
-                 andalso not satisfied(Identity, Acked, Version),
+                 andalso not satisfied(Identity, Acked, Wanted),
                  Identity, Required, Waiter, Acked, Version, Range, Deadline).
 
 %% @private Named by its module: that is what a caller subscribes by, and it
@@ -329,11 +353,19 @@ drop_verdict(false, _Identity, Required, Waiter, Acked, Version, Range, Deadline
 in_range(Version, {First, Last}) ->
     First =< Version andalso Version =< Last.
 
-%% @private Has this handler already written the version the call waits for?
-%% A handler's messages arrive in order, so this is the same test `all_acked/3'
-%% makes, asked of one handler.
-satisfied({Pid, Module}, Acked, Version) ->
-    max(maps:get(Pid, Acked, -1), maps:get(Module, Acked, -1)) >= Version.
+%% @private The version this handler is required for, by either identity;
+%% `undefined' when this call does not wait for it at all.
+required_version({Pid, Module}, Required) ->
+    case [Version || {Handler, Version} <- Required, Handler =:= Pid orelse Handler =:= Module] of
+        [] -> undefined;
+        Versions -> lists:max(Versions)
+    end.
+
+%% @private Has this handler already written the version the call waits for it
+%% to write? A handler's messages arrive in order, so this is the same test
+%% `all_acked/2' makes, asked of one handler.
+satisfied({Pid, Module}, Acked, Wanted) ->
+    max(maps:get(Pid, Acked, -1), maps:get(Module, Acked, -1)) >= Wanted.
 
 %% @private Take this stream's acks and drops out of the mailbox, after
 %% leaving the group. `after 0', so an empty mailbox costs nothing.
@@ -353,8 +385,9 @@ record({Pid, Module}, Version, Acked) ->
     Higher = fun(Key) -> max(maps:get(Key, Acked, -1), Version) end,
     Acked#{Pid => Higher(Pid), Module => Higher(Module)}.
 
-%% @private A handler counts for the required version when its own ack is at
-%% or past it: one already ahead of the stream has written it, one behind
-%% has not.
-all_acked(Required, Acked, Version) ->
-    lists:all(fun(Handler) -> maps:get(Handler, Acked, -1) >= Version end, Required).
+%% @private A handler counts when its own ack is at or past the version it is
+%% required for: one already ahead of that has written it, one behind has not.
+%% Two handlers of one append are answered against their own versions, never
+%% against the append's last one (evoq#23's multi-event defect).
+all_acked(Required, Acked) ->
+    lists:all(fun({Handler, Version}) -> maps:get(Handler, Acked, -1) >= Version end, Required).

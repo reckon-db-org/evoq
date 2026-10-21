@@ -5,6 +5,29 @@ All notable changes to evoq will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.29.1] - 2026-10-21
+
+### Fixed: a multi-event dispatch waits for each handler at its own version (evoq#23)
+
+1.29.0 answered every handler in the required set against the append's LAST
+version. A command that appends two events reaches the handler of the first
+with the first event's version, and that handler was then held to the second
+version until the deadline: every dispatch whose events have different
+handlers answered `{error, consistency_timeout}` with every write already
+made. Found by macula-io/macula-realm#92, where a realm's initiation appends
+`realm_initiated_v1` and `realm_admin_appointed_v1` and each has its own
+projection.
+
+- `evoq_consistency:required/2` takes the append's first version and answers
+  `{Handler, Version}` pairs, each handler at the last of the appended events
+  it was handed (a handler subscribed to both is required at the later one).
+- `evoq_consistency:await/4` takes those pairs and counts a handler as written
+  when its own ack reaches the version it is required for. A handler that
+  acked an earlier event of the same append no longer answers for a later one.
+- The router passes the append's first version (`required/1` is gone; it is
+  `required/2` now), and `{handlers, [...]}` still answers at the version the
+  dispatch produced, which is what naming handlers rather than events means.
+
 ## [1.29.0] - 2026-10-21
 
 ### Fixed: `strong` consistency waits for the handlers that were appended to (evoq#23)

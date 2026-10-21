@@ -93,6 +93,28 @@ a_handler_that_dropped_the_event_fails_the_dispatch_test_() ->
         ?assert(erlang:monotonic_time(millisecond) - Started < 3000)
     end}.
 
+%% A DISPATCH THAT APPENDED TWO EVENTS WAITS FOR EACH HANDLER AT ITS OWN
+%% VERSION. A handler subscribed to the first event wrote version 7 and
+%% nothing else: holding it to the append's last version (8) is waiting for a
+%% write it was never handed, and every such dispatch ends at the deadline.
+%% Seen in macula-realm#92: a realm's initiation appends realm_initiated_v1
+%% and realm_admin_appointed_v1, each projected by its own handler, and the
+%% dispatch answered {error, consistency_timeout} with both rows written.
+a_multi_event_append_waits_for_each_handler_at_its_own_version_test_() ->
+    {timeout, 30, fun() ->
+        with_two_probes(fun() ->
+            Started = erlang:monotonic_time(millisecond),
+            ?assertMatch({ok, 8, [_, _]},
+                         dispatch(strong, <<"emit_two_probes">>, <<"stream-two">>)),
+            ?assert(erlang:monotonic_time(millisecond) - Started < 3000),
+            %% Both writes are in front of the caller: each handler was told
+            %% its own event, at its own version, before the dispatch answered.
+            ?assertMatch({messages, [{probe_wrote, <<"strong_probe_v1">>, _, _},
+                                     {probe_wrote, <<"other_probe_v1">>, _, _}]},
+                         {messages, drain_writes(2)})
+        end)
+    end}.
+
 %%====================================================================
 %% Helpers
 %%====================================================================
@@ -167,6 +189,53 @@ with_dropping_probe(Body) ->
         lists:foreach(fun application:stop/1, lists:reverse(Started))
     end.
 
+%% Two real handlers, each subscribed to ONE of the two events the append
+%% produces, delivered inline with the events' OWN stream versions: a store
+%% subscription hands each event its own version, and a handler acknowledges
+%% the one it was given. The mock answers the append's last version (8), so
+%% the dispatch's range is 7..8.
+with_two_probes(Body) ->
+    evoq_test_isolation:stop_leftover_evoq(),
+    %% EUnit runs one module's tests in one process: an earlier test's probe
+    %% writes are still in this mailbox, and the assertions below are about
+    %% this test's two.
+    flush_sink(),
+    {ok, Started} = application:ensure_all_started(evoq),
+    {ok, Probe} = evoq_event_handler:start_link(evoq_strong_probe_handler,
+                                                #{sink => self(), sleep => 0}),
+    {ok, Other} = evoq_event_handler:start_link(evoq_other_probe_handler,
+                                                #{sink => self()}),
+    meck:new(evoq_event_store, [passthrough, no_link]),
+    meck:expect(evoq_event_store, read, 5,
+                fun(_Store, _Stream, _From, _Count, _Dir) -> {ok, []} end),
+    meck:expect(evoq_event_store, append, 4,
+                fun(Store, Stream, _Expected, [First, Second]) ->
+                    deliver(Probe, Store, Stream, First, 7),
+                    deliver(Other, Store, Stream, Second, 8),
+                    {ok, 8}
+                end),
+    try
+        Body()
+    after
+        catch gen_server:stop(Probe),
+        catch gen_server:stop(Other),
+        meck:unload(evoq_event_store),
+        lists:foreach(fun application:stop/1, lists:reverse(Started))
+    end.
+
+%% @private The writes the probes reported, in the order they happened.
+drain_writes(0) -> [];
+drain_writes(N) ->
+    receive {probe_wrote, _, _, _} = Write -> [Write | drain_writes(N - 1)]
+    after 1000 -> error({missing_writes, N})
+    end.
+
+%% @private Empty the sink of what earlier tests' probes wrote.
+flush_sink() ->
+    receive {probe_wrote, _, _, _} -> flush_sink()
+    after 0 -> ok
+    end.
+
 %% @private
 deliver_all(inline_delivery, Handler, Store, Stream, Events) ->
     lists:foreach(fun(Event) -> deliver(Handler, Store, Stream, Event) end, Events);
@@ -179,14 +248,19 @@ deliver_all(spawn_delivery, Handler, Store, Stream, Events) ->
     ok.
 
 %% One appended event, as the store subscription hands it to the router.
-deliver(Handler, Store, Stream, #{event_type := EventType, data := Data} = Appended) ->
+deliver(Handler, Store, Stream, Event) ->
+    deliver(Handler, Store, Stream, Event, ?STREAM_VERSION).
+
+%% @private The same, at the event's own stream version: a multi-event append
+%% gives each event the version it was appended at.
+deliver(Handler, Store, Stream, #{event_type := EventType, data := Data} = Appended, Version) ->
     Metadata = (maps:get(metadata, Appended, #{}))#{
         store_id => Store,
         stream_id => Stream,
-        version => ?STREAM_VERSION,
-        stream_version => ?STREAM_VERSION,
+        version => Version,
+        stream_version => Version,
         global_position => 0
     },
     Event = #{event_type => EventType, stream_id => Stream, data => Data,
-              version => ?STREAM_VERSION},
+              version => Version},
     evoq_event_handler:notify(Handler, EventType, Event, Metadata).

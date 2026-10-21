@@ -325,26 +325,34 @@ handle_consistency(Pipeline, Context, Waiter, Version) ->
             Response;
         %% STRONG WAITS FOR THE HANDLERS THE APPENDED EVENTS REACH, derived
         %% from the registry the event router delivers by (evoq#23). Until
-        %% evoq 1.29 it resolved to an empty set and answered at once.
+        %% evoq 1.29 it resolved to an empty set and answered at once. Each
+        %% handler is required at the version of the event it was handed, so
+        %% a two-event append whose events have different handlers waits for
+        %% each at its own version (evoq 1.29.1, found in macula-realm#92).
         {strong, {ok, _, Appended}} ->
-            await(evoq_consistency:required(Appended), Waiter, Version, Timeout,
-                  Response, Appended);
+            First = Version - length(Appended) + 1,
+            await(evoq_consistency:required(Appended, First), Waiter, Version, First,
+                  Timeout, Response);
         {{handlers, Handlers}, {ok, _, Appended}} ->
-            await(Handlers, Waiter, Version, Timeout, Response, Appended);
+            %% A named list is answered at the version the dispatch produced:
+            %% the caller named the handlers, not the events, so there is no
+            %% earlier version to hold them to.
+            First = Version - length(Appended) + 1,
+            await([{Handler, Version} || Handler <- Handlers], Waiter, Version, First,
+                  Timeout, Response);
         _ ->
             Response
     end.
 
 %% @private
-await([], _Waiter, _Version, _Timeout, Response, _Appended) ->
+await([], _Waiter, _Version, _First, _Timeout, Response) ->
     %% Nothing is subscribed to what was appended: there is no handler that
     %% could still be behind, which is an answer, not a timeout.
     Response;
-await(Required, Waiter, Version, Timeout, Response, Appended) ->
+await(Required, Waiter, Version, First, Timeout, Response) ->
     %% The append's own range of versions. A handler that dropped one of these
     %% events is a hole this dispatch must report, and one that dropped a
     %% later command's event says nothing about this one.
-    First = Version - length(Appended) + 1,
     consistency_outcome(
         evoq_consistency:await(Waiter, Required, Version,
                                #{timeout => Timeout, first_version => First}), Response).
