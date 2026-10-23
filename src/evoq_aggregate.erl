@@ -11,7 +11,6 @@
 %% == Callbacks ==
 %%
 %% Required:
-%% - state_module() -> module()
 %% - init(AggregateId) -> {ok, State}
 %% - execute(State, Command) -> {ok, [Event]} | {error, Reason}
 %% - apply(State, Event) -> NewState
@@ -19,6 +18,8 @@
 %%   possibly starting from a from_snapshot/1 state; pure: State and Event only
 %%
 %% Optional:
+%% - state_module() -> module()
+%%   the evoq_state module the aggregate delegates to; evoq never calls it
 %% - snapshot(State) -> SnapshotData
 %% - from_snapshot(SnapshotData) -> State
 %%
