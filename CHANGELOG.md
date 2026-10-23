@@ -70,7 +70,9 @@ reaches each registrant once, in store order.
 - A registrant names its identity and where its history starts:
   `evoq_event_type_registry:register_all/3` takes
   `#{identity => Term, from => Position}`. `evoq_event_handler` and
-  `evoq_projection` pass their module as the identity; a projection passes
+  `evoq_projection` pass `{Module, Config}` as the identity (an event
+  handler takes `identity` in its start options instead, needed when its
+  Config holds a pid or a ref); a projection passes
   its checkpoint plus one as `from`. Registrations are announced as
   `{new_registrant, Registrant, Types, #{identity, from}}`, and
   `register_listener/1` returns `{Registrant, Types, Identity}`.

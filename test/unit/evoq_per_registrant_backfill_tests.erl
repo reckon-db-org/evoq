@@ -89,6 +89,23 @@ a_restarted_handler_repeats_no_side_effect_test_() ->
         ?assertEqual([1, 2, 3, 4, 5, 6], ns(side_effect))
     end).
 
+%% Two handler processes of one module with different Configs (one per
+%% tenant, say) are two consumers. A restart of one must not mark a third,
+%% new instance's history replay: with replay_policy skip it would never
+%% run the side effects of events it never saw.
+a_new_instance_is_not_the_restarted_one_of_another_config_test_() ->
+    backfill_test(fun() ->
+        StoreId = fresh_store(bs(1, 3)),
+        boot(StoreId, [], [subscription]),
+        start_late({tenant_b, a}),
+        start_late({tenant_b, b}),
+        restart_late({tenant_b, a}),
+        start_late({tenant_b, c}),
+        ?assertEqual([1, 2, 3], fresh(a)),
+        ?assertEqual([1, 2, 3], fresh(b)),
+        ?assertEqual([1, 2, 3], fresh(c))
+    end).
+
 %% A projection that restarts at checkpoint N says so when it registers, and
 %% its backfill starts there: nothing below N is read again or routed
 %% through the node's event router for it.
@@ -206,6 +223,9 @@ start_now(placed_handler) ->
     started(evoq_event_handler:start_link(evoq_order_placed_probe_handler, #{}));
 start_now({named_b, Name}) ->
     started(evoq_event_handler:start_link(evoq_named_probe_b_handler, #{name => Name}));
+start_now({tenant_b, Name}) ->
+    started_as({tenant_b, Name},
+               evoq_event_handler:start_link(evoq_named_probe_b_handler, #{name => Name}));
 start_now(side_effect_b) ->
     started_as(side_effect_b,
                evoq_event_handler:start_link(evoq_side_effect_probe_b_handler, #{}));
@@ -268,6 +288,9 @@ stop(Pid) ->
 settle() -> timer:sleep(300).
 
 ns(Who) -> [N || {N, _} <- evoq_replay_probe:calls(Who)].
+
+%% What Who was handed as new (not replay).
+fresh(Who) -> [N || {N, M} <- evoq_replay_probe:calls(Who), not maps:get(replaying, M, false)].
 
 ab_projected() -> [TN || {TN, _} <- evoq_replay_probe:calls(ab_projection)].
 

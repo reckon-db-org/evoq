@@ -148,10 +148,12 @@ false)`, for a decision finer than the whole handler.
 A handler that starts after the store subscription (an application that
 boots later, or a handler the supervisor restarts) gets its history first,
 to itself alone, then the live events: each event once, in store order. A
-restarted handler is the same consumer as before, recognised by its module.
-Everything this boot already routed to its last incarnation reaches it as
-replay. Running two handler processes of one module makes them one
-consumer in this respect.
+restarted handler is the same consumer as before, recognised by its module
+and Config. Everything this boot already routed to its last incarnation
+reaches it as replay. Two instances of one module with different Configs
+are two consumers. A Config that holds a pid or a ref differs on every
+restart: start such a handler with `evoq_event_handler:start_link(Module,
+Config, #{identity => Name})`.
 
 Limits:
 

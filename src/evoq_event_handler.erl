@@ -117,15 +117,19 @@ init({HandlerModule, Config, Opts}) ->
     EventTypes = HandlerModule:interested_in(),
 
     %% Initialize the handler
-    handle_init(HandlerModule:init(Config), HandlerModule, EventTypes, Opts).
+    handle_init(HandlerModule:init(Config), HandlerModule, EventTypes,
+                Opts#{identity => maps:get(identity, Opts, {HandlerModule, Config})}).
 
 %% @private
-handle_init({ok, HandlerState}, HandlerModule, EventTypes, _Opts) ->
-    %% Register with event type registry
-    %% The module is the handler's identity: a restarted handler is the same
-    %% consumer, and is not handed again as new what it already had.
+handle_init({ok, HandlerState}, HandlerModule, EventTypes, #{identity := Identity}) ->
+    %% Register with event type registry under the handler's identity,
+    %% {Module, Config} unless Opts names one: a restarted handler is the same
+    %% consumer, and is not handed again as new what it already had, while
+    %% two instances of one module with different Configs stay two consumers.
+    %% A Config holding a pid or a ref changes on every restart; such a
+    %% handler passes `identity' in Opts.
     ok = evoq_event_type_registry:register_all(EventTypes, self(),
-                                               #{identity => HandlerModule}),
+                                               #{identity => Identity}),
     State = #state{
         handler_module = HandlerModule,
         handler_state = HandlerState,
