@@ -76,6 +76,9 @@
 -define(TELEMETRY_PM_STOP, [evoq, process_manager, stop]).
 -define(TELEMETRY_PM_COMMAND, [evoq, process_manager, command]).
 -define(TELEMETRY_PM_COMPENSATE, [evoq, process_manager, compensate]).
+%% A process manager's correlate/2, or the event's delivery to its instance,
+%% raised; the event is kept as a dead letter (evoq#9).
+-define(TELEMETRY_PM_EXCEPTION, [evoq, process_manager, exception]).
 
 %%====================================================================
 %% Projection Telemetry Events

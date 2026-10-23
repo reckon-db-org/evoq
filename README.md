@@ -430,6 +430,7 @@ retry backoff.
 ### Process Manager Events
 - `[evoq, process_manager, start | stop]`
 - `[evoq, process_manager, command | compensate]`
+- `[evoq, process_manager, exception]` - a process manager raised; the event is a dead letter
 
 ### Projection Events
 - `[evoq, projection, start | stop | exception]`

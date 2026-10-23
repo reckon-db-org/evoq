@@ -47,6 +47,22 @@ while this node never started its own) and a `{stop, Id}` on one node
 stopped the other's. It reads this node's members only; the process
 managers guide says instances are node-local.
 
+### Fixed: one misbehaving process manager never silences the others (evoq#9)
+
+The PM router ran every process manager's `correlate/2`, and its call into
+the instance, with no `try`, and kept its registrations only in its state.
+One `function_clause` in one `correlate/2` (the guide's basic process
+manager has no catch-all), or a crash in `handle/3` or `apply/2`, restarted
+it empty: from then on every process manager on the node received nothing.
+
+- Each process manager is routed in isolation. What it raises is logged
+  (`evoq_process_manager_failed`), emitted as
+  `[evoq, process_manager, exception]` and kept as its dead letter; the
+  other process managers still get the event.
+- A restarted router rebuilds its routing from the type registry, which
+  holds the registrations and outlives it
+  (`evoq_event_type_registry:get_all_process_managers/0`).
+
 ### Fixed: a checkpoint store is refused next to a read model that does not survive a restart (evoq#1)
 
 A projection skips every event at or below its checkpoint. With a checkpoint

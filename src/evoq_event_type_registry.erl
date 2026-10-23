@@ -42,6 +42,7 @@
 -deprecated([{register_handler, 2, "start a handler with evoq_event_handler:start_link/2"},
              {unregister_handler, 2, "stop the handler process instead"}]).
 -export([get_handlers/1, get_process_managers/1]).
+-export([get_all_process_managers/0]).
 -export([get_all_event_types/0]).
 -export([register_listener/1, unregister_listener/1]).
 
@@ -144,6 +145,14 @@ get_handlers(EventType) ->
 get_process_managers(EventType) ->
     gen_server:call(?SERVER, {get_process_managers, EventType}).
 
+%% @doc Every registered process manager module and its event types.
+%%
+%% The PM router rebuilds its routing from this when it restarts: the
+%% registrations live here, in a process that outlives it (evoq#9).
+-spec get_all_process_managers() -> #{module() => [binary()]}.
+get_all_process_managers() ->
+    gen_server:call(?SERVER, get_all_process_managers).
+
 %% @doc Every event type something consumes: a handler or a process
 %% manager.
 -spec get_all_event_types() -> [binary()].
@@ -218,6 +227,9 @@ handle_call({unregister_process_manager, Module}, _From,
 handle_call({get_process_managers, EventType}, _From,
             #state{process_managers = PMs} = State) ->
     {reply, [M || {M, Types} <- maps:to_list(PMs), lists:member(EventType, Types)], State};
+
+handle_call(get_all_process_managers, _From, #state{process_managers = PMs} = State) ->
+    {reply, PMs, State};
 
 handle_call({get_handlers, EventType}, _From, State) ->
     Group = event_type_group(EventType),

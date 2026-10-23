@@ -403,11 +403,15 @@ another aggregate's event) produces it.
   consumes the store therefore runs its own instance of every process:
   if a process must run once in the cluster, run its process manager on
   one node.
-- A crash in one process manager's `correlate/2`,
-  `handle/3` or `apply/2` restarts the router empty, and every process
-  manager on the node stays silent until the node restarts or each is
-  registered again (evoq #9); keep those callbacks total (a catch-all
-  `correlate(_, _) -> false`) until that is fixed.
+- A crash in one process manager's `correlate/2`, `handle/3` or `apply/2`
+  stays its own: the router logs `evoq_process_manager_failed`, emits
+  `[evoq, process_manager, exception]`, keeps the event as a dead letter of
+  that process manager, and goes on routing it to the others. An instance
+  that crashed is gone; the next event for its id starts a new one, which
+  does not have the old one's state. A router that restarts anyway routes
+  to every process manager registered before (evoq #9). A catch-all
+  `correlate(_, _) -> false` is still the way to say an event is not
+  yours, rather than leaving a dead letter for it.
 
 ## Correlation Strategies
 
@@ -497,6 +501,7 @@ Process managers emit telemetry:
 | `[evoq, process_manager, stop]` | (none) | pm_module, process_id |
 | `[evoq, process_manager, command]` | (none) | pm_module, process_id, command_type |
 | `[evoq, process_manager, compensate]` | command_count | pm_module, process_id |
+| `[evoq, process_manager, exception]` | (none) | pm_module, event_type, error |
 
 ## Best Practices
 

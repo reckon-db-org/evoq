@@ -18,6 +18,7 @@
 -behaviour(gen_server).
 
 -include("evoq.hrl").
+-include("evoq_telemetry.hrl").
 
 %% API
 -export([start_link/0]).
@@ -121,7 +122,13 @@ init([]) ->
         {ok, _Pid} -> ok;
         {error, {already_started, _Pid}} -> ok
     end,
-    {ok, #state{}}.
+    %% A restarted router routes to every process manager registered before
+    %% it died: the registrations are kept by the type registry, which
+    %% outlives it. Started empty, every process manager on the node went
+    %% silent until the node restarted (evoq#9). Not registered again, so
+    %% nothing is backfilled twice.
+    Map = maps:fold(fun add_pm/3, #{}, evoq_event_type_registry:get_all_process_managers()),
+    {ok, #state{pm_by_event_type = Map}}.
 
 %% @private
 handle_call({register_pm, PMModule}, _From, #state{pm_by_event_type = Map} = State) ->
@@ -131,11 +138,7 @@ handle_call({register_pm, PMModule}, _From, #state{pm_by_event_type = Map} = Sta
     %% manager consumes reach it at all (evoq #2), and it backfills the
     %% process manager's history to it.
     ok = evoq_event_type_registry:register_process_manager(PMModule, EventTypes),
-    NewMap = lists:foldl(fun(EventType, Acc) ->
-        PMs = maps:get(EventType, Acc, []),
-        Acc#{EventType => lists:usort([PMModule | PMs])}
-    end, Map, EventTypes),
-    {reply, ok, State#state{pm_by_event_type = NewMap}};
+    {reply, ok, State#state{pm_by_event_type = add_pm(PMModule, EventTypes, Map)}};
 
 handle_call({unregister_pm, PMModule}, _From, #state{pm_by_event_type = Map} = State) ->
     EventTypes = PMModule:interested_in(),
@@ -146,6 +149,13 @@ handle_call({unregister_pm, PMModule}, _From, #state{pm_by_event_type = Map} = S
 
 handle_call(_Request, _From, State) ->
     {reply, {error, unknown_request}, State}.
+
+%% @private Add PMModule to each of its event types' lists.
+add_pm(PMModule, EventTypes, Map) ->
+    lists:foldl(fun(EventType, Acc) ->
+        PMs = maps:get(EventType, Acc, []),
+        Acc#{EventType => lists:usort([PMModule | PMs])}
+    end, Map, EventTypes).
 
 %% @private Drop PMModule from EventType's list, pruning empty entries.
 remove_pm(PMModule, EventType, Acc) ->
@@ -176,7 +186,37 @@ handle_cast(_Msg, State) ->
 
 %% @private
 route_to_pms(PMModules, Event, Metadata) ->
-    lists:foreach(fun(PMModule) -> route_to_pm(PMModule, Event, Metadata) end, PMModules).
+    lists:foreach(fun(PMModule) -> route_isolated(PMModule, Event, Metadata) end, PMModules).
+
+%% @private Route to one process manager; whatever it raises stays its own.
+%%
+%% correlate/2 runs here, and so does the call into the instance, which
+%% exits when handle/3 or apply/2 crashes it. Uncaught, either one restarted
+%% the router and every other process manager missed the event (evoq#9).
+%% The event is kept as a dead letter of that process manager.
+route_isolated(PMModule, Event, Metadata) ->
+    try
+        route_to_pm(PMModule, Event, Metadata)
+    catch
+        Class:Reason:Stack ->
+            pm_failed(PMModule, Event, {Class, Reason}, Stack)
+    end.
+
+%% @private
+pm_failed(PMModule, Event, Error, Stack) ->
+    EventType = maps:get(event_type, Event, undefined),
+    logger:error(#{what => evoq_process_manager_failed,
+                   pm_module => PMModule,
+                   event_type => EventType,
+                   error => Error}),
+    telemetry:execute(?TELEMETRY_PM_EXCEPTION, #{}, #{
+        pm_module => PMModule,
+        event_type => EventType,
+        error => Error
+    }),
+    Context = evoq_failure_context:with_stacktrace(
+                Stack, evoq_failure_context:new(PMModule, Event, Error)),
+    evoq_dead_letter:store(Event, PMModule, Context, Error).
 
 %% @private
 handle_info(_Info, State) ->
