@@ -5,6 +5,17 @@ All notable changes to evoq will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.29.2] - 2026-10-23
+
+### Fixed: an aggregate without a state module compiles without a warning (evoq#28)
+
+`state_module/0` was a required callback of `evoq_aggregate`, yet nothing in
+evoq or reckon-evoq calls it. Every aggregate written from the README or a
+getting-started guide (`init/1`, `execute/2`, `apply/2`) compiled with
+"undefined callback function state_module/0", and failed to build under
+`warnings_as_errors`. It is optional now; an aggregate that pairs with an
+`evoq_state` module may still declare it.
+
 ## [1.29.1] - 2026-10-21
 
 ### Fixed: a multi-event dispatch waits for each handler at its own version (evoq#23)

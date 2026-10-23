@@ -272,11 +272,13 @@ See [Artifacts Guide](guides/artifacts.md) for detailed documentation and exampl
 Aggregates maintain business invariants and produce events.
 
 ```erlang
--callback state_module() -> module().
 -callback init(AggregateId :: binary()) -> {ok, State :: term()}.
 -callback execute(State :: term(), Command :: map()) ->
     {ok, [Event :: map()]} | {error, Reason :: term()}.
 -callback apply(State :: term(), Event :: map()) -> NewState :: term().
+
+%% Optional: the evoq_state module the aggregate delegates to (never called)
+-callback state_module() -> module().
 
 %% Optional: snapshotting
 -callback snapshot(State :: term()) -> SnapshotData :: term().

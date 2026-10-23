@@ -30,17 +30,19 @@
 -include("evoq_telemetry.hrl").
 
 %% Behavior callbacks
--callback state_module() -> module().
 -callback init(AggregateId :: binary()) -> {ok, State :: term()}.
 -callback execute(State :: term(), Command :: map()) ->
     {ok, [Event :: map()]} | {error, Reason :: term()}.
 -callback apply(State :: term(), Event :: map()) -> NewState :: term().
 
 %% Optional callbacks
+%% state_module/0 names the evoq_state module the aggregate delegates to.
+%% It documents the pairing for readers and tools; evoq never calls it.
+-callback state_module() -> module().
 -callback snapshot(State :: term()) -> SnapshotData :: term().
 -callback from_snapshot(SnapshotData :: term()) -> State :: term().
 
--optional_callbacks([snapshot/1, from_snapshot/1]).
+-optional_callbacks([state_module/0, snapshot/1, from_snapshot/1]).
 
 %% API
 -export([start_link/2, start_link/3]).

@@ -103,7 +103,6 @@ Business logic container. Validates commands and produces events.
 -behaviour(evoq_aggregate).
 
 %% Initialize state
--callback state_module() -> module().
 -callback init(AggregateId :: binary()) -> {ok, State :: term()}.
 
 %% Validate and produce events
