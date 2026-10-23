@@ -23,7 +23,7 @@ Add to your dependencies:
 
 ```erlang
 {deps, [
-    {evoq, "~> 1.27"},
+    {evoq, "~> 1.30"},
     {reckon_evoq, "~> 2.8"}
 ]}.
 ```

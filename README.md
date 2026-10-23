@@ -31,7 +31,7 @@ Add to your `rebar.config`:
 
 ```erlang
 {deps, [
-    {evoq, "~> 1.26"}
+    {evoq, "~> 1.30"}
 ]}.
 ```
 

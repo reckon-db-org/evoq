@@ -7,18 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.30.0] - 2026-10-23
+
 ### Changed: OTP 28
 
 evoq is built, tested and documented on Erlang/OTP 28 (CI: 28.4.3); the
 README says so. The default fact serialisation uses the OTP `json` module,
 in OTP since 27.
 
-### Fixed: a failed append closes its execute span (evoq#11)
+### Fixed: every execute span closes (evoq#11)
 
 `[evoq, aggregate, execute, start]` was followed by neither `stop` nor
 `exception` when the append failed (a version conflict, an integrity
 refusal, a store timeout), so a span tracer held an open span per conflict.
-It closes with `exception` now, carrying the store's reason.
+It closes with `exception` now, carrying the store's reason. A command that
+crashes the aggregate (a raising `execute/2` or `apply/2`, an answer
+`execute/2` may not give, a raising append) also emits `exception` before
+the crash, which is otherwise unchanged.
 
 ### Fixed: a failure's duration is elapsed time, never negative (evoq#12)
 
@@ -62,6 +67,12 @@ it empty: from then on every process manager on the node received nothing.
 - A restarted router rebuilds its routing from the type registry, which
   holds the registrations and outlives it
   (`evoq_event_type_registry:get_all_process_managers/0`).
+- The next event for a crashed instance's id starts a fresh instance, as
+  the process managers guide says. pg drops a dead member asynchronously,
+  so the router could still be handed the dead pid, or the instance could
+  die between the lookup and the call; either way the event was
+  dead-lettered. `get_instance/2` hands out live members only, and a
+  `noproc` from that instance starts a fresh one.
 
 ### Fixed: one slow or retrying handler delays only its own events (evoq#30)
 
