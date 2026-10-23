@@ -274,9 +274,22 @@ start_and_route(PMModule, ProcessId, Event, Metadata) ->
 route_or_start(PMModule, ProcessId, Event, Metadata) ->
     case get_instance(PMModule, ProcessId) of
         {ok, Pid} ->
-            evoq_pm_instance:handle_event(Pid, Event, Metadata);
+            route_or_restart(Pid, PMModule, ProcessId, Event, Metadata);
         {error, not_found} ->
             %% Start new instance
+            start_and_route(PMModule, ProcessId, Event, Metadata)
+    end.
+
+%% @private An instance can still die after get_instance/2 saw it alive and
+%% before the call reaches it. That event starts a fresh instance, as a
+%% missing one does; it was dead-lettered (evoq#9). An instance that dies
+%% while handling the event exits with its own reason, not noproc, and
+%% stays a failure of that event.
+route_or_restart(Pid, PMModule, ProcessId, Event, Metadata) ->
+    try
+        evoq_pm_instance:handle_event(Pid, Event, Metadata)
+    catch
+        exit:{noproc, {gen_server, call, [Pid | _]}} ->
             start_and_route(PMModule, ProcessId, Event, Metadata)
     end.
 

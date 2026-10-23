@@ -66,6 +66,37 @@ a_dead_instance_still_in_its_group_is_not_found_test_() ->
         end
     end).
 
+%% An instance can still die after get_instance/2 saw it alive and before
+%% the router's call reaches it. The call exits with noproc and the event
+%% was dead-lettered; it starts a fresh instance instead, as a missing one
+%% does (evoq#9). The mock kills the instance at exactly that point.
+an_instance_dying_before_the_call_gets_a_fresh_one_test_() ->
+    pm_test(fun() ->
+        fresh_store([]),
+        lists:foreach(fun(M) -> started(M:start_link()) end,
+                      [evoq_event_type_registry, evoq_pm_router, evoq_pm_instance_sup,
+                       evoq_dead_letter]),
+        ok = evoq_process_manager:start(evoq_order_probe_pm, #{}),
+        {ok, Old} = evoq_pm_instance_sup:start_instance(evoq_order_probe_pm, <<"o11">>, #{}),
+        meck:new(evoq_pm_instance, [passthrough, no_link]),
+        try
+            meck:expect(evoq_pm_instance, handle_event, 3,
+                        fun(Pid, Event, Meta) ->
+                            kill_if(Pid =:= Old, Pid),
+                            meck:passthrough([Pid, Event, Meta])
+                        end),
+            evoq_pm_router:route_event(#{event_type => ?PAID, data => #{order => <<"o11">>}}, #{}),
+            _ = sys:get_state(evoq_pm_router),
+            ?assertEqual([{?PAID, <<"o11">>, []}], order_pm_seen()),
+            ?assertEqual([], evoq_dead_letter:list())
+        after
+            meck:unload(evoq_pm_instance)
+        end
+    end).
+
+kill_if(true, Pid) -> stop(Pid);
+kill_if(false, _Pid) -> ok.
+
 %% evoq #3: register_handler/2 and unregister_handler/2 stored nothing and
 %% answered ok, so a caller believed a module was registered that would
 %% never receive an event. They refuse.
