@@ -41,6 +41,31 @@ a_stopping_instance_leaves_only_itself_test_() ->
         ?assertEqual({ok, First}, evoq_pm_router:get_instance(evoq_order_probe_pm, <<"o9">>))
     end).
 
+%% pg drops a dead member asynchronously, in its scope process, so right
+%% after an instance crashes the group can still list it. get_instance/2
+%% handed out that dead pid, the next {continue, Id} event got noproc and
+%% was dead-lettered instead of starting a fresh instance (evoq#9). With
+%% the scope suspended pg cannot drop the member, which makes the window
+%% deterministic.
+a_dead_instance_still_in_its_group_is_not_found_test_() ->
+    pm_test(fun() ->
+        evoq_test_isolation:stop_leftover_evoq(),
+        lists:foreach(fun(M) -> started(M:start_link()) end,
+                      [evoq_event_type_registry, evoq_pm_router, evoq_pm_instance_sup]),
+        {ok, Pid} = evoq_pm_instance_sup:start_instance(evoq_order_probe_pm, <<"o10">>, #{}),
+        Scope = whereis(evoq_pm_instances),
+        ok = sys:suspend(Scope),
+        try
+            stop(Pid),
+            ?assertEqual([Pid], pg:get_local_members(evoq_pm_instances,
+                                                     {pm_instance, evoq_order_probe_pm, <<"o10">>})),
+            ?assertEqual({error, not_found},
+                         evoq_pm_router:get_instance(evoq_order_probe_pm, <<"o10">>))
+        after
+            sys:resume(Scope)
+        end
+    end).
+
 %% evoq #3: register_handler/2 and unregister_handler/2 stored nothing and
 %% answered ok, so a caller believed a module was registered that would
 %% never receive an event. They refuse.

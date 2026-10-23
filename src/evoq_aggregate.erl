@@ -244,19 +244,35 @@ run_command(Command, State, Reply) ->
         command_type => maps:get(command_type, Command#evoq_command.payload, unknown)
     }),
 
-    %% Execute the command
-    case Module:execute(AggState, Command#evoq_command.payload) of
-        {ok, Events} when is_list(Events) ->
-            %% Apply events to get new state, then append
-            NewAggState = apply_events(Module, AggState, Events),
-            Reply(append_events(StoreId, StreamId, Version, Events, Command),
-                  Events, NewAggState, State, StartTime);
+    %% A command that crashes the aggregate (a raising execute/2 or apply/2,
+    %% an answer execute/2 may not give, a raising append) still closes the
+    %% span with an exception, then crashes as before (evoq#11).
+    try execute_and_append(Module, AggState, Command, StoreId, StreamId, Version) of
+        {appended, Appended, Events, NewAggState} ->
+            Reply(Appended, Events, NewAggState, State, StartTime);
 
         {error, Reason} = Error ->
             %% Emit exception telemetry
             emit_execute_exception(StreamId, Reason, StartTime),
             Timeout = LifespanModule:after_error(Reason),
             {reply, Error, State, Timeout}
+    catch
+        Class:Crash:Stacktrace ->
+            emit_execute_exception(StreamId, Crash, StartTime),
+            erlang:raise(Class, Crash, Stacktrace)
+    end.
+
+%% @private Execute the command and, when it yields events, apply them and
+%% append them.
+execute_and_append(Module, AggState, Command, StoreId, StreamId, Version) ->
+    case Module:execute(AggState, Command#evoq_command.payload) of
+        {ok, Events} when is_list(Events) ->
+            NewAggState = apply_events(Module, AggState, Events),
+            {appended, append_events(StoreId, StreamId, Version, Events, Command),
+             Events, NewAggState};
+
+        {error, _Reason} = Error ->
+            Error
     end.
 
 %% @private Fold new events onto the aggregate state.

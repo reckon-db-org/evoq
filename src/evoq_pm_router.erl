@@ -102,11 +102,15 @@ unregister_instance(PMModule, ProcessId, Pid) ->
 %% members of every connected node, so this reads the local ones only; with
 %% all of them, the same process manager on two nodes handed events to the
 %% other node's instance and a {stop, Id} on one node stopped the other's
-%% (evoq#10).
+%% (evoq#10). pg drops a dead member asynchronously, so a member is only
+%% handed out while it is alive: right after an instance crashed the next
+%% event for its id got the dead pid and was dead-lettered instead of
+%% starting a fresh instance (evoq#9).
 -spec get_instance(atom(), binary()) -> {ok, pid()} | {error, not_found}.
 get_instance(PMModule, ProcessId) ->
     Group = instance_group(PMModule, ProcessId),
-    case pg:get_local_members(?PG_SCOPE, Group) of
+    case lists:filter(fun erlang:is_process_alive/1,
+                      pg:get_local_members(?PG_SCOPE, Group)) of
         [Pid | _] -> {ok, Pid};
         [] -> {error, not_found}
     end.

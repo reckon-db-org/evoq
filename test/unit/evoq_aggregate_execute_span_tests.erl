@@ -25,8 +25,16 @@ init(_AggregateId) ->
     {ok, #{}}.
 
 execute(_State, #{command_type := <<"note">>}) ->
-    {ok, [#{event_type => <<"noted_v1">>}]}.
+    {ok, [#{event_type => <<"noted_v1">>}]};
+execute(_State, #{command_type := <<"raise">>}) ->
+    error(execute_raised);
+execute(_State, #{command_type := <<"junk">>}) ->
+    not_an_answer;
+execute(_State, #{command_type := <<"bad_apply">>}) ->
+    {ok, [#{event_type => <<"unapplicable_v1">>}]}.
 
+apply(_State, #{event_type := <<"unapplicable_v1">>}) ->
+    error(apply_raised);
 apply(State, _Event) ->
     State.
 
@@ -55,6 +63,26 @@ an_append_that_succeeds_closes_the_span_with_a_stop_test() ->
                    ?assertEqual(#{start => 1, stop => 1, exception => 0}, spans())
                end).
 
+%% A command that crashes the aggregate still closes its span: a raising
+%% execute/2, an answer execute/2 is not allowed to give, a raising apply/2
+%% and a raising append each emit one exception, and the crash itself is
+%% unchanged (the aggregate dies, the caller gets the error).
+a_raising_execute_closes_the_span_with_an_exception_test() ->
+    assert_crash_closed_by_exception(<<"raise">>, fun accept/4, execute_raised).
+
+an_unexpected_execute_answer_closes_the_span_with_an_exception_test() ->
+    assert_crash_closed_by_exception(<<"junk">>, fun accept/4, {case_clause, not_an_answer}).
+
+a_raising_apply_closes_the_span_with_an_exception_test() ->
+    assert_crash_closed_by_exception(<<"bad_apply">>, fun accept/4, apply_raised).
+
+a_raising_append_closes_the_span_with_an_exception_test() ->
+    assert_crash_closed_by_exception(<<"note">>,
+                                     fun(_Store, _Stream, _Version, _Events) ->
+                                         error(append_raised)
+                                     end,
+                                     append_raised).
+
 %%====================================================================
 %% Helpers
 %%====================================================================
@@ -68,6 +96,22 @@ assert_closed_by_exception({error, Reason} = AppendError) ->
                    ?assertEqual(#{start => 1, stop => 0, exception => 1}, spans()),
                    ?assertEqual([Reason], exception_reasons())
                end).
+
+assert_crash_closed_by_exception(CommandType, Append, Reason) ->
+    with_store(Append,
+               fun() ->
+                   Id = aggregate_id(),
+                   {ok, Pid} = evoq_aggregate:start_link(?MODULE, Id, test_store),
+                   unlink(Pid),
+                   Command = evoq_command:new(note, ?MODULE, Id, #{command_type => CommandType}),
+                   ?assertMatch({error, _}, evoq_aggregate:execute_command(Pid, Command)),
+                   ?assertNot(is_process_alive(Pid)),
+                   ?assertEqual(#{start => 1, stop => 0, exception => 1}, spans()),
+                   ?assertEqual([Reason], exception_reasons())
+               end).
+
+accept(_Store, _Stream, Version, _Events) ->
+    {ok, Version + 1}.
 
 aggregate_id() ->
     <<"span-", (integer_to_binary(erlang:unique_integer([positive])))/binary>>.
