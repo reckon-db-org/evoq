@@ -5,6 +5,29 @@ All notable changes to evoq will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed: a checkpoint store is refused next to a read model that does not survive a restart (evoq#1)
+
+A projection skips every event at or below its checkpoint. With a checkpoint
+store, that number survives a restart; the rows of an in-memory read model do
+not. Paired, a restart loaded "everything up to N is projected" over an empty
+read model, skipped the whole history and served nothing, silently. The ETS
+read model belongs to the projection process, so a projection crash was
+enough, even with the node-wide `evoq_checkpoint_store_ets`.
+
+- `evoq_read_model` has an optional callback `durable/0` and a function
+  `evoq_read_model:durable/1`. A read model without the callback is not
+  durable. `evoq_read_model_ets:durable/0` answers `false`.
+- `evoq_projection:start_link/3` with a `checkpoint_store` and a read model
+  that is not durable fails with
+  `{checkpoint_outlives_read_model, ProjectionModule, ReadModelModule}`.
+
+**Upgrading:** a projection that passes `checkpoint_store` must have a read
+model whose module exports `durable() -> true`. No service in our repos
+passes a checkpoint store today. Seen red first in
+`evoq_projection_durable_read_model_tests`.
+
 ## [1.29.2] - 2026-10-23
 
 ### Fixed: an aggregate without a state module compiles without a warning (evoq#28)

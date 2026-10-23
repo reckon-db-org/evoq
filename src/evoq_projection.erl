@@ -192,26 +192,48 @@ init({ProjectionModule, Config, Opts}) ->
     case ProjectionModule:init(Config) of
         {ok, ProjectionState, ReadModel} ->
             CheckpointStore = maps:get(checkpoint_store, Opts, undefined),
-            OverrideStoreId = maps:get(store_id, Opts, undefined),
-
-            %% Load checkpoint if store available
-            Checkpoint = load_checkpoint(ProjectionModule, CheckpointStore),
-
-            State = #state{
-                projection_module = ProjectionModule,
-                config = Config,
-                projection_state = ProjectionState,
-                read_model = ReadModel,
-                event_types = EventTypes,
-                checkpoint = Checkpoint,
-                checkpoint_store = CheckpointStore,
-                store_id = OverrideStoreId
-            },
-            start_projection(State);
+            init_checked(checkpoint_fits(CheckpointStore, ReadModel), ProjectionModule,
+                         Config, Opts, EventTypes, ProjectionState, ReadModel,
+                         CheckpointStore);
 
         {error, Reason} ->
             {stop, Reason}
     end.
+
+%% @private
+init_checked(true, ProjectionModule, Config, Opts, EventTypes, ProjectionState,
+             ReadModel, CheckpointStore) ->
+    %% Load checkpoint if store available
+    Checkpoint = load_checkpoint(ProjectionModule, CheckpointStore),
+
+    State = #state{
+        projection_module = ProjectionModule,
+        config = Config,
+        projection_state = ProjectionState,
+        read_model = ReadModel,
+        event_types = EventTypes,
+        checkpoint = Checkpoint,
+        checkpoint_store = CheckpointStore,
+        store_id = maps:get(store_id, Opts, undefined)
+    },
+    start_projection(State);
+init_checked(false, ProjectionModule, _Config, _Opts, _EventTypes, _ProjectionState,
+             ReadModel, _CheckpointStore) ->
+    {stop, {checkpoint_outlives_read_model, ProjectionModule,
+            evoq_read_model:module(ReadModel)}}.
+
+%% @private A checkpoint store only goes with a durable read model (evoq #1).
+%%
+%% The checkpoint says "everything up to here is in the read model". A store
+%% that keeps it across a restart, next to a read model that does not keep
+%% its rows, loads that claim over an empty read model: every event of the
+%% history is skipped as already projected and the read model stays empty,
+%% silently. The ETS read model belongs to the projection process, so even
+%% the node-wide ETS checkpoint store outlives it. This is a configuration
+%% error, the same at every start, so it is refused at start rather than met
+%% with a halt.
+checkpoint_fits(undefined, _ReadModel) -> true;
+checkpoint_fits(_CheckpointStore, ReadModel) -> evoq_read_model:durable(ReadModel).
 
 %% @private Catch up on what was missed, then start serving.
 %%

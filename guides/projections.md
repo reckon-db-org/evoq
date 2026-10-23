@@ -271,7 +271,28 @@ evoq_projection:start_link(order_summary_projection, #{},
 
 The store implements `evoq_checkpoint_store` (`load/1`, `save/2`,
 `delete/1`). `evoq_checkpoint_store_ets` keeps it in ETS, which does not
-survive a restart either.
+survive a node restart either.
+
+A checkpoint store goes only with a **durable** read model, one whose module
+exports `durable() -> true`. The checkpoint says "everything up to here is in
+the read model"; kept across a restart next to rows that were not, it skips
+the whole history and the read model comes back empty, without a word. So a
+projection whose read model is not durable refuses a checkpoint store at
+start:
+
+```erlang
+{error, {checkpoint_outlives_read_model, order_summary_projection, evoq_read_model_ets}}
+```
+
+`evoq_read_model_ets` answers `false`: its table belongs to the projection
+process, so its rows go even when only the projection restarts, and the
+node-wide `evoq_checkpoint_store_ets` outlives it. A read model without
+`durable/0` counts as not durable. A database-backed read model exports
+`durable() -> true`.
+
+The projection's own state (the `State` that `init/1` returns) starts fresh
+on every start as well. Keep in it nothing the checkpoint claims is
+projected; that belongs in the read model.
 
 A checkpoint save is a **second write**. The read model rows are written
 first, then the checkpoint; a crash between the two leaves the read model

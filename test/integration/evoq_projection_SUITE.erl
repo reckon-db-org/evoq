@@ -45,8 +45,10 @@
 interested_in() ->
     [<<"ItemAdded">>, <<"ItemRemoved">>].
 
-init(_Config) ->
-    {ok, RM} = evoq_read_model:new(evoq_read_model_ets, #{}),
+%% A projection with a checkpoint store needs a read model that outlives it
+%% (evoq #1), so the checkpoint tests pass the durable probe.
+init(Config) ->
+    {ok, RM} = evoq_read_model:new(maps:get(read_model, Config, evoq_read_model_ets), #{}),
     {ok, #{items_count => 0}, RM}.
 
 project(#{event_type := <<"ItemAdded">>, data := #{item_id := ItemId}}, _Metadata, State, RM) ->
@@ -234,9 +236,9 @@ checkpoint_store_delete_test(_Config) ->
 
 projection_start_test(_Config) ->
     %% Start a projection
-    {ok, Pid} = evoq_projection:start_link(?MODULE, #{}, #{
-        checkpoint_store => evoq_checkpoint_store_ets
-    }),
+    {ok, Pid} = evoq_projection:start_link(
+                  ?MODULE, #{read_model => evoq_durable_probe_read_model},
+                  #{checkpoint_store => evoq_checkpoint_store_ets}),
     ?assert(is_pid(Pid)),
     ?assert(is_process_alive(Pid)),
 
@@ -307,9 +309,9 @@ projection_idempotency_test(_Config) ->
 
 projection_checkpoint_test(_Config) ->
     %% Start a projection with checkpoint store
-    {ok, Pid} = evoq_projection:start_link(?MODULE, #{}, #{
-        checkpoint_store => evoq_checkpoint_store_ets
-    }),
+    {ok, Pid} = evoq_projection:start_link(
+                  ?MODULE, #{read_model => evoq_durable_probe_read_model},
+                  #{checkpoint_store => evoq_checkpoint_store_ets}),
 
     %% Nothing projected yet: -1, the same as a projection with no store.
     %% This asserted 0, which was the bug: 0 made version 0 read as already

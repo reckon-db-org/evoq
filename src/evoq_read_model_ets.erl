@@ -14,13 +14,17 @@
 %% projections to write to the same read model while each maintaining
 %% their own checkpoint.
 %%
+%% Not durable: the table belongs to the process that created it, so its
+%% rows go when that projection stops, and a projection on this read model
+%% refuses a checkpoint store (see evoq_read_model:durable/1).
+%%
 %% @author rgfaber
 -module(evoq_read_model_ets).
 -behaviour(evoq_read_model).
 
 %% Behavior callbacks
 -export([init/1, get/2, put/3, delete/2]).
--export([list/2, clear/1]).
+-export([list/2, clear/1, durable/0]).
 
 -record(state, {
     table :: ets:tid()
@@ -110,3 +114,8 @@ list(Prefix, #state{table = Table}) ->
 clear(#state{table = Table} = State) ->
     true = ets:delete_all_objects(Table),
     {ok, State}.
+
+%% @doc The rows live in an ETS table owned by the projection process.
+-spec durable() -> false.
+durable() ->
+    false.

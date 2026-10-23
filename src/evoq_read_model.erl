@@ -20,6 +20,11 @@
 %% Optional:
 %% - list(Prefix, State) -> {ok, [{Key, Value}]}
 %% - clear(State) -> {ok, NewState}
+%% - durable() -> boolean()
+%%   Whether the rows survive the projection process and a node restart.
+%%   A projection pairs a checkpoint store only with a durable read model:
+%%   a checkpoint that outlives its rows skips the whole history after a
+%%   restart (evoq #1). Without the callback a read model is not durable.
 %%
 %% @author rgfaber
 -module(evoq_read_model).
@@ -43,12 +48,15 @@
 -callback clear(State :: term()) ->
     {ok, NewState :: term()} | {error, Reason :: term()}.
 
--optional_callbacks([list/2, clear/1]).
+-callback durable() -> boolean().
+
+-optional_callbacks([list/2, clear/1, durable/0]).
 
 %% API
 -export([new/2]).
 -export([get/2, put/3, delete/2]).
 -export([list/2, clear/1]).
+-export([durable/1, module/1]).
 -export([get_checkpoint/1, set_checkpoint/2]).
 
 -record(read_model, {
@@ -126,6 +134,24 @@ clear_result({ok, NewState}, RM) ->
     {ok, RM#read_model{state = NewState, checkpoint = -1}};
 clear_result({error, Reason}, _RM) ->
     {error, Reason}.
+
+%% @doc Whether the read model's rows survive a restart.
+%%
+%% A read model is durable only when its module says so with durable/0:
+%% assuming it of a module that keeps rows in memory loses them silently,
+%% while a durable module that forgot to say so is refused loudly.
+-spec durable(read_model()) -> boolean().
+durable(#read_model{module = Module}) ->
+    _ = code:ensure_loaded(Module),
+    durable_answer(erlang:function_exported(Module, durable, 0), Module).
+
+durable_answer(true, Module) -> Module:durable() =:= true;
+durable_answer(false, _Module) -> false.
+
+%% @doc The module implementing the read model.
+-spec module(read_model()) -> atom().
+module(#read_model{module = Module}) ->
+    Module.
 
 %% @doc Get the current checkpoint position.
 -spec get_checkpoint(read_model()) -> integer().

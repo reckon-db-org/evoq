@@ -79,7 +79,7 @@ first_event_is_projected_without_a_checkpoint_store_test() ->
 interested_in() -> [?TYPE].
 
 init(_Config) ->
-    {ok, RM} = evoq_read_model:new(evoq_read_model_ets, #{}),
+    {ok, RM} = evoq_read_model:new(evoq_durable_probe_read_model, #{name => ?MODULE}),
     {ok, [], RM}.
 
 project(#{data := #{n := N}}, _Metadata, Seen, RM) ->
