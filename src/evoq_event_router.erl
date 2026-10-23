@@ -146,7 +146,6 @@ route_event_internal(Event, Metadata, Opts, State) ->
             route_to_handlers(Handlers, UpcastedType, UpcastedEvent, Metadata, State)
     end.
 
-%% @private
 %% @private The handlers named by the caller, or every handler of the type.
 handlers(#{targets := Targets}, _Type) -> Targets;
 handlers(_Opts, Type) -> evoq_event_type_registry:get_handlers(Type).

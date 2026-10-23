@@ -138,6 +138,14 @@ jobs:
       - name: Lint
         run: rebar3 lint
 
+      # The hex publish builds the docs, and one bad edoc tag fails it after
+      # the tag is pushed (v1.30.0: a duplicate @private). Every branch builds
+      # them here first, the way the publish does: ex_doc over edoc chunks.
+      # Plain `rebar3 edoc' is not that check; its default doclet also
+      # rejects files the chunk build accepts.
+      - name: Docs (ex_doc, as the hex publish builds them)
+        run: rebar3 ex_doc
+
       - name: EUnit
         run: rebar3 eunit
 
