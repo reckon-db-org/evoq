@@ -646,6 +646,7 @@ Projections emit telemetry:
 | `[evoq, projection, exception]` | duration | projection, event_type, error |
 | `[evoq, projection, halted]` | (none) | projection, error |
 | `[evoq, projection, checkpoint]` | (none) | projection, position |
+| `[evoq, projection, checkpoint_refused]` | (none) | projection, kind (integrity \| store), reason |
 
 `[evoq, projection, stop]` is emitted both per projected event (with a
 duration) and when the projection process stops (without); tell them apart

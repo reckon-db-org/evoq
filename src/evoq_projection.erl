@@ -791,7 +791,7 @@ load_checkpoint(ProjectionModule, CheckpointStore) ->
                     ProjectionModule, CheckpointStore).
 
 load_checkpoint(true, ProjectionModule, CheckpointStore) ->
-    checkpoint_value(CheckpointStore:load(ProjectionModule));
+    checkpoint_value(ProjectionModule, CheckpointStore:load(ProjectionModule));
 load_checkpoint(false, _ProjectionModule, _CheckpointStore) ->
     -1.
 
@@ -805,13 +805,37 @@ load_checkpoint(false, _ProjectionModule, _CheckpointStore) ->
 %% `0 =< undefined' is true in Erlang (numbers sort below atoms), so a
 %% checkpoint of `undefined' marked EVERY event as already projected and the
 %% projection served nothing, forever, without a line.
-checkpoint_value({ok, Checkpoint}) when is_integer(Checkpoint) ->
+%%
+%% A checkpoint the store refused (an integrity store answers a planted,
+%% raised or unsealed one with `{error, {integrity_violation, _}}') is not
+%% trusted either, so the projection rebuilds from the start; it was folded
+%% into "no checkpoint" without a word, and a tampered checkpoint looked
+%% like a first boot (reckon-db#25). It is logged and emitted now.
+checkpoint_value(_ProjectionModule, {ok, Checkpoint}) when is_integer(Checkpoint) ->
     Checkpoint;
-checkpoint_value({ok, Other}) ->
+checkpoint_value(_ProjectionModule, {ok, Other}) ->
     logger:warning(#{what => evoq_projection_bad_checkpoint,
                      checkpoint => Other}),
     -1;
-checkpoint_value({error, _}) -> -1.
+checkpoint_value(_ProjectionModule, {error, not_found}) ->
+    -1;
+checkpoint_value(ProjectionModule, {error, Reason}) ->
+    checkpoint_refused(ProjectionModule, refusal_kind(Reason), Reason),
+    -1.
+
+refusal_kind({integrity_violation, _}) -> integrity;
+refusal_kind(_Reason) -> store.
+
+checkpoint_refused(ProjectionModule, Kind, Reason) ->
+    logger:error(#{what => evoq_projection_checkpoint_refused,
+                   projection => ProjectionModule,
+                   kind => Kind,
+                   reason => Reason}),
+    telemetry:execute(?TELEMETRY_PROJECTION_CHECKPOINT_REFUSED, #{}, #{
+        projection => ProjectionModule,
+        kind => Kind,
+        reason => Reason
+    }).
 
 %% @private A checkpoint save is the projection's progress, and the one
 %% number that says whether it is still moving. Emitted on every save, with
