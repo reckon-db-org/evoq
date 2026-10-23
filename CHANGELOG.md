@@ -63,6 +63,16 @@ it empty: from then on every process manager on the node received nothing.
   holds the registrations and outlives it
   (`evoq_event_type_registry:get_all_process_managers/0`).
 
+### Fixed: one slow or retrying handler delays only its own events (evoq#30)
+
+The event router delivered to each handler in turn with
+`evoq_event_handler:notify/4`, a call that waits for the handler's write,
+so a handler that blocked, or slept out a `{retry, DelayMs}` backoff inside
+it, held up every handler and projection of every type on the node. Each
+local handler now has a courier that hands it its events in routing order;
+the router only passes events on. `notify/4` and the strong-consistency
+acknowledgments are unchanged: the handler still acknowledges its own write.
+
 ### Fixed: a checkpoint store is refused next to a read model that does not survive a restart (evoq#1)
 
 A projection skips every event at or below its checkpoint. With a checkpoint

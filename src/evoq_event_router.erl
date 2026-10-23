@@ -6,8 +6,20 @@
 %% Key features:
 %% - Per-event-type routing (not per-stream)
 %% - Event upcasting before delivery
-%% - Parallel delivery to multiple handlers
+%% - Delivery isolated per handler (see below)
 %% - Telemetry for observability
+%%
+%% == Delivery isolation ==
+%%
+%% Each local handler process gets its own courier: a process that hands
+%% it its events with evoq_event_handler:notify/4, one at a time, in the
+%% order the router routed them. The router only passes an event to the
+%% courier, so a handler that is slow, blocked, or sleeping out a
+%% {retry, DelayMs} backoff delays its own events and nobody else's. Before,
+%% the router made that call itself, handler after handler, and one slow
+%% handler held up every handler and projection on the node (evoq#30). The
+%% handler still acknowledges its own write to a strong-consistency waiter.
+%% A courier ends when its handler does.
 %%
 %% @author rgfaber
 -module(evoq_event_router).
@@ -27,7 +39,10 @@
 
 -define(SERVER, ?MODULE).
 
--record(state, {}).
+-record(state, {
+    %% local handler pid => its courier
+    couriers = #{} :: #{pid() => pid()}
+}).
 
 %%====================================================================
 %% API
@@ -90,13 +105,14 @@ handle_call(_Request, _From, State) ->
 
 %% @private
 handle_cast({route, Event, Metadata, Opts}, State) ->
-    route_event_internal(Event, Metadata, Opts),
-    {noreply, State};
+    {noreply, route_event_internal(Event, Metadata, Opts, State)};
 
 handle_cast(_Msg, State) ->
     {noreply, State}.
 
 %% @private
+handle_info({'DOWN', _Ref, process, Courier, _Reason}, #state{couriers = Couriers} = State) ->
+    {noreply, State#state{couriers = maps:filter(fun(_H, C) -> C =/= Courier end, Couriers)}};
 handle_info(_Info, State) ->
     {noreply, State}.
 
@@ -109,11 +125,11 @@ terminate(_Reason, _State) ->
 %%====================================================================
 
 %% @private
-route_event_internal(Event, Metadata, Opts) ->
+route_event_internal(Event, Metadata, Opts, State) ->
     EventType = maps:get(event_type, Event, undefined),
     case EventType of
         undefined ->
-            ok;
+            State;
         Type ->
             %% Apply upcasting if needed
             {UpcastedEvent, UpcastedType} = upcast_event(Event, Type, Metadata),
@@ -127,7 +143,7 @@ route_event_internal(Event, Metadata, Opts) ->
             Handlers = handlers(Opts, UpcastedType),
 
             %% Route to each handler
-            route_to_handlers(Handlers, UpcastedType, UpcastedEvent, Metadata)
+            route_to_handlers(Handlers, UpcastedType, UpcastedEvent, Metadata, State)
     end.
 
 %% @private
@@ -135,9 +151,9 @@ route_event_internal(Event, Metadata, Opts) ->
 handlers(#{targets := Targets}, _Type) -> Targets;
 handlers(_Opts, Type) -> evoq_event_type_registry:get_handlers(Type).
 
-route_to_handlers(Handlers, Type, Event, Metadata) ->
-    lists:foreach(fun(Handler) -> notify_handler(Handler, Type, Event, Metadata) end,
-                  Handlers).
+route_to_handlers(Handlers, Type, Event, Metadata, State) ->
+    lists:foldl(fun(Handler, Acc) -> notify_handler(Handler, Type, Event, Metadata, Acc) end,
+                State, Handlers).
 
 %% @private
 upcast_event(Event, EventType, Metadata) ->
@@ -156,19 +172,50 @@ apply_upcast(skip, Event, EventType) ->
     {Event, EventType}.
 
 %% @private
-notify_handler(Handler, EventType, Event, Metadata) when is_pid(Handler), node(Handler) =:= node() ->
-    %% Local handler pid - check alive before notifying
-    notify_if_alive(is_process_alive(Handler), Handler, EventType, Event, Metadata);
-notify_handler(Handler, _EventType, _Event, _Metadata) when is_pid(Handler) ->
+notify_handler(Handler, EventType, Event, Metadata, State)
+  when is_pid(Handler), node(Handler) =:= node() ->
+    %% Local handler pid: its courier delivers, the router moves on
+    {Courier, State1} = courier(Handler, State),
+    Courier ! {deliver, EventType, Event, Metadata},
+    State1;
+notify_handler(Handler, _EventType, _Event, _Metadata, State) when is_pid(Handler) ->
     %% Remote handler pid — skip (belongs to another node)
-    ok;
-notify_handler(Handler, EventType, Event, Metadata) when is_atom(Handler) ->
+    State;
+notify_handler(Handler, EventType, Event, Metadata, State) when is_atom(Handler) ->
     %% Handler is a module - call directly (legacy support)
     try
         Handler:handle_event(EventType, Event, Metadata, undefined)
     catch
         _:Reason ->
             logger:warning("Failed to call handler ~p: ~p", [Handler, Reason])
+    end,
+    State.
+
+%% @private The handler's courier, started on its first event.
+courier(Handler, #state{couriers = Couriers} = State) ->
+    courier(maps:find(Handler, Couriers), Handler, State).
+
+courier({ok, Courier}, _Handler, State) ->
+    {Courier, State};
+courier(error, Handler, #state{couriers = Couriers} = State) ->
+    Router = self(),
+    {Courier, _Ref} = spawn_monitor(fun() -> start_courier(Router, Handler) end),
+    {Courier, State#state{couriers = Couriers#{Handler => Courier}}}.
+
+%% @private A courier ends when its handler does, and with the router: an
+%% event left in its mailbox would otherwise be delivered by nobody's
+%% courier, out of order with what a restarted router sends.
+start_courier(Router, Handler) ->
+    link(Router),
+    courier_loop(Handler, erlang:monitor(process, Handler)).
+
+courier_loop(Handler, Ref) ->
+    receive
+        {deliver, EventType, Event, Metadata} ->
+            notify_if_alive(is_process_alive(Handler), Handler, EventType, Event, Metadata),
+            courier_loop(Handler, Ref);
+        {'DOWN', Ref, process, Handler, _Reason} ->
+            ok
     end.
 
 %% @private Notify a local handler pid only if still alive.
