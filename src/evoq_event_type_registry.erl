@@ -14,10 +14,17 @@
 %% to one pg group per event type, or a process manager module, registered
 %% by the PM router with register_process_manager/2 and held in this
 %% process's state. Every registration is announced to the store
-%% subscriptions on this node as `{new_registrant, Registrant, Types}', so
-%% each one backfills that registrant's history to it alone (evoq #4). A
+%% subscriptions on this node as `{new_registrant, Registrant, Types, Info}',
+%% so each one backfills that registrant's history to it alone (evoq #4). A
 %% process manager is a registrant of its own: a type only a process manager
 %% consumes is routed like any other (evoq #2).
+%%
+%% Info carries the registrant's `identity', which outlives the process (a
+%% handler's module; a process manager's `{pm, Module}'), so a restarted
+%% handler is recognised as the same consumer and is not handed again as new
+%% what its last incarnation already had; and `from', the global position its
+%% history starts at (a projection's checkpoint plus one), so a backfill does
+%% not read and route what it already holds.
 %%
 %% @author rgfaber
 -module(evoq_event_type_registry).
@@ -27,7 +34,7 @@
 
 %% API
 -export([start_link/0]).
--export([register/2, register_all/2, unregister/2]).
+-export([register/2, register_all/2, register_all/3, unregister/2]).
 -export([register_process_manager/2, unregister_process_manager/1]).
 -export([register_handler/2, unregister_handler/2]).
 %% Module registration never stored anything and answered ok (evoq #3); both
@@ -44,13 +51,18 @@
 -define(SERVER, ?MODULE).
 -define(PG_SCOPE, evoq_event_types).
 
-%% Process manager module => the event types it is interested in.
+%% Process manager module => the event types it is interested in, and each
+%% registered handler process => its identity (monitored, so a dead one
+%% leaves).
 -record(state, {
-    process_managers = #{} :: #{module() => [binary()]}
+    process_managers = #{} :: #{module() => [binary()]},
+    identities = #{} :: #{pid() => identity()}
 }).
 
 -type registrant() :: pid() | {pm, module()}.
--export_type([registrant/0]).
+-type identity() :: term().
+-type registration_opts() :: #{identity => identity(), from => non_neg_integer()}.
+-export_type([registrant/0, identity/0, registration_opts/0]).
 
 %%====================================================================
 %% API
@@ -78,7 +90,17 @@ register(EventType, HandlerPid) ->
 %% second type below the first type's last one.
 -spec register_all([binary()], pid()) -> ok.
 register_all(EventTypes, HandlerPid) ->
-    gen_server:call(?SERVER, {register_all, EventTypes, HandlerPid}).
+    register_all(EventTypes, HandlerPid, #{}).
+
+%% @doc register_all/2 with the registrant's identity and starting point.
+%%
+%% `identity' names the consumer across restarts (default: the pid itself,
+%% which never restarts); evoq_event_handler and evoq_projection pass their
+%% module. `from' is the global position the registrant's history starts at
+%% (default 0); evoq_projection passes its checkpoint plus one.
+-spec register_all([binary()], pid(), registration_opts()) -> ok.
+register_all(EventTypes, HandlerPid, Opts) ->
+    gen_server:call(?SERVER, {register_all, EventTypes, HandlerPid, Opts}).
 
 %% @doc Unregister a handler pid from an event type.
 -spec unregister(binary(), pid()) -> ok.
@@ -137,10 +159,12 @@ get_all_event_types() ->
 %% the same gen_server call. Only registrants on this node are returned and
 %% announced: a remote handler is served by its own node's subscription.
 %%
-%% The listener receives `{new_registrant, Registrant, Types}' for every
-%% later registration (see register_all/2 and register_process_manager/2)
-%% and `{registrant_left, Registrant, Types}' when one withdraws.
--spec register_listener(pid()) -> {ok, [{registrant(), [binary()]}]}.
+%% Each registration is `{Registrant, Types, Identity}'. The listener
+%% receives `{new_registrant, Registrant, Types, #{identity, from}}' for
+%% every later registration (see register_all/3 and
+%% register_process_manager/2) and `{registrant_left, Registrant, Types}'
+%% when one withdraws.
+-spec register_listener(pid()) -> {ok, [{registrant(), [binary()], identity()}]}.
 register_listener(ListenerPid) ->
     gen_server:call(?SERVER, {register_listener, ListenerPid}).
 
@@ -163,11 +187,14 @@ init([]) ->
     {ok, #state{}}.
 
 %% @private
-handle_call({register_all, EventTypes, HandlerPid}, _From, State) ->
+handle_call({register_all, EventTypes, HandlerPid, Opts}, _From,
+            #state{identities = Identities} = State) ->
     Types = lists:usort(EventTypes),
     lists:foreach(fun(EventType) -> join_group(EventType, HandlerPid) end, Types),
-    notify_listeners({new_registrant, HandlerPid, Types}),
-    {reply, ok, State};
+    Identity = maps:get(identity, Opts, HandlerPid),
+    notify_listeners({new_registrant, HandlerPid, Types,
+                      #{identity => Identity, from => maps:get(from, Opts, 0)}}),
+    {reply, ok, State#state{identities = identify(HandlerPid, Identity, Identities)}};
 
 handle_call({unregister, EventType, HandlerPid}, _From, State) ->
     Group = event_type_group(EventType),
@@ -179,7 +206,8 @@ handle_call({unregister, EventType, HandlerPid}, _From, State) ->
 handle_call({register_process_manager, Module, EventTypes}, _From,
             #state{process_managers = PMs} = State) ->
     Types = lists:usort(EventTypes),
-    notify_listeners({new_registrant, {pm, Module}, Types}),
+    notify_listeners({new_registrant, {pm, Module}, Types,
+                      #{identity => {pm, Module}, from => 0}}),
     {reply, ok, State#state{process_managers = PMs#{Module => Types}}};
 
 handle_call({unregister_process_manager, Module}, _From,
@@ -218,7 +246,10 @@ handle_call(_Request, _From, State) ->
 handle_cast(_Msg, State) ->
     {noreply, State}.
 
-%% @private
+%% @private A registered handler process died: forget its identity.
+handle_info({'DOWN', _Ref, process, Pid, _Reason}, #state{identities = Identities} = State) ->
+    {noreply, State#state{identities = maps:remove(Pid, Identities)}};
+
 handle_info(_Info, State) ->
     {noreply, State}.
 
@@ -245,15 +276,24 @@ extract_event_type({event_type, EventType}) -> EventType.
 join_group(EventType, HandlerPid) ->
     ok = pg:join(?PG_SCOPE, event_type_group(EventType), HandlerPid).
 
-%% @private Every registration on this node, as {Registrant, Types}: each
-%% local handler pid with the types it holds, and each process manager.
-registrations(#state{process_managers = PMs}) ->
+%% @private Remember a handler process's identity, monitoring it once.
+identify(Pid, Identity, Identities) when is_map_key(Pid, Identities) ->
+    Identities#{Pid => Identity};
+identify(Pid, Identity, Identities) ->
+    _ = erlang:monitor(process, Pid),
+    Identities#{Pid => Identity}.
+
+%% @private Every registration on this node, as {Registrant, Types,
+%% Identity}: each local handler pid with the types it holds, and each
+%% process manager.
+registrations(#state{process_managers = PMs, identities = Identities}) ->
     Pairs = [{Pid, extract_event_type(G)}
              || G <- pg:which_groups(?PG_SCOPE), is_event_type_group(G),
                 Pid <- lists:usort(pg:get_local_members(?PG_SCOPE, G))],
     Handlers = maps:to_list(maps:groups_from_list(fun({P, _}) -> P end,
                                                   fun({_, T}) -> T end, Pairs)),
-    Handlers ++ [{{pm, M}, Types} || {M, Types} <- maps:to_list(PMs)].
+    [{Pid, Types, maps:get(Pid, Identities, Pid)} || {Pid, Types} <- Handlers] ++
+        [{{pm, M}, Types, {pm, M}} || {M, Types} <- maps:to_list(PMs)].
 
 %% @private Tell the store subscriptions on this node about a registration
 %% or a withdrawal. The listener group is cluster-wide (one pg scope), but a

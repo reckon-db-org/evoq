@@ -74,6 +74,43 @@ a_backfill_carries_global_positions_test_() ->
                               || {_, M} <- evoq_replay_probe:calls(h)])
     end).
 
+%% A handler the supervisor restarts is a new process, but not a new
+%% consumer: what this boot delivered to its last incarnation is replay for
+%% the next one, so a side effect it must not repeat is not repeated.
+a_restarted_handler_repeats_no_side_effect_test_() ->
+    backfill_test(fun() ->
+        StoreId = fresh_store(bs(1, 5)),
+        boot(StoreId, [], [subscription]),
+        start_late(side_effect_b),
+        ?assertEqual([1, 2, 3, 4, 5], ns(side_effect)),
+        restart_late(side_effect_b),
+        evoq_fake_boot_backend:push_live(StoreId, bs(6, 6)),
+        settle(),
+        ?assertEqual([1, 2, 3, 4, 5, 6], ns(side_effect))
+    end).
+
+%% A projection that restarts at checkpoint N says so when it registers, and
+%% its backfill starts there: nothing below N is read again or routed
+%% through the node's event router for it.
+a_restarted_projection_is_backfilled_from_its_checkpoint_test_() ->
+    backfill_test(fun() ->
+        StoreId = fresh_store([event(?A, N, N) || N <- lists:seq(1, 5)]),
+        ok = evoq_restart_probe_checkpoint_store:reset(),
+        boot(StoreId, [], [subscription]),
+        start_late(checkpointed_projection),
+        ?assertEqual([1, 2, 3, 4, 5], ns(projection)),
+        meck:new(evoq_fake_boot_backend, [passthrough]),
+        try
+            restart_late(checkpointed_projection),
+            ?assertEqual([], [Offset || {_, {_, read_all_global, [_, Offset, _]}, _}
+                                            <- meck:history(evoq_fake_boot_backend),
+                                        Offset < 5])
+        after
+            meck:unload(evoq_fake_boot_backend)
+        end,
+        ?assertEqual([1, 2, 3, 4, 5], ns(projection))
+    end).
+
 %%====================================================================
 %% evoq #2: types only a process manager consumes
 %%====================================================================
@@ -169,9 +206,33 @@ start_now(placed_handler) ->
     started(evoq_event_handler:start_link(evoq_order_placed_probe_handler, #{}));
 start_now({named_b, Name}) ->
     started(evoq_event_handler:start_link(evoq_named_probe_b_handler, #{name => Name}));
+start_now(side_effect_b) ->
+    started_as(side_effect_b,
+               evoq_event_handler:start_link(evoq_side_effect_probe_b_handler, #{}));
+start_now(checkpointed_projection) ->
+    started_as(checkpointed_projection,
+               evoq_projection:start_link(
+                 evoq_restart_probe_projection, #{},
+                 #{checkpoint_store => evoq_restart_probe_checkpoint_store,
+                   store_id => get(store_id)}));
 start_now(ab_projection) ->
     started(evoq_projection:start_link(evoq_restart_probe_ab_projection, #{},
                                        #{store_id => get(store_id)})).
+
+%% Kill a consumer started with started_as/2, as a crash would, and start it
+%% again, as its supervisor would.
+restart_late(Consumer) ->
+    Pid = get({consumer, Consumer}),
+    unlink(Pid),
+    MRef = erlang:monitor(process, Pid),
+    exit(Pid, kill),
+    receive {'DOWN', MRef, process, Pid, _} -> ok after 2000 -> ok end,
+    settle(),
+    start_late(Consumer).
+
+started_as(Consumer, {ok, Pid} = Started) ->
+    put({consumer, Consumer}, Pid),
+    started(Started).
 
 subscription_pid(StoreId) ->
     whereis(list_to_existing_atom("evoq_store_sub_" ++ atom_to_list(StoreId))).

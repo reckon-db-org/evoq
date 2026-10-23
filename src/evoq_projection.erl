@@ -266,7 +266,13 @@ start_projection(#state{event_types = EventTypes, projection_module = Projection
 
     {Resumed, FirstStatus} = resume_after_checkpoint(State),
 
-    ok = evoq_event_type_registry:register_all(EventTypes, self()),
+    %% The module is its identity across restarts, and its history starts
+    %% after the checkpoint the first pass reached: the store subscription's
+    %% backfill for it reads and routes nothing it already holds.
+    ok = evoq_event_type_registry:register_all(
+           EventTypes, self(),
+           #{identity => ProjectionModule,
+             from => Resumed#state.checkpoint + 1}),
 
     Final = note_halt(second_pass(Resumed, FirstStatus)),
     {ok, Final}.

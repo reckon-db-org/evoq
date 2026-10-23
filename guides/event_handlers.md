@@ -145,12 +145,23 @@ with side effects and no policy is the one that warning exists to find.
 A handler can also read the flag itself, `maps:get(replaying, Metadata,
 false)`, for a decision finer than the whole handler.
 
+A handler that starts after the store subscription (an application that
+boots later, or a handler the supervisor restarts) gets its history first,
+to itself alone, then the live events: each event once, in store order. A
+restarted handler is the same consumer as before, recognised by its module.
+Everything this boot already routed to its last incarnation reaches it as
+replay. Running two handler processes of one module makes them one
+consumer in this respect.
+
 Limits:
 
 - The checkpoint is acknowledged every 200 events and on a clean stop.
   After a **crash**, up to 199 events delivered since the last
   acknowledgement arrive as new again. Exactly-once would need a
   checkpoint per handler.
+- A handler that crashes is handed, as replay, the events in flight to it
+  when it died: at-most-once for those, around the crash, as for the
+  node's own replay.
 - A node whose persisted checkpoint was never moved (evoq before 1.23.3
   never acknowledged it) sees its whole history as new one more time, on
   its first boot with 1.24.0.

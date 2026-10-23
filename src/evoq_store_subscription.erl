@@ -101,9 +101,16 @@
     %% type this subscription has delivered: the only registrants an event
     %% of the type is routed to. See the module doc's Registrants section.
     active :: active(),
-    %% Handler processes this subscription monitors, so a dead one leaves
-    %% `active'.
-    watched :: #{pid() => true},
+    %% The identity of each registrant this subscription has seen (a
+    %% handler's module, a process manager's {pm, Module}). Handler
+    %% processes in it are monitored, so a dead one leaves `active'.
+    identities :: #{evoq_event_type_registry:registrant() =>
+                        evoq_event_type_registry:identity()},
+    %% For each identity whose registrant died or withdrew this boot, how
+    %% far this subscription had routed to it: its next incarnation's
+    %% backfill marks everything below that replay, as SeenUpTo does for
+    %% the boot (evoq #4, review round 1).
+    reach :: #{evoq_event_type_registry:identity() => non_neg_integer()},
     %% How many events this subscription has scanned/consumed so far, in
     %% real global store order -- NOT `seq' (which only counts ones that
     %% actually had a handler). This is the position acknowledged to the
@@ -132,6 +139,10 @@
 %% reckon-db's own catch-up reads 500 events a page, so a duplicate burst
 %% from its trigger/catch-up overlap stays well inside this window.
 -define(RECENT_IDS, 2000).
+
+%% The most ids the redelivery window holds when it is widened after a
+%% failed pre-subscribe ack (see recent_tail/4). About 150 bytes each.
+-define(REDELIVERY_WINDOW_CAP, 100000).
 
 %% Events read per page by catch-up and backfill.
 -define(BATCH_SIZE, 1000).
@@ -193,7 +204,9 @@ init({StoreId, Opts}) ->
     %% delivers their history. Every later one is announced to this process
     %% and backfilled first (see handle_continue/2).
     {ok, Registrations} = evoq_event_type_registry:register_listener(self()),
-    {Active, Watched} = activate(Registrations, #{}, #{}),
+    Active = maps:from_list([{{R, T}, true} || {R, Types, _} <- Registrations, T <- Types]),
+    Identities = lists:foldl(fun({R, _, I}, Acc) -> identify(R, I, Acc) end, #{},
+                             Registrations),
 
     {ok, #state{
         store_id = StoreId,
@@ -201,7 +214,8 @@ init({StoreId, Opts}) ->
         opts = Opts,
         seq = 0,
         active = Active,
-        watched = Watched,
+        identities = Identities,
+        reach = #{},
         offset = 0,
         last_acked = 0,
         seen_up_to = 0,
@@ -290,7 +304,7 @@ handle_continue(catch_up, #state{store_id = StoreId, opts = Opts,
     %% position and would make everything look new.
     SeenUpTo = seen_up_to(StoreId),
     {Seq0, Offset0} = catch_up_historical(StoreId, Active, SeenUpTo),
-    Acked = ack_progress(StoreId, Offset0),
+    Acked = pre_subscribe_ack(StoreId, Offset0),
 
     %% Phase 2: Subscribe to new events going forward, starting from
     %% Offset0 -- everything before it was just delivered above.
@@ -334,16 +348,27 @@ handle_continue(catch_up, #state{store_id = StoreId, opts = Opts,
 %%
 %% Registrations queued behind this one are taken in the same pass, so a
 %% boot that registers many handlers at once scans the store once.
-handle_info({new_registrant, _, _} = Message, State) ->
+%%
+%% A registrant names its identity and where its history starts (see
+%% evoq_event_type_registry:register_all/3). The backfill starts at `from',
+%% so a projection resuming at its checkpoint is not handed, through the
+%% node's event router, the history it already holds. And everything below
+%% how far this subscription had routed to the same identity before (a
+%% handler the supervisor restarted) is marked replay, so a handler with
+%% `replay_policy() -> skip' does not repeat a side effect of its last
+%% incarnation.
+handle_info({new_registrant, _, _, _} = Message, State) ->
     {noreply, register_pending(take_registrations([Message]), State)};
 
 handle_info({registrant_left, _, _} = Message, State) ->
     {noreply, register_pending(take_registrations([Message]), State)};
 
 handle_info({'DOWN', _Ref, process, Pid, _Reason},
-            #state{active = Active, watched = Watched} = State) ->
+            #state{active = Active, identities = Identities, reach = Reach,
+                   offset = Offset} = State) ->
     {noreply, State#state{active = maps:filter(fun({R, _}, _) -> R =/= Pid end, Active),
-                          watched = maps:remove(Pid, Watched)}};
+                          identities = maps:remove(Pid, Identities),
+                          reach = reached(Pid, Identities, Offset, Reach)}};
 
 %% This is the SAME message shape the $all subscription's own catch-up
 %% delivers (reckon_db_subscriptions:send_filtered_events/2) and its live
@@ -393,7 +418,7 @@ handle_info(_Info, State) ->
 %% after the ones in Acc (newest first).
 take_registrations(Acc) ->
     receive
-        {new_registrant, _, _} = Message -> take_registrations([Message | Acc]);
+        {new_registrant, _, _, _} = Message -> take_registrations([Message | Acc]);
         {registrant_left, _, _} = Message -> take_registrations([Message | Acc])
     after 0 ->
         lists:reverse(Acc)
@@ -402,42 +427,51 @@ take_registrations(Acc) ->
 %% @private Apply registration messages in order, backfill the new
 %% registrants in one pass, then make them active.
 register_pending(Messages, #state{store_id = StoreId, seq = Seq0, offset = Offset,
-                                  seen_up_to = SeenUpTo, active = Active0,
-                                  watched = Watched0} = State) ->
-    {Pending, Active1} = lists:foldl(fun(M, Acc) -> pending(M, Active0, Acc) end,
-                                     {#{}, Active0}, Messages),
-    Seq1 = backfill(StoreId, Pending, Offset, Seq0, SeenUpTo),
-    {Active2, Watched1} = activate(maps:keys(Pending), Active1, Watched0),
-    State#state{seq = Seq1, active = Active2, watched = Watched1}.
+                                  active = Active0, identities = Ids0,
+                                  reach = Reach0} = State) ->
+    {Pending, Info, Active1, Ids1, Reach1} =
+        lists:foldl(fun(M, Acc) -> pending(M, State, Acc) end,
+                    {#{}, #{}, Active0, Ids0, Reach0}, Messages),
+    Seq1 = backfill(StoreId, Pending, Info, Offset, Seq0),
+    State#state{seq = Seq1, active = maps:merge(Active1, Pending), identities = Ids1,
+                reach = Reach1}.
 
-%% @private Fold one message into {Pending, Active}: a new registrant's
-%% types it is not active for yet become pending; a withdrawal leaves both.
-%% A registrant on another node is served by its own node's subscription.
-pending({new_registrant, Pid, _Types}, _Active0, Acc) when is_pid(Pid), node(Pid) =/= node() ->
+%% @private Fold one message into {Pending, Info, Active, Identities,
+%% Reach}. A new registrant's types it is not active for yet become pending,
+%% with Info saying where its backfill starts and below which position it is
+%% replay. A withdrawal leaves Pending and Active, and records how far the
+%% registrant was reached. A registrant on another node is served by its own
+%% node's subscription.
+pending({new_registrant, Pid, _Types, _Info}, _State, Acc)
+        when is_pid(Pid), node(Pid) =/= node() ->
     Acc;
-pending({new_registrant, Registrant, Types}, Active0, {Pending, Active}) ->
-    {maps:merge(Pending, maps:from_list([{{Registrant, T}, true} || T <- Types,
-                                         not is_map_key({Registrant, T}, Active0)])),
-     Active};
-pending({registrant_left, Registrant, Types}, _Active0, {Pending, Active}) ->
+pending({new_registrant, Registrant, Types, #{identity := Identity, from := From}},
+        #state{active = Active0, seen_up_to = SeenUpTo}, {Pending, Info, Active, Ids, Reach}) ->
+    New = [{{Registrant, T}, true} || T <- Types, not is_map_key({Registrant, T}, Active0)],
+    ReplayBelow = max(SeenUpTo, maps:get(Identity, Reach, 0)),
+    {maps:merge(Pending, maps:from_list(New)), Info#{Registrant => {From, ReplayBelow}},
+     Active, identify(Registrant, Identity, Ids), Reach};
+pending({registrant_left, Registrant, Types}, #state{offset = Offset},
+        {Pending, Info, Active, Ids, Reach}) ->
     Gone = [{Registrant, T} || T <- Types],
-    {maps:without(Gone, Pending), maps:without(Gone, Active)}.
+    {maps:without(Gone, Pending), Info, maps:without(Gone, Active), Ids,
+     reached(Registrant, Ids, Offset, Reach)}.
 
-%% @private Make {Registrant, Type} pairs active, monitoring each handler
-%% process once. Registrations are {Registrant, Types} or {Registrant, Type}.
-activate(Registrations, Active, Watched) ->
-    Pairs = lists:append([pairs(R) || R <- Registrations]),
-    {maps:merge(Active, maps:from_list([{P, true} || P <- Pairs])),
-     lists:foldl(fun watch/2, Watched, [R || {R, _} <- Pairs, is_pid(R)])}.
-
-pairs({Registrant, Types}) when is_list(Types) -> [{Registrant, T} || T <- Types];
-pairs({Registrant, Type}) -> [{Registrant, Type}].
-
-watch(Pid, Watched) when is_map_key(Pid, Watched) ->
-    Watched;
-watch(Pid, Watched) ->
+%% @private Remember a registrant's identity, monitoring a handler process
+%% the first time it is seen.
+identify(Pid, Identity, Ids) when is_pid(Pid), not is_map_key(Pid, Ids) ->
     _ = erlang:monitor(process, Pid),
-    Watched#{Pid => true}.
+    Ids#{Pid => Identity};
+identify(Registrant, Identity, Ids) ->
+    Ids#{Registrant => Identity}.
+
+%% @private Everything below Offset has been routed to this registrant's
+%% identity: its next incarnation is not handed that as new.
+reached(Registrant, Ids, Offset, Reach) when is_map_key(Registrant, Ids) ->
+    Identity = maps:get(Registrant, Ids),
+    Reach#{Identity => max(Offset, maps:get(Identity, Reach, 0))};
+reached(_Registrant, _Ids, _Offset, Reach) ->
+    Reach.
 
 %% @private Split Events into those not consumed recently, in order, and
 %% remember their ids. A duplicate inside one batch is dropped too. An event
@@ -488,7 +522,33 @@ recent_tail(StoreId, Offset, SeenUpTo, Acked) ->
     seed_window(StoreId, window_start(Offset, SeenUpTo, acked(Acked)), Offset).
 
 window_start(Offset, _SeenUpTo, true) -> max(0, Offset - ?RECENT_IDS);
-window_start(Offset, SeenUpTo, false) -> min(SeenUpTo, max(0, Offset - ?RECENT_IDS)).
+window_start(Offset, SeenUpTo, false) ->
+    capped_start(min(SeenUpTo, max(0, Offset - ?RECENT_IDS)), Offset, window_cap()).
+
+%% @private The widened window holds at most `redelivery_window_cap' ids
+%% (default ?REDELIVERY_WINDOW_CAP), so a long outage costs bounded memory.
+%% Past the cap it holds the newest, and says which positions a redelivery
+%% will not be recognised at: those would be counted as new again.
+capped_start(Start, Offset, Cap) when Offset - Start =< Cap ->
+    Start;
+capped_start(Start, Offset, Cap) ->
+    logger:warning(#{what => evoq_redelivery_window_capped,
+                     cap => Cap,
+                     unrecognised_from => Start,
+                     unrecognised_to => Offset - Cap}),
+    Offset - Cap.
+
+window_cap() ->
+    application:get_env(evoq, redelivery_window_cap, ?REDELIVERY_WINDOW_CAP).
+
+%% @private The ack before subscribe, tried once more if it fails: reckon-db
+%% resumes a reconnect at the checkpoint it leaves, and a failure here is
+%% usually a moment of gateway trouble.
+pre_subscribe_ack(StoreId, Offset) ->
+    ack_again(acked(ack_progress(StoreId, Offset)), StoreId, Offset).
+
+ack_again(true, _StoreId, _Offset) -> ok;
+ack_again(false, StoreId, Offset) -> ack_progress(StoreId, Offset).
 
 %% @private Whether the pre-subscribe ack left the persisted checkpoint at
 %% this boot's position. A brand new subscription has none to move yet; it
@@ -645,24 +705,29 @@ catch_up_loop(StoreId, Offset, Seq, Active, SeenUpTo) ->
 %% Replay is marked exactly as in catch_up_historical/3: this is the path a
 %% handler registering after catch-up (every handler in an app booting
 %% after the one owning the store) gets ALL its history through.
--spec backfill(atom(), active(), non_neg_integer(), non_neg_integer(), non_neg_integer()) ->
-    non_neg_integer().
-backfill(_StoreId, Pending, _Offset, Seq, _SeenUpTo) when map_size(Pending) =:= 0 ->
+%%
+%% Each registrant's history starts at its own `from' and is replay below its
+%% own threshold (Info); the pass starts at the lowest `from'.
+-spec backfill(atom(), active(), #{term() => {non_neg_integer(), non_neg_integer()}},
+               non_neg_integer(), non_neg_integer()) -> non_neg_integer().
+backfill(_StoreId, Pending, _Info, _Offset, Seq) when map_size(Pending) =:= 0 ->
     Seq;
-backfill(StoreId, Pending, Offset, Seq, SeenUpTo) ->
-    logger:info("[evoq] Backfilling ~s up to ~b for ~p",
-                [StoreId, Offset, lists:usort([R || {R, _} <- maps:keys(Pending)])]),
-    backfill_page(StoreId, Pending, 0, Offset, Seq, SeenUpTo).
+backfill(StoreId, Pending, Info, Offset, Seq) ->
+    Registrants = lists:usort([R || {R, _} <- maps:keys(Pending)]),
+    Start = lists:min([element(1, maps:get(R, Info)) || R <- Registrants]),
+    logger:info("[evoq] Backfilling ~s from ~b up to ~b for ~p",
+                [StoreId, Start, Offset, Registrants]),
+    backfill_page(StoreId, Pending, Info, Start, Offset, Seq).
 
-backfill_page(_StoreId, _Pending, From, To, Seq, _SeenUpTo) when From >= To ->
+backfill_page(_StoreId, _Pending, _Info, From, To, Seq) when From >= To ->
     Seq;
-backfill_page(StoreId, Pending, From, To, Seq, SeenUpTo) ->
+backfill_page(StoreId, Pending, Info, From, To, Seq) ->
     case evoq_event_store:read_all_global(StoreId, From, min(?BATCH_SIZE, To - From)) of
         {ok, []} ->
             Seq;
         {ok, Events} ->
-            Seq1 = route_positioned(StoreId, positioned(Events, From), Seq, SeenUpTo, Pending),
-            backfill_page(StoreId, Pending, From + length(Events), To, Seq1, SeenUpTo);
+            Seq1 = backfill_events(StoreId, positioned(Events, From), Seq, Pending, Info),
+            backfill_page(StoreId, Pending, Info, From + length(Events), To, Seq1);
         {error, Reason} ->
             %% The registrants become active all the same: holding them back
             %% would cost them every live event as well. Their history from
@@ -672,6 +737,29 @@ backfill_page(StoreId, Pending, From, To, Seq, SeenUpTo) ->
                          lists:usort([R || {R, _} <- maps:keys(Pending)])]),
             Seq
     end.
+
+backfill_events(_StoreId, [], Seq, _Pending, _Info) ->
+    Seq;
+backfill_events(StoreId, [{Position, E} | Rest], Seq, Pending, Info) ->
+    backfill_events(StoreId, Rest, backfill_event(StoreId, E, Seq, Position, Pending, Info),
+                    Pending, Info).
+
+%% @private Route one event of a backfill to the pending registrants whose
+%% history it belongs to (at or after their `from'), marked replay for those
+%% whose threshold it is below.
+backfill_event(StoreId, #evoq_event{} = E, Seq, Position, Pending, Info) ->
+    {Event, Metadata0} = evoq_event_to_routable(E),
+    {Handlers, PMs} = targets(Event, Pending),
+    Due = fun(R) -> Position >= element(1, maps:get(R, Info)) end,
+    Replay = fun(R) -> Position < element(2, maps:get(R, Info)) end,
+    {ReplayH, FreshH} = lists:partition(Replay, lists:filter(Due, Handlers)),
+    {ReplayPM, FreshPM} = lists:partition(fun(M) -> Replay({pm, M}) end,
+                                          [M || M <- PMs, Due({pm, M})]),
+    Extra = #{global_position => Position, store_id => StoreId},
+    max(deliver({ReplayH, ReplayPM}, Event, routed_metadata(Metadata0, Seq, true, Extra), Seq),
+        deliver({FreshH, FreshPM}, Event, routed_metadata(Metadata0, Seq, false, Extra), Seq));
+backfill_event(_StoreId, _Other, Seq, _Position, _Pending, _Info) ->
+    Seq.
 
 %% @doc Keep only the events matching EventType, in order. Exported for
 %% testing (pure, no store needed).

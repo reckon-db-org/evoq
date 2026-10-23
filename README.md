@@ -25,6 +25,8 @@ Erlang CQRS/Event Sourcing framework built on reckon-db.
 
 ## Installation
 
+Requires Erlang/OTP 28 (CI builds, tests and documents on 28.4.3).
+
 Add to your `rebar.config`:
 
 ```erlang
@@ -246,7 +248,7 @@ Facts translate domain events into payloads for external consumption via pg or m
 -callback from_event(EventType :: atom(), EventData :: map(), Metadata :: map()) ->
     {ok, Payload :: map()} | skip.
 
-%% Optional (defaults use OTP 27 json module)
+%% Optional (defaults use the OTP json module, in OTP since 27)
 -callback serialize(Payload :: map()) -> {ok, binary()} | {error, Reason :: term()}.
 -callback deserialize(Binary :: binary()) -> {ok, map()} | {error, Reason :: term()}.
 -callback schema() -> map().

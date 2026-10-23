@@ -122,7 +122,10 @@ init({HandlerModule, Config, Opts}) ->
 %% @private
 handle_init({ok, HandlerState}, HandlerModule, EventTypes, _Opts) ->
     %% Register with event type registry
-    ok = evoq_event_type_registry:register_all(EventTypes, self()),
+    %% The module is the handler's identity: a restarted handler is the same
+    %% consumer, and is not handed again as new what it already had.
+    ok = evoq_event_type_registry:register_all(EventTypes, self(),
+                                               #{identity => HandlerModule}),
     State = #state{
         handler_module = HandlerModule,
         handler_state = HandlerState,

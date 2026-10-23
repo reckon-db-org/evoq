@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed: OTP 28
+
+evoq is built, tested and documented on Erlang/OTP 28 (CI: 28.4.3); the
+README says so. The default fact serialisation uses the OTP `json` module,
+in OTP since 27.
+
 ### Fixed: a checkpoint store is refused next to a read model that does not survive a restart (evoq#1)
 
 A projection skips every event at or below its checkpoint. With a checkpoint
@@ -61,6 +67,23 @@ reaches each registrant once, in store order.
 - `evoq_store_subscription:filter_by_type_set/2` is gone: the active set
   replaces the catch-up type snapshot it served.
 
+- A registrant names its identity and where its history starts:
+  `evoq_event_type_registry:register_all/3` takes
+  `#{identity => Term, from => Position}`. `evoq_event_handler` and
+  `evoq_projection` pass their module as the identity; a projection passes
+  its checkpoint plus one as `from`. Registrations are announced as
+  `{new_registrant, Registrant, Types, #{identity, from}}`, and
+  `register_listener/1` returns `{Registrant, Types, Identity}`.
+- A handler the supervisor restarts is a new process but the same consumer.
+  Everything this boot routed to its last incarnation reaches the new one
+  marked `replaying => true`, so a handler with `replay_policy() -> skip`
+  does not repeat a side effect. Like the boot's own replay this is
+  at-most-once around a crash: an event in flight to the process that died
+  arrives as replay too.
+- A backfill starts at the registrant's `from`. A projection restarting at
+  its checkpoint is not handed its whole history again through the node's
+  event router, and the subscription does not read it again.
+
 The workaround (start the store subscription after every handler has
 registered) is no longer needed. Seen red first in
 `evoq_per_registrant_backfill_tests`.
@@ -76,10 +99,15 @@ down, the oldest redeliveries were counted as new positions: they were
 projected twice, and every later position was shifted by as many.
 
 - `ack_progress/2` returns its result.
-- When the pre-subscribe ack fails, the window reaches back to the
-  checkpoint this boot read, where reckon-db resumes, and is not trimmed
-  while it is seeded. A read of it that fails is tried once more. A store
-  without a subscription yet (`subscription_not_found`) is not a failure.
+- The pre-subscribe ack is tried once more when it fails.
+- When it fails twice, the window reaches back to the checkpoint this boot
+  read, where reckon-db resumes, and is not trimmed while it is seeded. A
+  read of it that fails is tried once more. A store without a subscription
+  yet (`subscription_not_found`) is not a failure.
+- The widened window holds at most `redelivery_window_cap` ids (application
+  env, default 100000). Past that it keeps the newest and logs
+  `evoq_redelivery_window_capped` with the positions a redelivery is no
+  longer recognised at.
 
 Seen red first in `evoq_projection_restart_checkpoint_tests` (2505 events,
 2500 appended while down).

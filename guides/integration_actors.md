@@ -158,7 +158,7 @@ Feedback is the response to a Hope. It carries the result of command execution f
 -callback from_result({ok, State :: term()} | {error, Reason :: term()}) -> map().
 -callback to_result(Payload :: map()) -> {ok, State :: term()} | {error, Reason :: term()}.
 
-%% Optional (defaults use OTP 27 json module)
+%% Optional (defaults use the OTP json module, in OTP since 27)
 -callback serialize(Payload :: map()) -> {ok, binary()} | {error, Reason :: term()}.
 -callback deserialize(Binary :: binary()) -> {ok, map()} | {error, Reason :: term()}.
 ```

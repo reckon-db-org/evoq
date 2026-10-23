@@ -237,7 +237,7 @@ deserialize(Binary) -> evoq_fact:default_deserialize(Binary).
 - `fact_type/0` returns a binary topic string (dot-separated namespace)
 - `from_event/3` can return `skip` if a particular event should not produce a fact
 - All map keys MUST be binaries (JSON-safe)
-- Default `serialize/1` and `deserialize/1` use OTP 27 `json` module -- call `evoq_fact:default_serialize/1` and `evoq_fact:default_deserialize/1`
+- Default `serialize/1` and `deserialize/1` use the OTP `json` module (in OTP since 27) -- call `evoq_fact:default_serialize/1` and `evoq_fact:default_deserialize/1`
 - Fact modules live in the same desk directory as the event they translate (vertical slicing)
 
 ### Where Facts Live

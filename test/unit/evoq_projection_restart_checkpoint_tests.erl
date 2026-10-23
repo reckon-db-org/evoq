@@ -11,6 +11,8 @@
 %% exactly once across both boots.
 -module(evoq_projection_restart_checkpoint_tests).
 
+-export([log/2]).
+
 -include_lib("eunit/include/eunit.hrl").
 -include("evoq_types.hrl").
 
@@ -195,12 +197,68 @@ a_failed_pre_subscribe_ack_after_a_long_downtime_projects_each_event_once_test_(
         shutdown(),
 
         evoq_fake_boot_backend:seed(StoreId, [event(?A, N, N) || N <- lists:seq(1, 2505)]),
-        ok = evoq_fake_boot_backend:fail_next_ack(StoreId),
+        %% Both the pre-subscribe ack and its one retry fail.
+        ok = evoq_fake_boot_backend:fail_next_acks(StoreId, 2),
         boot(StoreId, [projection]),
         timer:sleep(500),
         ?assertEqual(lists:seq(1, 2505), projected()),
         shutdown()
     end).
+
+%% A pre-subscribe ack that fails once is tried again, in the same moment of
+%% gateway trouble: the store's checkpoint then is this boot's position and
+%% a reconnect redelivers nothing.
+a_pre_subscribe_ack_that_fails_once_is_retried_test_() ->
+    restart_test(fun() ->
+        StoreId = fresh_store([event(?A, N, N) || N <- lists:seq(1, 5)]),
+        boot(StoreId, [projection]),
+        shutdown(),
+        evoq_fake_boot_backend:seed(StoreId, [event(?A, N, N) || N <- lists:seq(1, 9)]),
+        ok = evoq_fake_boot_backend:fail_next_ack(StoreId),
+        boot(StoreId, [projection]),
+        ?assertEqual(9, evoq_fake_boot_backend:persisted_checkpoint(
+                          StoreId, <<"evoq_all_", (atom_to_binary(StoreId))/binary>>)),
+        ?assertEqual(lists:seq(1, 9), projected()),
+        shutdown()
+    end).
+
+%% The widened window is capped: past the cap it holds the newest ids, and
+%% says which positions it no longer recognises.
+the_widened_redelivery_window_is_capped_and_says_so_test_() ->
+    restart_test(fun() ->
+        StoreId = fresh_store([event(?A, N, N) || N <- lists:seq(1, 5)]),
+        boot(StoreId, [projection]),
+        shutdown(),
+        evoq_fake_boot_backend:seed(StoreId, [event(?A, N, N) || N <- lists:seq(1, 3005)]),
+        ok = evoq_fake_boot_backend:fail_next_acks(StoreId, 2),
+        application:set_env(evoq, redelivery_window_cap, 2500),
+        ok = logger:add_handler(?MODULE, ?MODULE, #{config => #{pid => self()}}),
+        try
+            boot(StoreId, [projection]),
+            ?assertEqual(2500, window_size(StoreId)),
+            receive {window_capped, From, To} -> ?assertEqual({5, 505}, {From, To})
+            after 1000 -> ?assert(false)
+            end
+        after
+            ok = logger:remove_handler(?MODULE),
+            application:unset_env(evoq, redelivery_window_cap)
+        end,
+        shutdown()
+    end).
+
+%% logger handler: forwards the capped-window warning, nothing else.
+log(#{msg := {report, #{what := evoq_redelivery_window_capped,
+                        unrecognised_from := From, unrecognised_to := To}}},
+    #{config := #{pid := Pid}}) ->
+    Pid ! {window_capped, From, To};
+log(_Event, _Config) ->
+    ok.
+
+%% How many ids the store subscription's redelivery window holds.
+window_size(StoreId) ->
+    Sub = whereis(list_to_existing_atom("evoq_store_sub_" ++ atom_to_list(StoreId))),
+    {_Queue, Ids} = lists:last(tuple_to_list(sys:get_state(Sub))),
+    map_size(Ids).
 
 %% A reconnect whose pre-subscribe ack failed resumes reckon-db's catch-up
 %% from the older checkpoint and redelivers events this boot's own catch-up

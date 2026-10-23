@@ -360,7 +360,12 @@ consumes the type, or whether the projection registers during catch-up or
 after it. A registration that announces itself during catch-up is
 backfilled as soon as catch-up finishes.
 
-Each late registration scans the store once. Registrations that arrive
+A projection resuming at its checkpoint registers with that position, and
+its backfill starts there: the history it already holds is neither read
+again nor routed through the node's event router. A handler without a
+position gets its history from the start.
+
+Each late registration scans the store once from where it starts. Registrations that arrive
 together are backfilled in the same pass, so an application that starts
 many projections at once pays for one scan, not one per projection.
 
