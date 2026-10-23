@@ -269,7 +269,10 @@ reply_after_append({ok, NewVersion}, Events, NewAggState, State, StartTime) ->
     emit_execute_stop(stream_id(State), NewVersion, Events, StartTime),
     Timeout = reply_timeout(State, Events),
     {reply, {ok, NewVersion, Events}, NewState2, Timeout};
-reply_after_append(AppendError, _Events, _NewAggState, State, _StartTime) ->
+reply_after_append({error, Reason} = AppendError, _Events, _NewAggState, State, StartTime) ->
+    %% Close the execute span: a failed append (a version conflict is the
+    %% normal retry path) left a start with no stop or exception (evoq#11).
+    emit_execute_exception(stream_id(State), Reason, StartTime),
     reply_after_append_error(AppendError, State,
                              State#evoq_aggregate_state.aggregate_module,
                              State#evoq_aggregate_state.store_id,
