@@ -138,6 +138,12 @@ jobs:
       - name: Lint
         run: rebar3 lint
 
+      # The hex publish builds the docs, and one bad edoc tag fails it after
+      # the tag is pushed (v1.30.0: a duplicate @private). Every branch builds
+      # them here first.
+      - name: EDoc
+        run: rebar3 edoc
+
       - name: EUnit
         run: rebar3 eunit
 

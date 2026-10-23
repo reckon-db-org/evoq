@@ -7,7 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [1.30.0] - 2026-10-23
+## [1.30.1] - 2026-10-23
+
+1.30.0 was tagged and never reached hex: its docs did not build (a
+duplicate `@private` in `evoq_event_router`), and the publish stopped there.
+1.30.1 is 1.30.0 with that tag fixed; every change listed under 1.30.0
+ships here first. CI now builds the edoc on every branch.
+
+## [1.30.0] - 2026-10-23 (not published)
 
 ### Changed: OTP 28
 
