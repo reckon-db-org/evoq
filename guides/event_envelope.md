@@ -18,7 +18,7 @@ Every event stored and transmitted through evoq uses this structure:
     event_type :: binary(),
 
     %% Stream this event belongs to
-    %% Format: <<"{aggregate_type}-{aggregate_id}">>
+    %% The aggregate id, unchanged: <prefix>-<32 hex> on reckon-db
     %% Examples: <<"order-018f6a7b8c9d4e5f60718293a4b5c6d9">>, <<"user-018f6a7b8c9d4e5f60718293a4b5c6d7">>
     stream_id :: binary(),
 
@@ -168,15 +168,15 @@ Binary string identifying the event type: `{subject}_{verb_past}_v{N}`.
 
 Identifier for the event stream (aggregate instance).
 
-**Auto-derived** from command's `aggregate_id`.
+**The command's `aggregate_id`**, unchanged.
 
-**Format:** `<<"{aggregate_type}-{aggregate_id}">>`
+**Format:** `<prefix>-<32 hex>` on reckon-db, which refuses any other shape ([Stream Ids](https://hexdocs.pm/reckon_gater/stream_ids.html)).
 
 **Examples:**
 ```erlang
 <<"order-018f6a7b8c9d4e5f60718293a4b5c6d9">>.
 <<"user-018f6a7b8c9d4e5f60718293a4b5c6d7">>.
-<<"cart-cart-789">>.
+<<"cart-018f6a7b8c9d4e5f60718293a4b5c6e0">>.
 ```
 
 ### version

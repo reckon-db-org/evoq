@@ -294,18 +294,18 @@ State modules are easy to test in isolation since they are pure functions:
 -record(counter_state, {id :: binary(), value = 0 :: integer(), status = 0 :: non_neg_integer()}).
 
 new_test() ->
-    State = counter_state:new(<<"test-1">>),
-    ?assertEqual(<<"test-1">>, State#counter_state.id),
+    State = counter_state:new(<<"counter-018f6a7b8c9d4e5f60718293a4b5c6dd">>),
+    ?assertEqual(<<"counter-018f6a7b8c9d4e5f60718293a4b5c6dd">>, State#counter_state.id),
     ?assertEqual(0, State#counter_state.value).
 
 apply_increment_test() ->
-    State0 = counter_state:new(<<"test-1">>),
+    State0 = counter_state:new(<<"counter-018f6a7b8c9d4e5f60718293a4b5c6dd">>),
     Event = #{event_type => <<"CounterIncremented">>, data => #{amount => 5}},
     State1 = counter_state:apply_event(State0, Event),
     ?assertEqual(5, State1#counter_state.value).
 
 roundtrip_serialization_test() ->
-    State0 = counter_state:new(<<"test-1">>),
+    State0 = counter_state:new(<<"counter-018f6a7b8c9d4e5f60718293a4b5c6dd">>),
     Map = counter_state:to_map(State0),
     {ok, State1} = counter_state:from_map(Map),
     ?assertEqual(State0, State1).
@@ -321,7 +321,7 @@ Because apply_event/2 is pure, you can test every event type without standing up
 -record(counter_state, {id :: binary(), value = 0 :: integer(), status = 0 :: non_neg_integer()}).
 
 full_lifecycle_test() ->
-    State0 = counter_state:new(<<"test-1">>),
+    State0 = counter_state:new(<<"counter-018f6a7b8c9d4e5f60718293a4b5c6dd">>),
     Events = [
         #{event_type => <<"CounterInitiated">>, data => #{initial_value => 10}},
         #{event_type => <<"CounterIncremented">>, data => #{amount => 5}},

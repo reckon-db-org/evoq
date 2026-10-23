@@ -52,7 +52,7 @@ Census of event types with counts. Can be expensive for large stores.
 Detailed info for a single stream: version, timestamps, snapshot coverage.
 
 ```erlang
-{ok, Info} = evoq_store_inspector:stream_info(my_store, <<"user-123">>).
+{ok, Info} = evoq_store_inspector:stream_info(my_store, <<"user-018f6a7b8c9d4e5f60718293a4b5c6d7">>).
 ```
 
 ## Architecture

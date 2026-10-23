@@ -582,12 +582,12 @@ project_order_lifecycle_test() ->
         data => #{customer_id => <<"cust-1">>, total => 100, items => []},
         timestamp => 1000
     },
-    PlacedMeta = #{stream_id => <<"order-1">>},
+    PlacedMeta = #{stream_id => <<"order-018f6a7b8c9d4e5f60718293a4b5c6d9">>},
 
     {ok, State1, RM1} = order_summary_projection:project(PlacedEvent, PlacedMeta, State0, RM0),
 
     %% Verify
-    {ok, Summary1} = evoq_read_model:get(<<"order-1">>, RM1),
+    {ok, Summary1} = evoq_read_model:get(<<"order-018f6a7b8c9d4e5f60718293a4b5c6d9">>, RM1),
     ?assertEqual(placed, maps:get(status, Summary1)),
     ?assertEqual(100, maps:get(total, Summary1)),
 
@@ -597,12 +597,12 @@ project_order_lifecycle_test() ->
         data => #{tracking_number => <<"TRACK123">>},
         timestamp => 2000
     },
-    ShippedMeta = #{stream_id => <<"order-1">>},
+    ShippedMeta = #{stream_id => <<"order-018f6a7b8c9d4e5f60718293a4b5c6d9">>},
 
     {ok, _State2, RM2} = order_summary_projection:project(ShippedEvent, ShippedMeta, State1, RM1),
 
     %% Verify
-    {ok, Summary2} = evoq_read_model:get(<<"order-1">>, RM2),
+    {ok, Summary2} = evoq_read_model:get(<<"order-018f6a7b8c9d4e5f60718293a4b5c6d9">>, RM2),
     ?assertEqual(shipped, maps:get(status, Summary2)),
     ?assertEqual(<<"TRACK123">>, maps:get(tracking_number, Summary2)).
 ```

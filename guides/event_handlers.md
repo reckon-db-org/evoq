@@ -470,7 +470,7 @@ handle_user_registered_test() ->
         event_type => <<"UserRegistered">>,
         data => #{email => <<"test@example.com">>, name => <<"Test User">>}
     },
-    Metadata = #{stream_id => <<"user-user-123">>, version => 1},
+    Metadata = #{stream_id => <<"user-018f6a7b8c9d4e5f60718293a4b5c6d7">>, version => 1},
 
     %% Execute
     {ok, _NewState} = email_handler:handle_event(<<"UserRegistered">>, Event, Metadata, State),
