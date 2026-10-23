@@ -4,7 +4,10 @@
 %% Duplicate commands return the cached result instead of
 %% re-executing against the aggregate.
 %%
-%% Uses ETS with automatic TTL-based expiration.
+%% Uses ETS with automatic TTL-based expiration. A TTL is elapsed time:
+%% deadlines are read from the monotonic clock, so an NTP step neither
+%% expires every entry at once nor keeps one past its TTL (evoq#13). The
+%% table is node-local and never persisted, which is what makes that safe.
 %%
 %% @author rgfaber
 -module(evoq_idempotency).
@@ -41,14 +44,14 @@ start_link() ->
 %% @doc Store a command result.
 -spec store(binary(), term(), pos_integer()) -> ok.
 store(CommandId, Result, TTL) ->
-    ExpiresAt = erlang:system_time(millisecond) + TTL,
+    ExpiresAt = erlang:monotonic_time(millisecond) + TTL,
     ets:insert(?TABLE, {CommandId, Result, ExpiresAt}),
     ok.
 
 %% @doc Lookup a command result.
 -spec lookup(binary()) -> {ok, term()} | not_found.
 lookup(CommandId) ->
-    Now = erlang:system_time(millisecond),
+    Now = erlang:monotonic_time(millisecond),
     case ets:lookup(?TABLE, CommandId) of
         [{CommandId, Result, ExpiresAt}] when ExpiresAt > Now ->
             telemetry:execute(?TELEMETRY_IDEMPOTENCY_HIT, #{}, #{
@@ -144,7 +147,7 @@ terminate(_Reason, _State) ->
 
 %% @private
 cleanup_expired() ->
-    Now = erlang:system_time(millisecond),
+    Now = erlang:monotonic_time(millisecond),
     %% Use match_delete for efficiency
     ets:select_delete(?TABLE, [
         {{'_', '_', '$1'}, [{'<', '$1', Now}], [true]}

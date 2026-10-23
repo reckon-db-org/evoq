@@ -31,6 +31,13 @@ contexts by hand and bypassed the module; they use
 `evoq_failure_context:new/3`, the new `failed/2` and `increment/1`, and the
 first failure starts the duration rather than the moment the event arrived.
 
+### Fixed: an idempotency entry lives for its TTL, whatever the wall clock does (evoq#13)
+
+`evoq_idempotency` took its deadlines from the wall clock: a forward NTP step
+of at least the TTL expired every cached result at once, so a duplicate
+command re-executed, and a backward step kept entries past their TTL. The
+deadlines are monotonic now; the table is node-local and never persisted.
+
 ### Fixed: a checkpoint store is refused next to a read model that does not survive a restart (evoq#1)
 
 A projection skips every event at or below its checkpoint. With a checkpoint
