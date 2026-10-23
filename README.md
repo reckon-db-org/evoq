@@ -440,6 +440,10 @@ retry backoff.
   the `error` metadata says why
 - `[evoq, projection, checkpoint]` - a checkpoint was saved; its position is
   the projection's progress, so a stalled projection is visible here
+- `[evoq, projection, checkpoint_refused]` - the checkpoint store refused to
+  load the checkpoint (`kind` is `integrity` for a planted, raised or unsealed
+  one on an integrity store, `store` otherwise); the projection rebuilds from
+  the start
 
 ## Testing
 

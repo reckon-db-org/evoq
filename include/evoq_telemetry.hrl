@@ -92,6 +92,9 @@
 %% A projection that could not catch up at start: it is running, behind, at
 %% the checkpoint it reached. See evoq_projection:start_projection/1.
 -define(TELEMETRY_PROJECTION_HALTED, [evoq, projection, halted]).
+%% A checkpoint the store refused to load: the projection rebuilds from the
+%% start. Metadata kind => integrity | store (reckon-db#25).
+-define(TELEMETRY_PROJECTION_CHECKPOINT_REFUSED, [evoq, projection, checkpoint_refused]).
 
 %%====================================================================
 %% Memory Monitor Telemetry Events

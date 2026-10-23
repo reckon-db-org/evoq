@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed: a refused checkpoint is visible, not a first boot (reckon-db#25)
+
+A projection read every checkpoint load error as "no checkpoint" and rebuilt
+from the start without a word, so a checkpoint an integrity store refused
+(planted, raised or unsealed) looked exactly like a first boot, and a read
+model that is not idempotent applied every event again unseen. The
+projection still rebuilds from the start, since the refused position is not
+trusted, and now logs `evoq_projection_checkpoint_refused` and emits
+`[evoq, projection, checkpoint_refused]` with `kind => integrity` (an
+`{integrity_violation, _}` refusal) or `kind => store` (any other store
+error). `{error, not_found}` is a first boot and stays silent.
+
 ## [1.30.0] - 2026-10-23
 
 ### Changed: OTP 28
