@@ -18,7 +18,7 @@
 
 %% API
 -export([start_link/0]).
--export([route_event/2]).
+-export([route_event/2, route_event/3]).
 -export([register_pm/1, unregister_pm/1]).
 -export([register_instance/3, unregister_instance/3]).
 -export([get_instance/2]).
@@ -47,6 +47,15 @@ start_link() ->
 -spec route_event(map(), map()) -> ok.
 route_event(Event, Metadata) ->
     gen_server:cast(?SERVER, {route, Event, Metadata}).
+
+%% @doc Route an event to the instances of the named process managers only.
+%%
+%% The store subscription uses it: it routes a store's events only to
+%% process managers whose history from that store it has sent, and a late
+%% process manager's history to that one alone (evoq #2, #4).
+-spec route_event(map(), map(), [module()]) -> ok.
+route_event(Event, Metadata, PMModules) ->
+    gen_server:cast(?SERVER, {route_to, Event, Metadata, PMModules}).
 
 %% @doc Register a process manager module.
 -spec register_pm(atom()) -> ok.
@@ -107,6 +116,11 @@ init([]) ->
 %% @private
 handle_call({register_pm, PMModule}, _From, #state{pm_by_event_type = Map} = State) ->
     EventTypes = PMModule:interested_in(),
+    %% The store subscriptions route a type only to registrants of the type
+    %% registry: registering there is what makes a type only a process
+    %% manager consumes reach it at all (evoq #2), and it backfills the
+    %% process manager's history to it.
+    ok = evoq_event_type_registry:register_process_manager(PMModule, EventTypes),
     NewMap = lists:foldl(fun(EventType, Acc) ->
         PMs = maps:get(EventType, Acc, []),
         Acc#{EventType => lists:usort([PMModule | PMs])}
@@ -117,6 +131,7 @@ handle_call({unregister_pm, PMModule}, _From, #state{pm_by_event_type = Map} = S
     EventTypes = PMModule:interested_in(),
     NewMap = lists:foldl(fun(EventType, Acc) -> remove_pm(PMModule, EventType, Acc) end,
                          Map, EventTypes),
+    ok = evoq_event_type_registry:unregister_process_manager(PMModule),
     {reply, ok, State#state{pm_by_event_type = NewMap}};
 
 handle_call(_Request, _From, State) ->
@@ -140,6 +155,10 @@ handle_cast({route, Event, Metadata}, #state{pm_by_event_type = Map} = State) ->
             %% Route to each PM interested in this event type
             route_to_pms(maps:get(Type, Map, []), Event, Metadata)
     end,
+    {noreply, State};
+
+handle_cast({route_to, Event, Metadata, PMModules}, State) ->
+    route_to_pms(PMModules, Event, Metadata),
     {noreply, State};
 
 handle_cast(_Msg, State) ->

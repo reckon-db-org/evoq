@@ -28,6 +28,43 @@ model whose module exports `durable() -> true`. No service in our repos
 passes a checkpoint store today. Seen red first in
 `evoq_projection_durable_read_model_tests`.
 
+### Fixed: every consumer of a type gets its history, and a process manager gets types no handler consumes (evoq#4, evoq#2)
+
+Backfill ran only for a type's FIRST handler, and delivered to whoever was
+registered at that moment. A second consumer of a type that registered late
+got no history of it. A projection on `[A, B]` registering after a handler
+on `[B]` lost all of B's history. A handler that registered while a live
+event was queued got that event, then its history, then the event again.
+A process manager registered with the PM router only, so a type no event
+handler consumed was never routed to it: not at catch-up, not at backfill,
+not live.
+
+The store subscription now keeps, per store, which registrants are active
+for which types. A registrant is a handler process (event handler or
+projection) or a process manager. An event goes to the active registrants of
+its type and to nobody else. A registrant that registers after the
+subscription started gets the history of all its types, to it alone, up to
+the subscription's own position, and only then becomes active. Each event
+reaches each registrant once, in store order.
+
+- `evoq_event_type_registry` announces every registration as
+  `{new_registrant, Registrant, Types}` and every withdrawal as
+  `{registrant_left, Registrant, Types}`, to the store subscriptions on its
+  own node. `register_listener/1` returns the current registrations as
+  `{Registrant, Types}`. New: `register_process_manager/2`,
+  `unregister_process_manager/1`, `get_process_managers/1`.
+  `get_all_event_types/0` includes process manager types.
+- `evoq_pm_router:register_pm/1` registers the process manager with the type
+  registry. New: `evoq_pm_router:route_event/3`, to named process managers.
+- `evoq_event_router:route_event/3` takes `targets => [pid()]`.
+- Registrations queued together are backfilled in one pass over the store.
+- `evoq_store_subscription:filter_by_type_set/2` is gone: the active set
+  replaces the catch-up type snapshot it served.
+
+The workaround (start the store subscription after every handler has
+registered) is no longer needed. Seen red first in
+`evoq_per_registrant_backfill_tests`.
+
 ## [1.29.2] - 2026-10-23
 
 ### Fixed: an aggregate without a state module compiles without a warning (evoq#28)

@@ -44,6 +44,12 @@ route_event(Event, Metadata) ->
     route_event(Event, Metadata, #{}).
 
 %% @doc Route an event with options.
+%%
+%% `targets => [pid()]' delivers to exactly those handlers instead of every
+%% handler registered for the type. The store subscription uses it: it
+%% delivers a store's events only to handlers whose history from that store
+%% it has sent, and a late handler's history to that handler alone
+%% (evoq #4).
 -spec route_event(map(), map(), map()) -> ok.
 route_event(Event, Metadata, Opts) ->
     gen_server:cast(?SERVER, {route, Event, Metadata, Opts}).
@@ -103,7 +109,7 @@ terminate(_Reason, _State) ->
 %%====================================================================
 
 %% @private
-route_event_internal(Event, Metadata, _Opts) ->
+route_event_internal(Event, Metadata, Opts) ->
     EventType = maps:get(event_type, Event, undefined),
     case EventType of
         undefined ->
@@ -118,14 +124,17 @@ route_event_internal(Event, Metadata, _Opts) ->
                 original_type => Type
             }),
 
-            %% Get handlers for this event type
-            Handlers = evoq_event_type_registry:get_handlers(UpcastedType),
+            Handlers = handlers(Opts, UpcastedType),
 
             %% Route to each handler
             route_to_handlers(Handlers, UpcastedType, UpcastedEvent, Metadata)
     end.
 
 %% @private
+%% @private The handlers named by the caller, or every handler of the type.
+handlers(#{targets := Targets}, _Type) -> Targets;
+handlers(_Opts, Type) -> evoq_event_type_registry:get_handlers(Type).
+
 route_to_handlers(Handlers, Type, Event, Metadata) ->
     lists:foreach(fun(Handler) -> notify_handler(Handler, Type, Event, Metadata) end,
                   Handlers).

@@ -14,9 +14,29 @@
 %% 1. Replays all historical events from the store (catch-up phase)
 %% 2. Subscribes to the store's $all stream (by_stream, selector $all)
 %% 3. Receives ALL new events in store-global order
-%% 4. For each event, checks if any handler is registered for its type
-%% 5. Routes matching events to evoq_event_router and evoq_pm_router
-%% 6. Skips events with no registered handlers (zero cost)
+%% 4. For each event, finds the registrants of its type whose history
+%%    this subscription has sent (see Registrants below)
+%% 5. Routes the event to exactly those, through evoq_event_router (handler
+%%    processes) and evoq_pm_router (process managers)
+%% 6. Skips events with no such registrant (zero cost)
+%%
+%% == Registrants ==
+%%
+%% A registrant is a handler process (event handler or projection) or a
+%% process manager, as evoq_event_type_registry names them. This
+%% subscription keeps, per store, which registrants are ACTIVE for which
+%% types: those whose history from this store it has delivered. Every event
+%% goes to the active registrants of its type and to nobody else.
+%%
+%% Registrants present when this subscription starts are active from the
+%% start, and catch-up delivers their history. A registrant that registers
+%% later (during catch-up or after it) is announced by the registry; the
+%% subscription then delivers the history of that registrant's types up to
+%% its own current position to that registrant ALONE, and only then makes it
+%% active. Every event therefore reaches every registrant exactly once, in
+%% store order, however late it registers relative to other consumers of the
+%% same type (evoq #4), and a type only a process manager consumes is routed
+%% like any other (evoq #2).
 %%
 %% == Replay ==
 %%
@@ -61,7 +81,7 @@
 
 %% Internal (exported for testing)
 -export([evoq_event_to_routable/1, route_event/1, route_events_with_seq/2,
-         filter_by_type/2, filter_by_type_set/2]).
+         filter_by_type/2]).
 
 %% gen_server callbacks
 -export([init/1, handle_continue/2, handle_call/3, handle_cast/2, handle_info/2,
@@ -77,11 +97,13 @@
     %% may persist it: projections checkpoint on `global_position' (see
     %% route_event_at/4).
     seq :: non_neg_integer(),
-    %% Event types with a registered handler at the moment this listener
-    %% registered (register_listener/1's own snapshot). Gates catch-up
-    %% routing -- see handle_continue/2's comment for why a type must NOT
-    %% be routed by catch-up just because it gained a handler mid-replay.
-    known_types :: [binary()],
+    %% {Registrant, EventType} for every registrant whose history of that
+    %% type this subscription has delivered: the only registrants an event
+    %% of the type is routed to. See the module doc's Registrants section.
+    active :: active(),
+    %% Handler processes this subscription monitors, so a dead one leaves
+    %% `active'.
+    watched :: #{pid() => true},
     %% How many events this subscription has scanned/consumed so far, in
     %% real global store order -- NOT `seq' (which only counts ones that
     %% actually had a handler). This is the position acknowledged to the
@@ -110,6 +132,13 @@
 %% reckon-db's own catch-up reads 500 events a page, so a duplicate burst
 %% from its trigger/catch-up overlap stays well inside this window.
 -define(RECENT_IDS, 2000).
+
+%% Events read per page by catch-up and backfill.
+-define(BATCH_SIZE, 1000).
+
+%% {Registrant, EventType} pairs: the registrants an event of the type is
+%% routed to (see the module doc's Registrants section).
+-type active() :: #{{evoq_event_type_registry:registrant(), binary()} => true}.
 
 %% Every live event acked individually would mean one synchronous
 %% gen_server:call (reckon_db_subscriptions:ack/4, a Khepri/Raft commit,
@@ -160,17 +189,19 @@ init({StoreId, Opts}) ->
     %% Register as a listener with the type registry.
     %% We still register so we know about new types, but we no longer
     %% need to create per-type subscriptions — we subscribe to $all.
-    %% CurrentTypes is kept (not discarded) -- see handle_continue/2's
-    %% comment for why catch-up needs this exact snapshot, not "whatever
-    %% has a handler right now".
-    {ok, CurrentTypes} = evoq_event_type_registry:register_listener(self()),
+    %% The registrations that exist now are active from the start: catch-up
+    %% delivers their history. Every later one is announced to this process
+    %% and backfilled first (see handle_continue/2).
+    {ok, Registrations} = evoq_event_type_registry:register_listener(self()),
+    {Active, Watched} = activate(Registrations, #{}, #{}),
 
     {ok, #state{
         store_id = StoreId,
         subscription_id = undefined,
         opts = Opts,
         seq = 0,
-        known_types = CurrentTypes,
+        active = Active,
+        watched = Watched,
         offset = 0,
         last_acked = 0,
         seen_up_to = 0,
@@ -200,17 +231,11 @@ init({StoreId, Opts}) ->
 %% One thing THIS change did move: a handler can now register WHILE
 %% catch-up is running (init/1 no longer blocks the whole node while it
 %% replays), where before it never could -- the whole app was blocked on
-%% this same replay. Catch-up is therefore gated on `known_types', the
-%% snapshot `register_listener/1' returned in init/1, NOT "whichever
-%% handlers exist right now": if it used live `get_handlers/1' lookups (as
-%% `route_event_with_seq/2' does for the live $all feed), a type that
-%% gains its first handler mid-replay would get double-delivered -- once
-%% by catch-up for every one of its events scanned AFTER the registration
-%% landed, and again in full when the queued `{new_event_types, Types}'
-%% notification runs `backfill_event_types/4' right after catch-up
-%% finishes. Gating on the snapshot defers ALL of that type's history to
-%% the backfill sweep, uniformly, exactly like a handler registering after
-%% catch-up already finished -- one delivery, not two.
+%% this same replay. Catch-up therefore routes only to the registrants that
+%% were active when it started: one registering mid-replay is not active,
+%% gets nothing from catch-up, and gets its whole history from the backfill
+%% its queued `{new_registrant, _, _}' runs right after catch-up finishes --
+%% one delivery, in order, not part of it twice.
 %%
 %% == Why subscribe_to_all/3 is handed Offset0, and why handle_info/2 acks ==
 %%
@@ -256,7 +281,7 @@ init({StoreId, Opts}) ->
 %% double-replays on its first boot, and a long-running store no longer
 %% replays its whole history on any restart after that.
 handle_continue(catch_up, #state{store_id = StoreId, opts = Opts,
-                                  known_types = KnownTypes} = State) ->
+                                  active = Active} = State) ->
     %% Phase 1: Replay historical events (catch-up).
     %% This populates projections with all events stored before this
     %% subscription was created. Events are routed through the same
@@ -264,7 +289,7 @@ handle_continue(catch_up, #state{store_id = StoreId, opts = Opts,
     %% Read BEFORE the ack below, which overwrites it with this boot's own
     %% position and would make everything look new.
     SeenUpTo = seen_up_to(StoreId),
-    {Seq0, Offset0} = catch_up_historical(StoreId, KnownTypes, SeenUpTo),
+    {Seq0, Offset0} = catch_up_historical(StoreId, Active, SeenUpTo),
     ack_progress(StoreId, Offset0),
 
     %% Phase 2: Subscribe to new events going forward, starting from
@@ -287,38 +312,38 @@ handle_continue(catch_up, #state{store_id = StoreId, opts = Opts,
                            recent = recent_tail(StoreId, Offset0)}}.
 
 %% @private
-%% New event types are registered dynamically, and this fires for the
-%% types of one registration that just got their FIRST handler ever (see
-%% evoq_event_type_registry:register_all/2's own doc) — so every handler
-%% currently registered for them at this moment is late, not a mix of old
-%% and new. The $all live subscription only delivers events
-%% APPENDED after it was created; it does NOT retroactively cover a type
-%% whose handler registers after the initial catch-up phase already ran
-%% and scanned past any of that type's events with zero handlers to
-%% deliver to (evoq_event_router:route_event_internal/3's routing table
-%% lookup happens at delivery time, not at scan time). Without this
-%% backfill, a handler in an OTP application that boots after whichever
-%% application owns this store's catch-up call — the normal shape for a
-%% multi-app vertical-slice umbrella, not an edge case — silently never
-%% receives ANY event appended before it registered. Confirmed live in a
-%% service on 2026-08-25: a restart with real history logged
-%% "Catch-up ... handlers=0" for all 13 events, then this exact
-%% "(already covered by $all)" message once its projection handlers
-%% registered ~0.8s later — the read model came back completely empty.
+%% A registrant registered (or withdrew) after this subscription started.
 %%
-%% All the types of one registration are backfilled in ONE pass over the
-%% store, in global order. A pass per type delivered the whole history of
-%% the first type and then of the second, and a projection checkpointing on
-%% the global position then skipped every event of the second type below
-%% the first type's last one.
-handle_info({new_event_types, EventTypes}, #state{store_id = StoreId, seq = Seq0,
-                                                   seen_up_to = SeenUpTo} = State) ->
-    logger:info("[evoq] New event types registered for ~s: ~p -- backfilling their history "
-                "(a handler registering after catch-up already ran would otherwise never "
-                "see events of these types appended before it subscribed)",
-                [StoreId, EventTypes]),
-    Seq1 = backfill_event_types(StoreId, EventTypes, Seq0, SeenUpTo),
-    {noreply, State#state{seq = Seq1}};
+%% The $all live subscription only delivers events APPENDED after it was
+%% created; it does not retroactively cover a registrant that registers
+%% after catch-up already scanned past the history of its types. Without
+%% this backfill, a handler in an OTP application that boots after whichever
+%% application owns this store's catch-up call -- the normal shape for a
+%% multi-app vertical-slice umbrella, not an edge case -- silently never
+%% receives ANY event appended before it registered. Confirmed live in a
+%% service on 2026-08-25: the read model came back completely empty.
+%%
+%% The backfill goes to the new registrant ALONE, for every type of its
+%% registration, whether or not another registrant already holds the type,
+%% and covers the store up to this subscription's own position: everything
+%% below it has been routed, everything from it on arrives live. Until the
+%% backfill has run the registrant is not active, so no event reaches it out
+%% of order or twice. It ran only for a type's FIRST handler, delivered to
+%% whoever was registered at the time, and a second consumer of a type got
+%% no history at all (evoq #4).
+%%
+%% Registrations queued behind this one are taken in the same pass, so a
+%% boot that registers many handlers at once scans the store once.
+handle_info({new_registrant, _, _} = Message, State) ->
+    {noreply, register_pending(take_registrations([Message]), State)};
+
+handle_info({registrant_left, _, _} = Message, State) ->
+    {noreply, register_pending(take_registrations([Message]), State)};
+
+handle_info({'DOWN', _Ref, process, Pid, _Reason},
+            #state{active = Active, watched = Watched} = State) ->
+    {noreply, State#state{active = maps:filter(fun({R, _}, _) -> R =/= Pid end, Active),
+                          watched = maps:remove(Pid, Watched)}};
 
 %% This is the SAME message shape the $all subscription's own catch-up
 %% delivers (reckon_db_subscriptions:send_filtered_events/2) and its live
@@ -343,12 +368,13 @@ handle_info({new_event_types, EventTypes}, #state{store_id = StoreId, seq = Seq0
 handle_info({events, Events}, #state{store_id = StoreId, seq = Seq0,
                                       offset = Offset0,
                                       last_acked = LastAcked,
+                                      active = Active,
                                       recent = Recent0} = State) when is_list(Events) ->
     {Fresh, Recent1} = drop_seen(Events, Recent0),
     %% Live events carry their global position too: the offset this
     %% subscription has counted is where they sit in the store's global log.
     %% Nothing live is replay, so SeenUpTo is 0.
-    Seq1 = route_positioned(StoreId, positioned(Fresh, Offset0), Seq0, 0),
+    Seq1 = route_positioned(StoreId, positioned(Fresh, Offset0), Seq0, 0, Active),
     Offset1 = Offset0 + length(Fresh),
     NewLastAcked = maybe_ack(StoreId, Offset1, LastAcked),
     {noreply, State#state{seq = Seq1, offset = Offset1, last_acked = NewLastAcked,
@@ -362,6 +388,56 @@ handle_info({'EXIT', _Pid, Reason}, State) ->
 
 handle_info(_Info, State) ->
     {noreply, State}.
+
+%% @private Every registration message already queued, in arrival order,
+%% after the ones in Acc (newest first).
+take_registrations(Acc) ->
+    receive
+        {new_registrant, _, _} = Message -> take_registrations([Message | Acc]);
+        {registrant_left, _, _} = Message -> take_registrations([Message | Acc])
+    after 0 ->
+        lists:reverse(Acc)
+    end.
+
+%% @private Apply registration messages in order, backfill the new
+%% registrants in one pass, then make them active.
+register_pending(Messages, #state{store_id = StoreId, seq = Seq0, offset = Offset,
+                                  seen_up_to = SeenUpTo, active = Active0,
+                                  watched = Watched0} = State) ->
+    {Pending, Active1} = lists:foldl(fun(M, Acc) -> pending(M, Active0, Acc) end,
+                                     {#{}, Active0}, Messages),
+    Seq1 = backfill(StoreId, Pending, Offset, Seq0, SeenUpTo),
+    {Active2, Watched1} = activate(maps:keys(Pending), Active1, Watched0),
+    State#state{seq = Seq1, active = Active2, watched = Watched1}.
+
+%% @private Fold one message into {Pending, Active}: a new registrant's
+%% types it is not active for yet become pending; a withdrawal leaves both.
+%% A registrant on another node is served by its own node's subscription.
+pending({new_registrant, Pid, _Types}, _Active0, Acc) when is_pid(Pid), node(Pid) =/= node() ->
+    Acc;
+pending({new_registrant, Registrant, Types}, Active0, {Pending, Active}) ->
+    {maps:merge(Pending, maps:from_list([{{Registrant, T}, true} || T <- Types,
+                                         not is_map_key({Registrant, T}, Active0)])),
+     Active};
+pending({registrant_left, Registrant, Types}, _Active0, {Pending, Active}) ->
+    Gone = [{Registrant, T} || T <- Types],
+    {maps:without(Gone, Pending), maps:without(Gone, Active)}.
+
+%% @private Make {Registrant, Type} pairs active, monitoring each handler
+%% process once. Registrations are {Registrant, Types} or {Registrant, Type}.
+activate(Registrations, Active, Watched) ->
+    Pairs = lists:append([pairs(R) || R <- Registrations]),
+    {maps:merge(Active, maps:from_list([{P, true} || P <- Pairs])),
+     lists:foldl(fun watch/2, Watched, [R || {R, _} <- Pairs, is_pid(R)])}.
+
+pairs({Registrant, Types}) when is_list(Types) -> [{Registrant, T} || T <- Types];
+pairs({Registrant, Type}) -> [{Registrant, Type}].
+
+watch(Pid, Watched) when is_map_key(Pid, Watched) ->
+    Watched;
+watch(Pid, Watched) ->
+    _ = erlang:monitor(process, Pid),
+    Watched#{Pid => true}.
 
 %% @private Split Events into those not consumed recently, in order, and
 %% remember their ids. A duplicate inside one batch is dropped too. An event
@@ -453,10 +529,11 @@ ack_progress_if_ahead(_StoreId, _Offset, _LastAcked) ->
 
 %% @private Replay all historical events from the store.
 %% Reads events in batches via read_all_global and routes each batch
-%% through the same routing path as live events -- restricted to
-%% KnownTypes (see handle_continue/2's comment for why: a type gaining its
-%% first handler mid-replay must NOT be routed by catch-up, only by the
-%% backfill it triggers, or it is delivered twice).
+%% through the same routing path as live events, to the registrants active
+%% when catch-up started (see handle_continue/2's comment for why: a
+%% registrant arriving mid-replay must NOT be routed to by catch-up, only by
+%% the backfill it triggers, or it gets part of its history twice and out
+%% of order).
 %% Returns `{Seq, Offset}': Seq is how many events were actually routed
 %% (had a handler) -- carried into live routing so version numbers stay
 %% monotonic across the catch-up/live boundary. Offset is how many events
@@ -469,23 +546,22 @@ ack_progress_if_ahead(_StoreId, _Offset, _LastAcked) ->
 %%
 %% Events at a global position below SeenUpTo are replay (see
 %% seen_up_to/1) and are routed with `replaying => true'.
--spec catch_up_historical(atom(), [binary()], non_neg_integer()) ->
+-spec catch_up_historical(atom(), active(), non_neg_integer()) ->
     {non_neg_integer(), non_neg_integer()}.
-catch_up_historical(StoreId, KnownTypes, SeenUpTo) ->
-    BatchSize = 1000,
-    catch_up_loop(StoreId, 0, BatchSize, 0, KnownTypes, SeenUpTo).
+catch_up_historical(StoreId, Active, SeenUpTo) ->
+    catch_up_loop(StoreId, 0, 0, Active, SeenUpTo).
 
--spec catch_up_loop(atom(), non_neg_integer(), pos_integer(), non_neg_integer(),
-                     [binary()], non_neg_integer()) ->
+-spec catch_up_loop(atom(), non_neg_integer(), non_neg_integer(), active(),
+                    non_neg_integer()) ->
     {non_neg_integer(), non_neg_integer()}.
-catch_up_loop(StoreId, Offset, BatchSize, Seq, KnownTypes, SeenUpTo) ->
+catch_up_loop(StoreId, Offset, Seq, Active, SeenUpTo) ->
     %% Elapsed time per page, not just event counts: the reckon_db 5.11.1
     %% cache fix looked sufficient against a synthetic 10k-event benchmark
     %% and was materially worse against a real ~87k-event store -- a gap
     %% only visible with per-page timing, which is why it's logged here now
     %% instead of needing a from-scratch repro to diagnose next time.
     {ElapsedUs, Result} = timer:tc(evoq_event_store, read_all_global,
-                                    [StoreId, Offset, BatchSize]),
+                                    [StoreId, Offset, ?BATCH_SIZE]),
     ElapsedMs = ElapsedUs / 1000,
     case Result of
         {ok, []} ->
@@ -496,79 +572,61 @@ catch_up_loop(StoreId, Offset, BatchSize, Seq, KnownTypes, SeenUpTo) ->
         {ok, Events} ->
             %% Log event types and handler status for diagnostics
             log_catch_up_events(StoreId, Events),
-            %% Route only types known at catch-up's start -- see
-            %% handle_continue/2. Pagination bookkeeping (below) still uses
-            %% the FULL, unfiltered Events/BatchSize so end-of-store
-            %% detection and the next Offset are unaffected by the filter.
-            Routable = [PE || {_, E} = PE <- positioned(Events, Offset),
-                              lists:member(event_type_or_unknown(E), KnownTypes)],
-            Seq1 = route_positioned(StoreId, Routable, Seq, SeenUpTo),
+            %% Route to the registrants active at catch-up's start only --
+            %% see handle_continue/2.
+            Seq1 = route_positioned(StoreId, positioned(Events, Offset), Seq, SeenUpTo,
+                                    Active),
             logger:info("[evoq] Catch-up ~s: routed ~b of ~b events (seq ~b -> ~b) in ~.1fms",
-                        [StoreId, length(Routable), length(Events), Seq, Seq1, ElapsedMs]),
-            continue_catch_up(length(Events) < BatchSize,
-                              StoreId, Offset, Events, BatchSize, Seq1, KnownTypes,
-                              SeenUpTo);
+                        [StoreId, Seq1 - Seq, length(Events), Seq, Seq1, ElapsedMs]),
+            continue_catch_up(length(Events) < ?BATCH_SIZE,
+                              StoreId, Offset, Events, Seq1, Active, SeenUpTo);
         {error, Reason} ->
             logger:warning("[evoq] Catch-up failed for ~s at offset ~b: ~p (~.1fms)",
                            [StoreId, Offset, Reason, ElapsedMs]),
             {Seq, Offset}
     end.
 
-%% @private Keep only events whose type is in KnownTypes. Same filtering
-%% shape as filter_by_type/2, generalized from one type to a snapshot set.
--spec filter_by_type_set([evoq_event() | term()], [binary()]) -> [evoq_event() | term()].
-filter_by_type_set(Events, KnownTypes) ->
-    [E || E <- Events, lists:member(event_type_or_unknown(E), KnownTypes)].
-
-%% @private Re-scan history for the event types of one registration and
-%% deliver them to whichever handler(s) just registered for them (see the
-%% handle_info/2 clause above for why this exists), in ONE pass, in global
-%% order. Filters to EventTypes only, so already-covered handlers for OTHER
-%% types see no redundant delivery. Continues this subscription's own
-%% running Seq counter rather than starting a fresh one, so backfilled
-%% events get version numbers appended after whatever's already been
-%% delivered instead of colliding with them.
+%% @private Deliver the history of the pending {Registrant, Type} pairs to
+%% those registrants alone, in ONE pass over the store, in global order, up
+%% to Offset: everything below it has been routed by this subscription,
+%% everything from it on arrives live once the registrants are active. A
+%% pass per registrant or per type delivered the history of one type and
+%% then of the next, and a projection checkpointing on the global position
+%% then skipped every event of its second type below the first type's last.
 %%
 %% Replay is marked exactly as in catch_up_historical/3: this is the path a
 %% handler registering after catch-up (every handler in an app booting
 %% after the one owning the store) gets ALL its history through.
--spec backfill_event_types(atom(), [binary()], non_neg_integer(), non_neg_integer()) ->
+-spec backfill(atom(), active(), non_neg_integer(), non_neg_integer(), non_neg_integer()) ->
     non_neg_integer().
-backfill_event_types(StoreId, EventTypes, Seq0, SeenUpTo) ->
-    BatchSize = 1000,
-    backfill_loop(StoreId, EventTypes, 0, BatchSize, Seq0, SeenUpTo).
+backfill(_StoreId, Pending, _Offset, Seq, _SeenUpTo) when map_size(Pending) =:= 0 ->
+    Seq;
+backfill(StoreId, Pending, Offset, Seq, SeenUpTo) ->
+    logger:info("[evoq] Backfilling ~s up to ~b for ~p",
+                [StoreId, Offset, lists:usort([R || {R, _} <- maps:keys(Pending)])]),
+    backfill_page(StoreId, Pending, 0, Offset, Seq, SeenUpTo).
 
--spec backfill_loop(atom(), [binary()], non_neg_integer(), pos_integer(), non_neg_integer(),
-                    non_neg_integer()) -> non_neg_integer().
-backfill_loop(StoreId, EventTypes, Offset, BatchSize, Seq, SeenUpTo) ->
-    case evoq_event_store:read_all_global(StoreId, Offset, BatchSize) of
+backfill_page(_StoreId, _Pending, From, To, Seq, _SeenUpTo) when From >= To ->
+    Seq;
+backfill_page(StoreId, Pending, From, To, Seq, SeenUpTo) ->
+    case evoq_event_store:read_all_global(StoreId, From, min(?BATCH_SIZE, To - From)) of
         {ok, []} ->
             Seq;
         {ok, Events} ->
-            Matching = [PE || {_, E} = PE <- positioned(Events, Offset),
-                              lists:member(event_type_or_unknown(E), EventTypes)],
-            Seq1 = route_positioned(StoreId, Matching, Seq, SeenUpTo),
-            logger:info("[evoq] Backfill ~s/~p: matched ~b of ~b scanned (seq ~b -> ~b)",
-                        [StoreId, EventTypes, length(Matching), length(Events), Seq, Seq1]),
-            continue_backfill(length(Events) < BatchSize,
-                              StoreId, EventTypes, Offset, Events, BatchSize, Seq1,
-                              SeenUpTo);
+            Seq1 = route_positioned(StoreId, positioned(Events, From), Seq, SeenUpTo, Pending),
+            backfill_page(StoreId, Pending, From + length(Events), To, Seq1, SeenUpTo);
         {error, Reason} ->
-            logger:warning("[evoq] Backfill failed for ~s/~p at offset ~b: ~p",
-                           [StoreId, EventTypes, Offset, Reason]),
+            %% The registrants become active all the same: holding them back
+            %% would cost them every live event as well. Their history from
+            %% here on is missing, and this says so.
+            logger:error("[evoq] Backfill failed for ~s at offset ~b: ~p; the registrants "
+                         "~p miss the history from there", [StoreId, From, Reason,
+                         lists:usort([R || {R, _} <- maps:keys(Pending)])]),
             Seq
     end.
 
-%% @private Recurse for another batch unless this was the last one.
-continue_backfill(true, _StoreId, _EventTypes, _Offset, _Events, _BatchSize, Seq1,
-                  _SeenUpTo) ->
-    Seq1;
-continue_backfill(false, StoreId, EventTypes, Offset, Events, BatchSize, Seq1, SeenUpTo) ->
-    backfill_loop(StoreId, EventTypes, Offset + length(Events), BatchSize, Seq1, SeenUpTo).
-
 %% @doc Keep only the events matching EventType, in order. Exported for
-%% testing (pure, no store needed) -- backfill_loop/5 is the only real
-%% caller, and needs a live store to exercise past this point.
+%% testing (pure, no store needed).
 -spec filter_by_type([evoq_event() | term()], binary()) -> [evoq_event() | term()].
 filter_by_type(Events, EventType) ->
     [E || E <- Events, event_type_or_unknown(E) =:= EventType].
@@ -587,11 +645,10 @@ event_type_or_unknown(#evoq_event{event_type = T}) -> T;
 event_type_or_unknown(_) -> unknown.
 
 %% @private Recurse for another batch unless this was the last one.
-continue_catch_up(true, _StoreId, Offset, Events, _BatchSize, Seq1, _KnownTypes,
-                  _SeenUpTo) ->
+continue_catch_up(true, _StoreId, Offset, Events, Seq1, _Active, _SeenUpTo) ->
     {Seq1, Offset + length(Events)};
-continue_catch_up(false, StoreId, Offset, Events, BatchSize, Seq1, KnownTypes, SeenUpTo) ->
-    catch_up_loop(StoreId, Offset + length(Events), BatchSize, Seq1, KnownTypes, SeenUpTo).
+continue_catch_up(false, StoreId, Offset, Events, Seq1, Active, SeenUpTo) ->
+    catch_up_loop(StoreId, Offset + length(Events), Seq1, Active, SeenUpTo).
 
 %% @private Subscribe to the $all stream on the store, starting from
 %% Offset0 -- the real position Phase 1's catch_up_historical/2 already
@@ -663,17 +720,19 @@ route_event(_Other) ->
 positioned(Events, Offset) ->
     lists:zip(lists:seq(Offset, Offset + length(Events) - 1), Events).
 
-%% @private Route positioned events, marking those below SeenUpTo replay.
-%% The store is threaded through so every delivery names the store it came
-%% from: a handler's acknowledgment is keyed on (store, stream) and an
-%% aggregate id alone is not unique across stores.
+%% @private Route positioned events to the registrants in Active, marking
+%% those below SeenUpTo replay. The store is threaded through so every
+%% delivery names the store it came from: a handler's acknowledgment is
+%% keyed on (store, stream) and an aggregate id alone is not unique across
+%% stores.
 -spec route_positioned(atom(), [{non_neg_integer(), evoq_event() | term()}], non_neg_integer(),
-                       non_neg_integer()) -> non_neg_integer().
-route_positioned(_StoreId, [], Seq, _SeenUpTo) ->
+                       non_neg_integer(), active()) -> non_neg_integer().
+route_positioned(_StoreId, [], Seq, _SeenUpTo, _Active) ->
     Seq;
-route_positioned(StoreId, [{Position, E} | Rest], Seq, SeenUpTo) ->
-    route_positioned(StoreId, Rest, route_event_at(StoreId, E, Seq, Position, Position < SeenUpTo),
-                     SeenUpTo).
+route_positioned(StoreId, [{Position, E} | Rest], Seq, SeenUpTo, Active) ->
+    route_positioned(StoreId, Rest,
+                     route_event_at(StoreId, E, Seq, Position, Position < SeenUpTo, Active),
+                     SeenUpTo, Active).
 
 %% @private Route a single event with sequence-based version override and no
 %% global position. Kept for route_events_with_seq/2; every path the
@@ -682,16 +741,49 @@ route_positioned(StoreId, [{Position, E} | Rest], Seq, SeenUpTo) ->
 route_event_with_seq(E, Seq) ->
     route_event_with_seq(E, Seq, false).
 
-%% @private Route an event at its global position in the store: the index of
-%% the event in the store's global log, the same in every boot, whatever
+%% @private Route an event at its global position in the store to the
+%% registrants of its type in Active. The position is the index of the
+%% event in the store's global log, the same in every boot, whatever
 %% handlers exist. It goes into metadata as `global_position', which is what
 %% a projection checkpoints on (evoq #1). `version' stays the per-boot `Seq'
 %% for anything that already reads it, but nothing may persist `Seq': it
-%% restarts at 0 on every boot and counts only events that have a handler.
+%% restarts at 0 on every boot and counts only events that were routed.
 -spec route_event_at(atom(), evoq_event() | term(), non_neg_integer(), non_neg_integer(),
-                     boolean()) -> non_neg_integer().
-route_event_at(StoreId, E, Seq, Position, Replaying) ->
-    route_event_with_seq(E, Seq, Replaying, #{global_position => Position, store_id => StoreId}).
+                     boolean(), active()) -> non_neg_integer().
+route_event_at(StoreId, #evoq_event{} = E, Seq, Position, Replaying, Active) ->
+    {Event, Metadata0} = evoq_event_to_routable(E),
+    deliver(targets(Event, Active), Event,
+            routed_metadata(Metadata0, Seq, Replaying,
+                            #{global_position => Position, store_id => StoreId}),
+            Seq);
+route_event_at(_StoreId, _Other, Seq, _Position, _Replaying, _Active) ->
+    Seq.
+
+%% @private The handler processes and process managers in Active for this
+%% event: handlers by the type the event router delivers it as (after
+%% upcasting), process managers by the stored type, as the PM router
+%% correlates it.
+targets(#{event_type := Type} = Event, Active) ->
+    {DeliveredType, Pids} = evoq_event_router:delivery_targets(Event),
+    {[P || P <- lists:usort(Pids), is_map_key({P, DeliveredType}, Active)],
+     [M || M <- evoq_event_type_registry:get_process_managers(Type),
+           is_map_key({{pm, M}, Type}, Active)]}.
+
+%% @private Hand the event to its targets; an event with none is not
+%% routed and takes no Seq.
+deliver({[], []}, _Event, _Metadata, Seq) ->
+    Seq;
+deliver({Handlers, PMs}, Event, Metadata, Seq) ->
+    ok = route_to_handlers(Handlers, Event, Metadata),
+    ok = route_to_pms(PMs, Event, Metadata),
+    Seq + 1.
+
+route_to_handlers([], _Event, _Metadata) -> ok;
+route_to_handlers(Handlers, Event, Metadata) ->
+    evoq_event_router:route_event(Event, Metadata, #{targets => Handlers}).
+
+route_to_pms([], _Event, _Metadata) -> ok;
+route_to_pms(PMs, Event, Metadata) -> evoq_pm_router:route_event(Event, Metadata, PMs).
 
 %% @private Replay carries `replaying => true'; a new event carries no
 %% such key, so metadata of live delivery is exactly what it always was.
@@ -706,20 +798,21 @@ route_event_with_seq(#evoq_event{event_type = EventType} = E, Seq, Replaying, Ex
             Seq;
         _Handlers ->
             {Event, Metadata0} = evoq_event_to_routable(E),
-            %% Override version with global sequence so projections
-            %% using $all subscriptions get monotonic checkpoints.
-            %% Preserve the original stream version as stream_version.
-            StreamVersion = maps:get(version, Metadata0, 0),
-            Metadata = mark_replay(Replaying,
-                                   maps:merge(Metadata0#{version => Seq,
-                                                         stream_version => StreamVersion},
-                                              Extra)),
+            Metadata = routed_metadata(Metadata0, Seq, Replaying, Extra),
             evoq_event_router:route_event(Event, Metadata),
             evoq_pm_router:route_event(Event, Metadata),
             Seq + 1
     end;
 route_event_with_seq(_Other, Seq, _Replaying, _Extra) ->
     Seq.
+
+%% @private Override version with the per-boot Seq, keep the original
+%% stream version as stream_version, add Extra, mark replay.
+routed_metadata(Metadata0, Seq, Replaying, Extra) ->
+    StreamVersion = maps:get(version, Metadata0, 0),
+    mark_replay(Replaying, maps:merge(Metadata0#{version => Seq,
+                                                 stream_version => StreamVersion},
+                                      Extra)).
 
 mark_replay(true, Metadata) -> Metadata#{replaying => true};
 mark_replay(false, Metadata) -> Metadata.

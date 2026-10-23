@@ -345,24 +345,21 @@ comparable, so a projection takes its events from one source, never both.
 
 A projection whose handler registers after the store subscription's
 catch-up (every projection in an application that boots after the one that
-owns the store) gets its history through backfill: one pass over the store,
-in global order, for all the types it registers that had no handler yet.
+owns the store) gets its history through backfill. The store subscription
+delivers the history of every type the projection registers, to that
+projection alone, in one pass over the store in global order, up to the
+position the subscription has reached. Until that pass has run, no live
+event of those types is routed to the projection, so each event arrives
+once, in store order, and the checkpoint never skips one.
 
-Backfill runs only for a type's first handler ever. A projection on a type
-another handler already covers gets no history of that type at all.
+It makes no difference whether another handler or process manager already
+consumes the type, or whether the projection registers during catch-up or
+after it. A registration that announces itself during catch-up is
+backfilled as soon as catch-up finishes.
 
-Worse, a projection on a covered type and a new one can lose history it
-would have got on 1.24.2. Handler H on [B] registers, then projection P on
-[B, C]: H's pass over B delivers B's history to P too and moves P's
-checkpoint to B's last position, and P's own pass over C then skips every
-C event below it. The same happens when a projection registers during
-catch-up for a type catch-up already delivers.
-
-Both are left for evoq 2.0.0 (evoq #4), which backfills per registrant, all
-its types, to it alone. Until then, start the store subscription after every
-handler has registered (from the application listed last in the release),
-so catch-up delivers everything in store order and no backfill runs, or
-call `evoq_projection:rebuild/1` once the projection is registered.
+Each late registration scans the store once. Registrations that arrive
+together are backfilled in the same pass, so an application that starts
+many projections at once pays for one scan, not one per projection.
 
 ## Handling Projection Errors
 

@@ -95,6 +95,13 @@ interested_in() ->
     [<<"OrderPlaced">>, <<"PaymentFailed">>, <<"InventoryUnavailable">>].
 ```
 
+The store subscription routes every event of these types to the process
+manager, whether or not an event handler consumes them too. A process
+manager started after the store subscription gets the history of its types
+first, to it alone, and then the live events, each once and in store order.
+History the node had consumed before it went down arrives as replay (see
+below).
+
 ### correlate/2
 
 Route events to the correct process instance:

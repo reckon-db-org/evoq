@@ -15,12 +15,11 @@
 -define(PAID, <<"pm_order_paid_v1">>).
 
 %% Two process managers correlating on the same id keep their own
-%% instances: each is handed its events once, with its own state. (A handler
-%% consumes both types so the store subscription routes them.)
+%% instances: each is handed its events once, with its own state.
 two_pms_on_one_id_keep_their_own_instances_test_() ->
     pm_test(fun() ->
         StoreId = fresh_store([placed(<<"o1">>, 1), paid(<<"o1">>, 2)]),
-        boot(StoreId, [order_pm, audit_pm, order_handler], [subscription]),
+        boot(StoreId, [order_pm, audit_pm], [subscription]),
         ?assertEqual([{?PLACED, <<"o1">>, []}, {?PAID, <<"o1">>, [?PLACED]}], order_pm_seen()),
         ?assertEqual([{<<"o1">>, #{audit_of => <<"o1">>, count => 0}}],
                      [X || {X, _} <- evoq_replay_probe:calls(audit_pm)])
@@ -83,9 +82,8 @@ boot(StoreId, First, Then) ->
 
 start(subscription, StoreId) -> started(evoq_store_subscription:start_link(StoreId));
 start(order_pm, _) -> ok = evoq_process_manager:start(evoq_order_probe_pm, #{});
-start(audit_pm, _) -> ok = evoq_process_manager:start(evoq_audit_probe_pm, #{});
-start(order_handler, _) ->
-    started(evoq_event_handler:start_link(evoq_order_events_probe_handler, #{})).
+start(audit_pm, _) -> ok = evoq_process_manager:start(evoq_audit_probe_pm, #{}).
+
 
 started({ok, Pid}) ->
     put(started, [Pid | get_started()]),

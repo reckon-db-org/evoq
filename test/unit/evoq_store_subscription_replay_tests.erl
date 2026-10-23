@@ -176,9 +176,8 @@ get_started() ->
         Pids -> Pids
     end.
 
-%% The process manager registers first. Backfill starts the moment a type
-%% gets its first handler, so a consumer registering after that misses the
-%% backfill entirely: a pre-existing limitation this module does not test.
+%% Every consumer gets its own backfill (evoq #4), so the order in which
+%% they register does not matter here.
 start_consumers() ->
     ok = evoq_process_manager:start(evoq_replay_probe_pm, #{}),
     started(evoq_event_handler:start_link(evoq_replay_probe_skip_handler, #{})),
