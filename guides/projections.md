@@ -38,7 +38,7 @@ and the metadata is the routing envelope:
 
 ```erlang
 #{
-    stream_id => <<"order-ord-123">>,      %% the stream the event was appended to
+    stream_id => <<"order-018f6a7b8c9d4e5f60718293a4b5c6d9">>,      %% the stream the event was appended to
     version => 7,                          %% the subscription's per-boot counter
     stream_version => 3,                   %% the event's version in its stream
     global_position => 412,                %% its index in the store's global log
@@ -77,7 +77,7 @@ init(_Config) ->
 
 %% Project each event into the read model. The read model is keyed on the
 %% order, which comes from the event's data: stream_id names the stream
-%% (<<"order-ord-123">>), not the order.
+%% (<<"order-018f6a7b8c9d4e5f60718293a4b5c6d9">>), not the order.
 project(#{event_type := <<"OrderPlaced">>, data := Data} = Event, Metadata, State, ReadModel) ->
     OrderId = maps:get(order_id, Data),
     Summary = #{

@@ -79,10 +79,14 @@ apply(#{balance := B} = State, #{event_type := <<"MoneyDeposited">>, data := #{a
 
 ```erlang
 %% Create a command
+%% The aggregate id is also the id of the stream its events are stored in,
+%% so on reckon-db it must be a valid stream id: <prefix>-<32 hex>. With
+%% reckon-evoq, reckon_gater_stream_id:new(account) makes one. The rule:
+%% https://hexdocs.pm/reckon_gater/stream_ids.html
 Command = evoq_command:new(
     deposit,           %% command type
     bank_account,      %% aggregate module
-    <<"acc-123">>,     %% aggregate id
+    <<"account-018f6a7b8c9d4e5f60718293a4b5c6d8">>,     %% aggregate id
     #{amount => 100}   %% payload
 ),
 

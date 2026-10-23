@@ -224,15 +224,19 @@ Create and dispatch commands:
 
 ```erlang
 %% Create a command
+%% The aggregate id is also the id of the stream its events are stored in,
+%% so on reckon-db it must be a valid stream id: <prefix>-<32 hex>. With
+%% reckon-evoq, reckon_gater_stream_id:new(account) makes one. The rule:
+%% https://hexdocs.pm/reckon_gater/stream_ids.html
 Command = evoq_command:new(
     deposit,           %% command type atom
     bank_account,      %% aggregate module
-    <<"acc-123">>,     %% aggregate id
+    <<"account-018f6a7b8c9d4e5f60718293a4b5c6d8">>,     %% aggregate id
     #{amount => 100}   %% payload
 ),
 
 %% Metadata is the fifth argument of evoq_command:new/5
-CommandWithMeta = evoq_command:new(deposit, bank_account, <<"acc-123">>,
+CommandWithMeta = evoq_command:new(deposit, bank_account, <<"account-018f6a7b8c9d4e5f60718293a4b5c6d8">>,
                                    #{amount => 100},
                                    #{user_id => <<"user-456">>,
                                      correlation_id => <<"corr-789">>}),
@@ -283,7 +287,7 @@ uses: **given** these events, **when** this command, **then** these events
 
 deposit_test() ->
     %% given: nothing has happened yet
-    {ok, State0} = bank_account:init(<<"test-acc">>),
+    {ok, State0} = bank_account:init(<<"account-018f6a7b8c9d4e5f60718293a4b5c6d8">>),
 
     %% when: a deposit is executed
     Command = #{command_type => deposit, amount => 100},
@@ -296,7 +300,7 @@ deposit_test() ->
 
 insufficient_funds_test() ->
     %% given: an empty account
-    {ok, State0} = bank_account:init(<<"test-acc">>),
+    {ok, State0} = bank_account:init(<<"account-018f6a7b8c9d4e5f60718293a4b5c6d8">>),
 
     %% when: it is asked to pay out
     %% then: the command is refused and nothing is produced

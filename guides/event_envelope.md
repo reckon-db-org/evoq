@@ -19,7 +19,7 @@ Every event stored and transmitted through evoq uses this structure:
 
     %% Stream this event belongs to
     %% Format: <<"{aggregate_type}-{aggregate_id}">>
-    %% Examples: <<"order-ord-123">>, <<"user-usr-456">>
+    %% Examples: <<"order-018f6a7b8c9d4e5f60718293a4b5c6d9">>, <<"user-018f6a7b8c9d4e5f60718293a4b5c6d7">>
     stream_id :: binary(),
 
     %% Version/position within the stream (0-based, auto-incremented)
@@ -90,7 +90,7 @@ Evoq automatically wraps your business event in the full envelope:
 EvqEvent = #evoq_event{
     event_id = generate_uuid(),
     event_type = <<"OrderPlaced">>,           %% From your event
-    stream_id = <<"order-ord-123">>,          %% Derived from aggregate_id
+    stream_id = <<"order-018f6a7b8c9d4e5f60718293a4b5c6d9">>, %% The aggregate id, unchanged
     version = 0,                               %% Auto-incremented
     data = #{                                  %% Your event payload
         order_id => <<"ord-123">>,
@@ -174,8 +174,8 @@ Identifier for the event stream (aggregate instance).
 
 **Examples:**
 ```erlang
-<<"order-ord-123">>.
-<<"user-usr-456">>.
+<<"order-018f6a7b8c9d4e5f60718293a4b5c6d9">>.
+<<"user-018f6a7b8c9d4e5f60718293a4b5c6d7">>.
 <<"cart-cart-789">>.
 ```
 
@@ -188,8 +188,8 @@ Zero-based position of this event within its stream.
 **Optimistic concurrency:**
 ```erlang
 %% Append expects current version
-{ok, 0} = append_events(Store, <<"order-123">>, -1, [Event1]).
-{ok, 1} = append_events(Store, <<"order-123">>, 0, [Event2]).
+{ok, 0} = append_events(Store, <<"order-018f6a7b8c9d4e5f60718293a4b5c6d9">>, -1, [Event1]).
+{ok, 1} = append_events(Store, <<"order-018f6a7b8c9d4e5f60718293a4b5c6d9">>, 0, [Event2]).
 
 %% Conflict if version doesn't match
 {error, {wrong_expected_version, 1, 5}}
@@ -302,7 +302,7 @@ When the event was created.
 | **event_type** | PascalCase.vN | `<<"OrderPlaced.v1">>` |
 | **Aggregate module** | snake_case | `order_aggregate.erl` |
 | **Event handler** | maybe_{verb}_{subject} | `maybe_place_order.erl` |
-| **Stream ID** | `{type}-{id}` | `<<"order-ord-123">>` |
+| **Stream ID** | `<prefix>-<32 hex>`, the aggregate id ([rule](https://hexdocs.pm/reckon_gater/stream_ids.html)) | `<<"order-018f6a7b8c9d4e5f60718293a4b5c6d9">>` |
 
 ## Metadata Best Practices
 

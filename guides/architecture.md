@@ -209,8 +209,8 @@ evoq_sup
 ├── evoq_checkpoint_store_ets     # Projection checkpoints, when used
 ├── evoq_aggregates_sup           # Dynamic aggregate supervisors
 │   ├── evoq_aggregate_partition_sup_0
-│   │   └── evoq_aggregate (bank_account, "acc-1")
-│   │   └── evoq_aggregate (bank_account, "acc-2")
+│   │   └── evoq_aggregate (bank_account, "account-018f6a7b8c9d4e5f60718293a4b5c6d8")
+│   │   └── evoq_aggregate (bank_account, "account-018f6a7b8c9d4e5f60718293a4b5c6de")
 │   ├── evoq_aggregate_partition_sup_1
 │   │   └── ...
 │   └── ... (4 partitions by default)
