@@ -38,6 +38,15 @@ of at least the TTL expired every cached result at once, so a duplicate
 command re-executed, and a backward step kept entries past their TTL. The
 deadlines are monotonic now; the table is node-local and never persisted.
 
+### Fixed: a process-manager instance runs on one node (evoq#10)
+
+`evoq_pm_router:get_instance/2` took the first member of a pg group, and pg
+lists every connected node's members. With the same process manager on two
+nodes, an event could be handed to the other node's instance (handled twice,
+while this node never started its own) and a `{stop, Id}` on one node
+stopped the other's. It reads this node's members only; the process
+managers guide says instances are node-local.
+
 ### Fixed: a checkpoint store is refused next to a read model that does not survive a restart (evoq#1)
 
 A projection skips every event at or below its checkpoint. With a checkpoint

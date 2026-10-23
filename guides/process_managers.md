@@ -396,8 +396,14 @@ another aggregate's event) produces it.
 - `{stop, Id}` hands the event to the running instance and stops it. When no
   instance exists for the id, the event is dropped: a process whose first
   event would be a stop never sees it.
-- Run a process manager on one node only for now: instance routing is
-  cluster-wide (evoq #10). A crash in one process manager's `correlate/2`,
+- Instances are node-local. With the same process manager on several
+  nodes, each node routes an event to its own instance for the id, or
+  starts one, and a `{stop, Id}` stops only that node's instance; no node
+  hands an event to another node's instance (evoq #10). Each node that
+  consumes the store therefore runs its own instance of every process:
+  if a process must run once in the cluster, run its process manager on
+  one node.
+- A crash in one process manager's `correlate/2`,
   `handle/3` or `apply/2` restarts the router empty, and every process
   manager on the node stays silent until the node restarts or each is
   registered again (evoq #9); keep those callbacks total (a catch-all

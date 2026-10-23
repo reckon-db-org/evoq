@@ -10,6 +10,9 @@
 %% 3. For each PM, call correlate/2 to determine process instance
 %% 4. Route to existing instance or start new one
 %%
+%% Instances are node-local: with the same process manager on several
+%% nodes, each node routes to and stops its own instances only.
+%%
 %% @author rgfaber
 -module(evoq_pm_router).
 -behaviour(gen_server).
@@ -91,11 +94,18 @@ unregister_instance(PMModule, ProcessId, Pid) ->
     _ = pg:leave(?PG_SCOPE, instance_group(PMModule, ProcessId), Pid),
     ok.
 
-%% @doc The instance of PMModule for ProcessId.
+%% @doc This node's instance of PMModule for ProcessId.
+%%
+%% Process-manager instances are node-local: a node routes an event to its
+%% own instance or starts one, never to another node's. pg shows the
+%% members of every connected node, so this reads the local ones only; with
+%% all of them, the same process manager on two nodes handed events to the
+%% other node's instance and a {stop, Id} on one node stopped the other's
+%% (evoq#10).
 -spec get_instance(atom(), binary()) -> {ok, pid()} | {error, not_found}.
 get_instance(PMModule, ProcessId) ->
     Group = instance_group(PMModule, ProcessId),
-    case pg:get_members(?PG_SCOPE, Group) of
+    case pg:get_local_members(?PG_SCOPE, Group) of
         [Pid | _] -> {ok, Pid};
         [] -> {error, not_found}
     end.
