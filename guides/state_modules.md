@@ -80,7 +80,7 @@ Used for snapshot loading and state reconstruction from external sources. If not
 
 ## Declaring the State Module
 
-Every aggregate MUST declare which state module it uses via the state_module/0 callback:
+An aggregate that uses a state module names it with the optional state_module/0 callback. evoq never calls it: it records the pairing for whoever reads the aggregate, and an aggregate without a state module leaves it out.
 
 ```erlang
 -module(counter_aggregate).
