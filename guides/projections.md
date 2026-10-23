@@ -320,7 +320,10 @@ Live positions are counted, not read from the store, so a second delivery
 of the same event (reckon-db may deliver one twice while its catch-up
 overlaps its live trigger) would move every later one. The store
 subscription drops an event whose id it consumed among the last 2000
-before counting it.
+before counting it. When its pre-subscribe ack fails, reckon-db's reconnect
+redelivers everything since the checkpoint the node had before it went
+down, so the window then reaches back to that checkpoint, however many
+events were appended in between.
 
 What dropping duplicates does not cover is order. An event appended after
 catch-up's last read and before reckon-db arms its live trigger arrives

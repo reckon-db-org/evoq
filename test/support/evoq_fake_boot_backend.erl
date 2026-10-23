@@ -12,6 +12,7 @@
 -module(evoq_fake_boot_backend).
 
 -export([seed/2, push_live/2, reset/1, delivered_count/1, persisted_checkpoint/2]).
+-export([fail_next_ack/1]).
 -export([read_all_global/3]).
 -export([subscribe/5, unsubscribe/2, ack/4, get_checkpoint/2, list/1, get_by_name/2]).
 
@@ -70,6 +71,13 @@ persisted_checkpoint(StoreId, SubName) ->
         [] -> undefined
     end.
 
+%% @doc The next ack/4 for StoreId fails, as a gateway in trouble does; the
+%% one after it works again.
+fail_next_ack(StoreId) ->
+    ensure_table(),
+    ets:insert(?MODULE, {{fail_ack, StoreId}, true}),
+    ok.
+
 ensure_table() ->
     case ets:whereis(?MODULE) of
         undefined -> ets:new(?MODULE, [named_table, public, set]);
@@ -124,6 +132,11 @@ deliver_from(StoreId, Offset, Pid) ->
 %% masking a genuinely broken start_from.
 ack(StoreId, SubName, _StreamId, Position) ->
     ensure_table(),
+    ack_unless_failing(ets:take(?MODULE, {fail_ack, StoreId}), StoreId, SubName, Position).
+
+ack_unless_failing([{_, true}], _StoreId, _SubName, _Position) ->
+    {error, injected_ack_failure};
+ack_unless_failing([], StoreId, SubName, Position) ->
     Key = {sub, StoreId, SubName},
     case ets:lookup(?MODULE, Key) of
         [{_, _}] ->

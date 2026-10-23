@@ -183,6 +183,25 @@ a_live_duplicate_delivery_shifts_no_position_test_() ->
         shutdown()
     end).
 
+%% The same reconnect after more than the dedup window was appended while
+%% the node was down (evoq #8). reckon-db redelivers from the old checkpoint,
+%% 2500 events back; a window seeded with only the last 2000 ids missed the
+%% oldest 500, counted them as new positions and projected them twice.
+a_failed_pre_subscribe_ack_after_a_long_downtime_projects_each_event_once_test_() ->
+    restart_test(fun() ->
+        StoreId = fresh_store([event(?A, N, N) || N <- lists:seq(1, 5)]),
+        boot(StoreId, [projection]),
+        ?assertEqual([1, 2, 3, 4, 5], projected()),
+        shutdown(),
+
+        evoq_fake_boot_backend:seed(StoreId, [event(?A, N, N) || N <- lists:seq(1, 2505)]),
+        ok = evoq_fake_boot_backend:fail_next_ack(StoreId),
+        boot(StoreId, [projection]),
+        timer:sleep(500),
+        ?assertEqual(lists:seq(1, 2505), projected()),
+        shutdown()
+    end).
+
 %% A reconnect whose pre-subscribe ack failed resumes reckon-db's catch-up
 %% from the older checkpoint and redelivers events this boot's own catch-up
 %% already scanned. Those are recognised as well, not counted as new.

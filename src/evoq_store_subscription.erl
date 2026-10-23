@@ -290,7 +290,7 @@ handle_continue(catch_up, #state{store_id = StoreId, opts = Opts,
     %% position and would make everything look new.
     SeenUpTo = seen_up_to(StoreId),
     {Seq0, Offset0} = catch_up_historical(StoreId, Active, SeenUpTo),
-    ack_progress(StoreId, Offset0),
+    Acked = ack_progress(StoreId, Offset0),
 
     %% Phase 2: Subscribe to new events going forward, starting from
     %% Offset0 -- everything before it was just delivered above.
@@ -309,7 +309,7 @@ handle_continue(catch_up, #state{store_id = StoreId, opts = Opts,
 
     {noreply, State#state{subscription_id = SubId, seq = Seq0, offset = Offset0,
                            last_acked = Offset0, seen_up_to = SeenUpTo,
-                           recent = recent_tail(StoreId, Offset0)}}.
+                           recent = recent_tail(StoreId, Offset0, SeenUpTo, Acked)}}.
 
 %% @private
 %% A registrant registered (or withdrew) after this subscription started.
@@ -471,29 +471,76 @@ trim({Queue, Ids}) when map_size(Ids) > ?RECENT_IDS ->
 trim(Recent) ->
     Recent.
 
-%% @private The ids of the last ?RECENT_IDS events catch-up scanned, so a
-%% redelivery of them on the live path (a reconnect resuming from an older
-%% checkpoint) is recognised too.
-recent_tail(_StoreId, 0) ->
+%% @private The ids of the events catch-up scanned that the live path may
+%% deliver again, so a redelivery of them is recognised.
+%%
+%% With the pre-subscribe ack in place, a reconnect resumes at Offset and
+%% only reckon-db's trigger/catch-up overlap can repeat anything: the last
+%% ?RECENT_IDS ids cover it. When that ack FAILED, the persisted checkpoint
+%% is still the one this boot read, SeenUpTo, and a reconnect redelivers
+%% everything from it: every event appended while the node was down. The
+%% window then reaches back to SeenUpTo, however far that is, and is not
+%% trimmed while it is seeded (evoq #8). A store with no subscription yet
+%% has nothing to reconnect to; its ack is not a failure (see acked/1).
+recent_tail(_StoreId, 0, _SeenUpTo, _Acked) ->
     {queue:new(), #{}};
-recent_tail(StoreId, Offset) ->
-    From = max(0, Offset - ?RECENT_IDS),
-    recent_from(evoq_event_store:read_all_global(StoreId, From, Offset - From)).
+recent_tail(StoreId, Offset, SeenUpTo, Acked) ->
+    seed_window(StoreId, window_start(Offset, SeenUpTo, acked(Acked)), Offset).
 
-recent_from({ok, Events}) ->
-    {_, Recent} = drop_seen(Events, {queue:new(), #{}}),
+window_start(Offset, _SeenUpTo, true) -> max(0, Offset - ?RECENT_IDS);
+window_start(Offset, SeenUpTo, false) -> min(SeenUpTo, max(0, Offset - ?RECENT_IDS)).
+
+%% @private Whether the pre-subscribe ack left the persisted checkpoint at
+%% this boot's position. A brand new subscription has none to move yet; it
+%% starts at the `start_from' this subscription hands it.
+acked(ok) -> true;
+acked({error, {subscription_not_found, _}}) -> true;
+acked({error, _}) -> false.
+
+%% @private Read [From, To) page by page and hold every id in it. A page
+%% that cannot be read is tried once more, since it fails in the same
+%% moment of gateway trouble the failed ack did; after that the window
+%% holds what was read, and says so.
+seed_window(StoreId, From, To) ->
+    seed_window(StoreId, From, To, {queue:new(), #{}}).
+
+seed_window(_StoreId, From, To, Recent) when From >= To ->
     Recent;
-recent_from({error, Reason}) ->
-    logger:warning("[evoq] Could not read the catch-up tail to recognise redeliveries: ~p",
-                   [Reason]),
-    {queue:new(), #{}}.
+seed_window(StoreId, From, To, Recent) ->
+    seed_page(read_seed_page(StoreId, From, To, 2), StoreId, From, To, Recent).
+
+read_seed_page(StoreId, From, To, Tries) ->
+    retry_seed_read(evoq_event_store:read_all_global(StoreId, From, min(?BATCH_SIZE, To - From)),
+                    StoreId, From, To, Tries - 1).
+
+retry_seed_read({error, _}, StoreId, From, To, Tries) when Tries > 0 ->
+    read_seed_page(StoreId, From, To, Tries);
+retry_seed_read(Result, _StoreId, _From, _To, _Tries) ->
+    Result.
+
+seed_page({ok, []}, _StoreId, _From, _To, Recent) ->
+    Recent;
+seed_page({ok, Events}, StoreId, From, To, Recent) ->
+    seed_window(StoreId, From + length(Events), To, lists:foldl(fun hold/2, Recent, Events));
+seed_page({error, Reason}, StoreId, From, _To, Recent) ->
+    logger:warning("[evoq] Could not read the catch-up tail of ~s at ~b to recognise "
+                   "redeliveries: ~p", [StoreId, From, Reason]),
+    Recent.
+
+%% @private Remember an event's id without trimming the window.
+hold(E, {Queue, Ids} = Recent) ->
+    hold(event_id_of(E), Queue, Ids, Recent).
+
+hold(undefined, _Queue, _Ids, Recent) -> Recent;
+hold(Id, _Queue, Ids, Recent) when is_map_key(Id, Ids) -> Recent;
+hold(Id, Queue, Ids, _Recent) -> {queue:in(Id, Queue), Ids#{Id => true}}.
 
 %% @private Acks only once at least ?ACK_EVERY_N_EVENTS have accumulated
 %% since the last ack, returning whichever Offset is now the acked one
 %% (so the caller's `last_acked' stays accurate whether or not this call
 %% actually acked).
 maybe_ack(StoreId, Offset, LastAcked) when Offset - LastAcked >= ?ACK_EVERY_N_EVENTS ->
-    ack_progress(StoreId, Offset),
+    _ = ack_progress(StoreId, Offset),
     Offset;
 maybe_ack(_StoreId, _Offset, LastAcked) ->
     LastAcked.
@@ -519,7 +566,8 @@ terminate(_Reason, #state{store_id = StoreId, offset = Offset,
     ok.
 
 ack_progress_if_ahead(StoreId, Offset, LastAcked) when Offset > LastAcked ->
-    ack_progress(StoreId, Offset);
+    _ = ack_progress(StoreId, Offset),
+    ok;
 ack_progress_if_ahead(_StoreId, _Offset, _LastAcked) ->
     ok.
 
@@ -673,17 +721,20 @@ subscribe_to_all(StoreId, _Opts, Offset0) ->
 %% @private Best-effort: persists how far this subscription has actually
 %% consumed the store, so a future restart's catch-up resumes from here
 %% instead of the beginning. A failure here is not fatal -- see
-%% handle_info/2's comment.
--spec ack_progress(atom(), non_neg_integer()) -> ok.
+%% handle_info/2's comment -- but the pre-subscribe ack's result decides how
+%% far back redeliveries are recognised (see recent_tail/4), so it is
+%% returned.
+-spec ack_progress(atom(), non_neg_integer()) -> ok | {error, term()}.
 ack_progress(StoreId, Offset) ->
-    case evoq_subscriptions:ack(StoreId, subscription_name(StoreId), undefined, Offset) of
-        ok ->
-            ok;
-        {error, Reason} ->
-            logger:warning("[evoq] Failed to ack progress (offset ~b) for ~s: ~p",
-                           [Offset, StoreId, Reason]),
-            ok
-    end.
+    ack_result(evoq_subscriptions:ack(StoreId, subscription_name(StoreId), undefined, Offset),
+               StoreId, Offset).
+
+ack_result(ok, _StoreId, _Offset) ->
+    ok;
+ack_result({error, Reason} = Error, StoreId, Offset) ->
+    logger:warning("[evoq] Failed to ack progress (offset ~b) for ~s: ~p",
+                   [Offset, StoreId, Reason]),
+    Error.
 
 %% @private Route events with a monotonically increasing sequence number.
 %% Returns the next sequence number after all events are routed.

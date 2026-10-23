@@ -65,6 +65,25 @@ The workaround (start the store subscription after every handler has
 registered) is no longer needed. Seen red first in
 `evoq_per_registrant_backfill_tests`.
 
+### Fixed: a reconnect after a failed pre-subscribe ack projects nothing twice, however long the node was down (evoq#8)
+
+The store subscription acks its catch-up position before it subscribes, so
+reckon-db's reconnect resumes there. When that ack failed, reckon-db resumed
+from the older checkpoint and redelivered every event appended while the
+node was down. The live path recognises a redelivery by its id, but its
+window held only the last 2000 ids. After more than about 2000 appends while
+down, the oldest redeliveries were counted as new positions: they were
+projected twice, and every later position was shifted by as many.
+
+- `ack_progress/2` returns its result.
+- When the pre-subscribe ack fails, the window reaches back to the
+  checkpoint this boot read, where reckon-db resumes, and is not trimmed
+  while it is seeded. A read of it that fails is tried once more. A store
+  without a subscription yet (`subscription_not_found`) is not a failure.
+
+Seen red first in `evoq_projection_restart_checkpoint_tests` (2505 events,
+2500 appended while down).
+
 ## [1.29.2] - 2026-10-23
 
 ### Fixed: an aggregate without a state module compiles without a warning (evoq#28)
