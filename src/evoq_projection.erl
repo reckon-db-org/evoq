@@ -418,15 +418,7 @@ handle_event_internal(EventType, Event, Metadata, State) ->
             %% Already processed, skip
             {ok, State};
         false ->
-            FailureContext = #evoq_failure_context{
-                handler_module = ProjectionModule,
-                event = Event,
-                error = undefined,
-                attempt_number = 1,
-                first_failure_at = erlang:system_time(millisecond),
-                last_failure_at = erlang:system_time(millisecond),
-                stacktrace = []
-            },
+            FailureContext = evoq_failure_context:new(ProjectionModule, Event, undefined),
             project_with_retry(EventType, Event, Metadata, EventVersion,
                                FailureContext, State)
     end.
@@ -535,10 +527,7 @@ projection_failed(EventType, Event, Metadata, EventVersion, Reason,
         error => Reason
     }),
 
-    UpdatedContext = FailureContext#evoq_failure_context{
-        error = Reason,
-        last_failure_at = erlang:system_time(millisecond)
-    },
+    UpdatedContext = evoq_failure_context:failed(Reason, FailureContext),
 
     %% Ask the projection (or the shared default) what to do next
     Action = evoq_error_handler:handle_error(
@@ -553,13 +542,13 @@ projection_failed(EventType, Event, Metadata, EventVersion, Reason,
 execute_error_action(retry, EventType, Event, Metadata, EventVersion,
                      FailureContext, State) ->
     project_with_retry(EventType, Event, Metadata, EventVersion,
-                       increment_attempt(FailureContext), State);
+                       evoq_failure_context:increment(FailureContext), State);
 
 execute_error_action({retry, DelayMs}, EventType, Event, Metadata, EventVersion,
                      FailureContext, State) ->
     timer:sleep(DelayMs),
     project_with_retry(EventType, Event, Metadata, EventVersion,
-                       increment_attempt(FailureContext), State);
+                       evoq_failure_context:increment(FailureContext), State);
 
 execute_error_action(skip, _EventType, Event, Metadata, _EventVersion,
                      FailureContext, State) ->
@@ -580,10 +569,6 @@ execute_error_action({dead_letter, Reason}, _EventType, Event, Metadata,
     _ = evoq_dead_letter:store(Event, ProjectionModule, FailureContext, Reason),
     log_dropped({dead_letter, Reason}, Event, Metadata, FailureContext, State),
     dropped_checkpoint(EventVersion, State).
-
-%% @private A retry re-runs project/4 on the same state; nothing has moved.
-increment_attempt(#evoq_failure_context{attempt_number = N} = Ctx) ->
-    Ctx#evoq_failure_context{attempt_number = N + 1}.
 
 %% @private
 log_dropped(Why, Event, Metadata, #evoq_failure_context{attempt_number = Attempt,

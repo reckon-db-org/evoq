@@ -262,15 +262,7 @@ valid_replay_policy(Other, Module) -> error({bad_replay_policy, Module, Other}).
 
 %% @private
 handle_event_internal(EventType, Event, Metadata, State) ->
-    FailureContext = #evoq_failure_context{
-        handler_module = State#state.handler_module,
-        event = Event,
-        error = undefined,
-        attempt_number = 1,
-        first_failure_at = erlang:system_time(millisecond),
-        last_failure_at = erlang:system_time(millisecond),
-        stacktrace = []
-    },
+    FailureContext = evoq_failure_context:new(State#state.handler_module, Event, undefined),
     handle_event_with_retry(EventType, Event, Metadata, State, FailureContext).
 
 %% @private
@@ -327,10 +319,7 @@ handle_event_with_retry(EventType, Event, Metadata, State, FailureContext) ->
             }),
 
             %% Update failure context
-            UpdatedContext = FailureContext#evoq_failure_context{
-                error = Reason,
-                last_failure_at = erlang:system_time(millisecond)
-            },
+            UpdatedContext = evoq_failure_context:failed(Reason, FailureContext),
 
             %% Get error action from handler or use default
             Action = evoq_error_handler:handle_error(
@@ -345,13 +334,13 @@ handle_event_with_retry(EventType, Event, Metadata, State, FailureContext) ->
 %% Execute error action based on handler's decision
 execute_error_action(retry, EventType, Event, Metadata, State, FailureContext) ->
     %% Retry immediately
-    NewContext = increment_attempt(FailureContext),
+    NewContext = evoq_failure_context:increment(FailureContext),
     handle_event_with_retry(EventType, Event, Metadata, State, NewContext);
 
 execute_error_action({retry, DelayMs}, EventType, Event, Metadata, State, FailureContext) ->
     %% Retry after delay
     timer:sleep(DelayMs),
-    NewContext = increment_attempt(FailureContext),
+    NewContext = evoq_failure_context:increment(FailureContext),
     handle_event_with_retry(EventType, Event, Metadata, State, NewContext);
 
 execute_error_action(skip, _EventType, _Event, Metadata, State, _FailureContext) ->
@@ -378,6 +367,3 @@ execute_error_action({dead_letter, Reason}, _EventType, Event, Metadata, State, 
     NewCheckpoint = maps:get(version, Metadata, Checkpoint),
     {dropped, State#state{checkpoint = NewCheckpoint}}.
 
-%% @private
-increment_attempt(#evoq_failure_context{attempt_number = N} = Ctx) ->
-    Ctx#evoq_failure_context{attempt_number = N + 1}.

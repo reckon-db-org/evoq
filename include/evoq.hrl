@@ -140,8 +140,13 @@
     event :: map(),
     error :: term(),
     attempt_number = 1 :: pos_integer(),
+    %% Wall clock, for people reading a dead letter.
     first_failure_at :: integer(),
     last_failure_at :: integer(),
+    %% Monotonic clock, for measuring: a wall-clock step between two
+    %% failures must not reach a backoff policy as negative time (evoq#12).
+    first_failure_mono :: integer(),
+    last_failure_mono :: integer(),
     stacktrace = [] :: list()
 }).
 

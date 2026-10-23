@@ -13,6 +13,24 @@ evoq is built, tested and documented on Erlang/OTP 28 (CI: 28.4.3); the
 README says so. The default fact serialisation uses the OTP `json` module,
 in OTP since 27.
 
+### Fixed: a failed append closes its execute span (evoq#11)
+
+`[evoq, aggregate, execute, start]` was followed by neither `stop` nor
+`exception` when the append failed (a version conflict, an integrity
+refusal, a store timeout), so a span tracer held an open span per conflict.
+It closes with `exception` now, carrying the store's reason.
+
+### Fixed: a failure's duration is elapsed time, never negative (evoq#12)
+
+`evoq_failure_context:get_duration/1` subtracted two wall-clock readings, so
+an NTP step between a failure and its retry handed `on_error/4` a negative or
+inflated duration. It reads the monotonic clock now: the record carries
+`first_failure_mono` and `last_failure_mono` next to the wall-clock fields
+that dead letters show. The event handler and the projection built their
+contexts by hand and bypassed the module; they use
+`evoq_failure_context:new/3`, the new `failed/2` and `increment/1`, and the
+first failure starts the duration rather than the moment the event arrived.
+
 ### Fixed: a checkpoint store is refused next to a read model that does not survive a restart (evoq#1)
 
 A projection skips every event at or below its checkpoint. With a checkpoint
