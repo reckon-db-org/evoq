@@ -104,47 +104,50 @@ jobs:
           rebar3-version: ${{ env.REBAR3_VERSION }}
           version-type: strict
 
-      # ⚠ The hex dependency cache and the Dialyzer PLT, deliberately NOT the
-      # whole `_build'.
+      # ⚠ The hex dependency cache ONLY: not the whole `_build', and not the
+      # Dialyzer PLT either.
       #
       # A cached `_build' restores stale beams, and rebar3 runs test modules
       # from the build path: a DELETED test module keeps being run, and kept
       # failing, from its stale beam. That has cost this team a false finding
-      # already. Dependency downloads and the PLT are the slow parts and
-      # neither has that hazard, so cache exactly those.
+      # already.
       #
       # This comment used to say: every dep here is an EXACT pin, so a restored
-      # cache cannot hold a stale "latest matching" release; if a range ever
-      # appears in rebar.config, this comment stops being true. A range appeared
+      # cache cannot hold a stale "latest matching" release, and if a range ever
+      # appears in rebar.config this comment stops being true. A range appeared
       # -- `{macula_testkit, "~> 0.2"}' in the test profile -- so it stopped being
       # true, and the cache was decided here on a premise that no longer held
-      # (#32). It is answered structurally instead of by re-reading rebar.config
-      # every time: the hex REGISTRY is no longer cached at all, so this job
+      # (#32). It is answered structurally rather than by re-reading rebar.config
+      # every time a range is added: the hex REGISTRY
+      # (`~/.cache/rebar3/hex/packages.idx') is not cached at all, so this job
       # cannot resolve from a stale index whatever ranges exist now or later.
-      # The tarballs and the OTP base PLT are still cached, and neither can skew a
-      # resolution -- a tarball is keyed by version and read only after one is
-      # chosen.
       #
-      # `-freshdeps' IN THE KEY AND IN `restore-keys' IS LOAD-BEARING: a restore
-      # lays an archive's files back down wherever the path list now reads, and a
-      # bare prefix here would then restore any archive saved before this change,
-      # packages.idx and all. Scoping both to the new prefix abandons those.
+      # What the cache holds, in full: the OTP base PLT, keyed by the OTP version,
+      # and `hex/hexpm/packages/<name>-<vsn>.tar', keyed by version and read only
+      # AFTER one is chosen. Neither can decide what gets tested.
       #
-      # `_build/default/*_plt' stays cached here. It is a separate question with a
-      # precedent against it -- reckon-db removed it because a PLT built against
-      # older deps let the dialyzer ratchet pass while a fresh PLT reported 8
-      # findings (reckon-db#20) -- and dropping it here would surface whatever it
-      # hides, which is its own package.
-      - name: Cache hex tarballs and the Dialyzer PLT
+      # `-freshdeps-noplt' IN THE KEY AND IN `restore-keys' IS LOAD-BEARING: a
+      # restore lays an archive's files back down wherever the path list now
+      # reads, and a bare prefix here would restore any archive saved before these
+      # changes, with its packages.idx and its project PLT.
+      #
+      # `_build/default/*_plt' IS NOT CACHED, for the same reason as the registry
+      # one step out: the project PLT holds the DEPENDENCIES' types, so a PLT
+      # built against older deps let the dialyzer ratchet pass while a fresh PLT
+      # reported findings -- reckon-db's version of this hid 8 (reckon-db#20).
+      # The `_build' rule above does not reach it: a stale PLT does not re-run a
+      # deleted test module, it silently grades the wrong types. Measured before
+      # dropping it: a PLT built from scratch at this tip reports the same findings
+      # the baseline already records, so it surfaces nothing here.
+      - name: Cache hex tarballs and OTP's base PLT
         uses: actions/cache@v4
         with:
           path: |
             ~/.cache/rebar3/rebar3_*_plt
             ~/.cache/rebar3/hex/hexpm/packages
-            _build/default/*_plt
-          key: evoq-otp${{ env.OTP_VERSION }}-freshdeps-${{ hashFiles('rebar.config', 'src/*.app.src') }}
+          key: evoq-otp${{ env.OTP_VERSION }}-freshdeps-noplt-${{ hashFiles('rebar.config', 'src/*.app.src') }}
           restore-keys: |
-            evoq-otp${{ env.OTP_VERSION }}-freshdeps-
+            evoq-otp${{ env.OTP_VERSION }}-freshdeps-noplt-
 
       - name: Compile
         run: rebar3 compile
