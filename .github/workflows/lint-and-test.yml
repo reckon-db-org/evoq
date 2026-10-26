@@ -113,21 +113,38 @@ jobs:
       # already. Dependency downloads and the PLT are the slow parts and
       # neither has that hazard, so cache exactly those.
       #
-      # No `rebar3 upgrade --all' step of the kind mcl-om needs: every dep here
-      # is an EXACT pin (telemetry 1.3.0, proper 1.4.0, meck 0.9.2), so a
-      # restored cache cannot be holding a stale "latest matching" release.
-      # rebar.lock is untracked here, per the house rule, and the cache key
-      # does not need it while the pins stay exact. If a range ever appears in
-      # rebar.config, this comment stops being true.
-      - name: Cache hex deps and the Dialyzer PLT
+      # This comment used to say: every dep here is an EXACT pin, so a restored
+      # cache cannot hold a stale "latest matching" release; if a range ever
+      # appears in rebar.config, this comment stops being true. A range appeared
+      # -- `{macula_testkit, "~> 0.2"}' in the test profile -- so it stopped being
+      # true, and the cache was decided here on a premise that no longer held
+      # (#32). It is answered structurally instead of by re-reading rebar.config
+      # every time: the hex REGISTRY is no longer cached at all, so this job
+      # cannot resolve from a stale index whatever ranges exist now or later.
+      # The tarballs and the OTP base PLT are still cached, and neither can skew a
+      # resolution -- a tarball is keyed by version and read only after one is
+      # chosen.
+      #
+      # `-freshdeps' IN THE KEY AND IN `restore-keys' IS LOAD-BEARING: a restore
+      # lays an archive's files back down wherever the path list now reads, and a
+      # bare prefix here would then restore any archive saved before this change,
+      # packages.idx and all. Scoping both to the new prefix abandons those.
+      #
+      # `_build/default/*_plt' stays cached here. It is a separate question with a
+      # precedent against it -- reckon-db removed it because a PLT built against
+      # older deps let the dialyzer ratchet pass while a fresh PLT reported 8
+      # findings (reckon-db#20) -- and dropping it here would surface whatever it
+      # hides, which is its own package.
+      - name: Cache hex tarballs and the Dialyzer PLT
         uses: actions/cache@v4
         with:
           path: |
-            ~/.cache/rebar3
+            ~/.cache/rebar3/rebar3_*_plt
+            ~/.cache/rebar3/hex/hexpm/packages
             _build/default/*_plt
-          key: evoq-otp${{ env.OTP_VERSION }}-${{ hashFiles('rebar.config', 'src/*.app.src') }}
+          key: evoq-otp${{ env.OTP_VERSION }}-freshdeps-${{ hashFiles('rebar.config', 'src/*.app.src') }}
           restore-keys: |
-            evoq-otp${{ env.OTP_VERSION }}-
+            evoq-otp${{ env.OTP_VERSION }}-freshdeps-
 
       - name: Compile
         run: rebar3 compile
