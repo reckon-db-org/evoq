@@ -104,8 +104,11 @@ jobs:
           rebar3-version: ${{ env.REBAR3_VERSION }}
           version-type: strict
 
-      # ⚠ The hex dependency cache ONLY: not the whole `_build', and not the
-      # Dialyzer PLT either.
+      # ⚠ Two different PLTs live here, and the distinction is the whole point:
+      # OTP's own base PLT (~/.cache/rebar3/rebar3_<otp>_plt) IS cached, because
+      # it depends on nothing but the OTP release; the PROJECT's PLT
+      # (_build/default/*_plt) is NOT, because it holds this project's and its
+      # DEPENDENCIES' types. Nor is the whole `_build'.
       #
       # A cached `_build' restores stale beams, and rebar3 runs test modules
       # from the build path: a DELETED test module keeps being run, and kept
