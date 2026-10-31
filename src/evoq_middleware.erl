@@ -50,8 +50,9 @@
 %% rate limit -- let commands through on any node that had not happened to load
 %% it.
 %%
-%% The module is therefore loaded first, as `evoq_command:validate_with_module/1'
-%% and `evoq_event_store:new_stream_id/1' already do. Two answers follow from
+%% The module is therefore loaded first, as `evoq_command` already does before it
+%% asks a command module for a validator, and as `evoq_event_store:new_stream_id/1'
+%% does before the same check on an adapter. Two answers follow from
 %% that, and they are different:
 %%
 %%   - a stage the module does not export is still SKIPPED. That is a middleware

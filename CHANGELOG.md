@@ -25,6 +25,31 @@ long stream and nothing in the telemetry saying a snapshot had been skipped.
 adapter. A module that cannot be loaded at all is still treated as
 snapshot-less, which is the old behaviour and the safe one.
 
+### Security: a middleware in the chain always runs (evoq#39)
+
+`evoq_middleware:chain/3` skipped a stage whose module `erlang:function_exported/3`
+said did not export it. That function answers **false for a module the VM has
+not loaded**, and skipping the stage means never calling it, so the module
+stayed unloaded and was skipped on every dispatch after that. Middleware
+arrives as bare atoms from `application:get_env(evoq, middleware, [])` and from
+a dispatch's `middleware` option, and nothing calls those modules first: a
+deny-all `before_dispatch` — an authorization, a validation, a rate limit — let
+commands through on any node that had not happened to load it. It failed open.
+
+The module is loaded first now, and the two answers are kept apart. A stage the
+module does not export is still SKIPPED, which is the contract for a middleware
+implementing one of the three optional callbacks and nothing else. A module
+that **cannot be loaded** refuses the dispatch and halts with
+`{error, {middleware_not_loadable, Module, Reason}}`: a name in the chain that
+is not there is a misconfiguration, never an opt-out.
+
+The same `function_exported/3`-on-a-cold-module mistake was audited and fixed
+at every other site where its false branch is a wrong answer rather than a
+documented default (`evoq_event_handler`, `evoq_pm_instance`,
+`evoq_read_model`, `evoq_decision_actor`, `evoq_decision_runtime`,
+`evoq_event_store`, `evoq_store_inspector`); the call sites that legitimately
+need no load, and the reason each one is one, are comments beside the calls.
+
 ## [1.30.2] - 2026-10-31
 
 ### Fixed: a store read error is never an empty stream (evoq#34)
