@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security: an after-stage halt cannot erase a result the command produced (evoq#45)
+
+`after_dispatch` and `after_failure` run when the store has already accepted the
+command or refused it, and the router has put that outcome on the pipeline —
+`{ok, Version, Events}`, or the error. A middleware that halted there and left no
+response took the outcome with it: `dispatch/2` answered `undefined` for a
+command that had run, and `handle_consistency/4` only waits on a response it
+recognises, so a `strong` or `{handlers, [...]}` dispatch answered **without
+waiting for a single handler**. The guarantee the caller asked for neither
+happened nor was refused, and a caller that denies only on `{error, _}` read
+`undefined` as an answer.
+
+An after-stage halt now stops the chain and nothing else: if it leaves no
+response, the outcome the router already recorded is restored. A middleware that
+does respond keeps its response, which is the same rule the router applies to a
+halted `before_dispatch` (evoq#41) — a stated response is the middleware's
+decision, an erased one is not.
+
 ### Security: a halt without a response is never reported as `undefined` (evoq#41)
 
 `evoq_command_router:dispatch/2` built the pipeline with `response = undefined`.

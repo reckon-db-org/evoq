@@ -195,7 +195,8 @@ execute_on_aggregate_with_state(Pipeline, Pid, Middleware, StartTime, Context) -
             Pipeline4 = evoq_middleware:respond(BaseResult, Pipeline3),
             Pipeline5 = evoq_middleware:chain(Pipeline4, after_dispatch, Middleware),
 
-            ConsistencyResult = handle_consistency(Pipeline5, Context, Waiter, Version),
+            ConsistencyResult = handle_consistency(keep_response_if_erased(Pipeline5, BaseResult),
+                                                   Context, Waiter, Version),
             FinalResult = with_agg_state(ConsistencyResult, AggState),
             emit_stop_telemetry(StartTime, Command, ConsistencyResult),
             FinalResult;
@@ -248,7 +249,8 @@ execute_on_aggregate(Pipeline, Pid, Middleware, StartTime, Context) ->
             Pipeline5 = evoq_middleware:chain(Pipeline4, after_dispatch, Middleware),
 
             %% Handle consistency
-            FinalResult = handle_consistency(Pipeline5, Context, Waiter, Version),
+            FinalResult = handle_consistency(keep_response_if_erased(Pipeline5, Result),
+                                             Context, Waiter, Version),
             emit_stop_telemetry(StartTime, Command, FinalResult),
             FinalResult;
 
@@ -304,7 +306,29 @@ handle_failure(Pipeline, Error, Middleware, StartTime) ->
         error => Error
     }),
 
-    evoq_middleware:get_response(Pipeline4).
+    evoq_middleware:get_response(keep_response_if_erased(Pipeline4, Error)).
+
+%% @private
+%% An after-stage halt may stop the chain; it may not erase a result the command
+%% already produced (evoq#45).
+%%
+%% By the time `after_dispatch' or `after_failure' runs, the store has accepted
+%% the command or refused it, and the router has already put that outcome on the
+%% pipeline -- `{ok, Version, Events}' or the error. A middleware that halts and
+%% leaves no response used to take the outcome away with it: the caller got
+%% `undefined' for a command that ran, and `handle_consistency/4' saw nothing it
+%% recognised, so a `strong' dispatch answered without waiting for a single
+%% handler. The guarantee it asked for neither happened nor was refused.
+%%
+%% A middleware that DOES respond keeps its response: that is its decision to
+%% make, the same rule the router applies to a halted `before_dispatch'
+%% (evoq#41). Only an erased response is restored, and only with the outcome the
+%% router itself put there.
+keep_response_if_erased(Pipeline, Response) ->
+    case evoq_middleware:get_response(Pipeline) of
+        undefined -> evoq_middleware:respond(Response, Pipeline);
+        _ -> Pipeline
+    end.
 
 %% @private Open the waiter BEFORE the append. An ack can only be sent to a
 %% waiter that is already a member of the stream's group, and a handler can

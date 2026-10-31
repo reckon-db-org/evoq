@@ -17,6 +17,7 @@
 -include_lib("eunit/include/eunit.hrl").
 
 -define(STREAM_VERSION, 7).
+-define(AFTER_HALT_BLANK, evoq_middleware_after_halt_blank).
 
 %%====================================================================
 %% The guarantee
@@ -144,6 +145,53 @@ a_cascade_does_not_wait_for_its_own_acknowledgement_test_() ->
     end}.
 
 %%====================================================================
+%% An after-stage halt may not erase a result the command already produced
+%%====================================================================
+
+%% THE EVENTUAL CASE (evoq#45). The command ran and the store accepted its
+%% events. An `after_dispatch' middleware that halts and leaves no response
+%% used to make the dispatch answer `undefined', which a caller that denies
+%% only on `{error, _}' reads as an answer.
+an_after_dispatch_halt_that_left_no_response_keeps_the_stored_result_test_() ->
+    {timeout, 30, fun() ->
+        with_probe(0, <<"stream-after-halt">>, inline_delivery,
+          fun() ->
+              ?assertMatch({ok, ?STREAM_VERSION, [_]},
+                           dispatch_with_middleware(eventual, [?AFTER_HALT_BLANK],
+                                                    <<"stream-after-halt">>))
+          end)
+    end}.
+
+%% THE GUARANTEE CASE. The same halt used to skip the whole consistency wait:
+%% a `strong' dispatch answered `undefined' in about a millisecond, having
+%% waited for nothing, because `handle_consistency/4' only waits on a
+%% `{ok, _, Appended}' response and the stored one had been erased.
+an_after_dispatch_halt_that_left_no_response_still_waits_for_strong_test_() ->
+    {timeout, 30, fun() ->
+        with_probe(300, <<"stream-after-halt-strong">>, spawn_delivery,
+          fun() ->
+              Started = erlang:monotonic_time(millisecond),
+              ?assertMatch({ok, ?STREAM_VERSION, [_]},
+                           dispatch_with_middleware(strong, [?AFTER_HALT_BLANK],
+                                                    <<"stream-after-halt-strong">>)),
+              Waited = erlang:monotonic_time(millisecond) - Started,
+              ?assert(Waited >= 250)
+          end)
+    end}.
+
+%% THE FAILURE PATH, same shape: the store refused the append, the router put
+%% `{error, store_down}' on the pipeline, and an `after_failure' halt that left
+%% no response answered `undefined' instead of the error it replaced.
+an_after_failure_halt_that_left_no_response_keeps_the_error_test_() ->
+    {timeout, 30, fun() ->
+        with_failing_store(fun() ->
+            ?assertEqual({error, store_down},
+                         dispatch_with_middleware(eventual, [?AFTER_HALT_BLANK],
+                                                  <<"stream-after-halt-failure">>))
+        end)
+    end}.
+
+%%====================================================================
 %% Helpers
 %%====================================================================
 
@@ -155,6 +203,29 @@ dispatch(Consistency, CommandType, Stream) ->
       evoq_command:new(strong_probe, evoq_strong_probe_aggregate, Stream,
                        #{command_type => CommandType}),
       #{store_id => test_store, consistency => Consistency}).
+
+dispatch_with_middleware(Consistency, Middleware, Stream) ->
+    evoq_command_router:dispatch(
+      evoq_command:new(strong_probe, evoq_strong_probe_aggregate, Stream,
+                       #{command_type => <<"emit_strong_probe">>}),
+      #{store_id => test_store, consistency => Consistency, middleware => Middleware}).
+
+%% A store whose append refuses: the dispatch takes the failure path, which is
+%% where `after_failure' runs.
+with_failing_store(Body) ->
+    evoq_test_isolation:stop_leftover_evoq(),
+    {ok, Started} = application:ensure_all_started(evoq),
+    meck:new(evoq_event_store, [passthrough, no_link]),
+    meck:expect(evoq_event_store, read, 5,
+                fun(_Store, _Stream, _From, _Count, _Dir) -> {ok, []} end),
+    meck:expect(evoq_event_store, append, 4,
+                fun(_Store, _Stream, _Expected, _Events) -> {error, store_down} end),
+    try
+        Body()
+    after
+        meck:unload(evoq_event_store),
+        lists:foreach(fun application:stop/1, lists:reverse(Started))
+    end.
 
 %% Every test dispatches to its OWN stream. EUnit runs one module's tests in
 %% one process, so an acknowledgment left in the mailbox by an earlier test
