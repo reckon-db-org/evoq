@@ -184,11 +184,33 @@ init({AggregateModule, AggregateId, StoreId}) ->
 %% process, and the dispatcher that was waiting on the stream finds out through
 %% execute_command/2, which answers `{error, Reason}' rather than letting the
 %% caller exit with this process.
+%%
+%% ⚠ A STORE THAT COULD NOT BE READ IS NOT A STREAM WITH NOTHING IN IT
+%% (evoq#34). `load_or_init/3' used to answer a read failure with
+%% `Module:init/1' at version -1: the process registered, stayed up and served
+%% that state to every later `get_state/1' until it passivated or restarted. So
+%% every read that GATES on aggregate state was answered "nothing has happened
+%% yet" by a store error -- a revoked station read as not revoked, an ended
+%% membership as never admitted, a lapsed provider authorization as `:none'.
+%% Only `{error, _}' takes the stopping branch. A stream that does not exist is
+%% `{ok, []}' on the first page and is still a fresh aggregate.
 handle_continue(load, #evoq_aggregate_state{aggregate_module = Module,
                                             stream_id = AggregateId,
                                             store_id = StoreId} = State) ->
-    {InitialState, Version} = load_or_init(Module, AggregateId, StoreId),
+    case load_or_init(Module, AggregateId, StoreId) of
+        %% FIRST, and it has to be first: `{error, {hydration_failed, R}}' is a
+        %% 2-tuple, so the success clause below would match it and load a
+        %% process whose state is the atom `error' at version
+        %% `{hydration_failed, R}'. That is the same class of mistake as the
+        %% defect this fixes, one level up.
+        {error, {hydration_failed, _} = Reason} ->
+            {stop, Reason, State};
+        {InitialState, Version} ->
+            hydrated(Module, AggregateId, StoreId, InitialState, Version, State)
+    end.
 
+%% @private
+hydrated(Module, AggregateId, StoreId, InitialState, Version, State) ->
     telemetry:execute(?TELEMETRY_AGGREGATE_INIT, #{}, #{
         aggregate_id => AggregateId,
         aggregate_module => Module,
@@ -398,7 +420,14 @@ terminate(_Reason, #evoq_aggregate_state{stream_id = StreamId}) ->
 get_lifespan_module() ->
     application:get_env(evoq, lifespan_module, evoq_aggregate_lifespan_default).
 
-%% @private
+%% @private Load the stream: a snapshot if there is one, then every event
+%% after it.
+%%
+%% Returns `{error, {hydration_failed, Reason}}' when the store could not be
+%% read, and that is the whole point of the tag (evoq#34): the two clauses
+%% below used to answer a read failure with `init_fresh/2', so the caller could
+%% not tell a stream that does not exist from one it was not allowed to read.
+%% Nothing on this path turns a `{error, _}' into state any more.
 load_or_init(Module, AggregateId, StoreId) ->
     %% Try to load snapshot first
     from_snapshot_or_replay(try_load_snapshot(Module, StoreId, AggregateId),
@@ -418,10 +447,13 @@ from_snapshot_or_replay({error, not_found}, Module, StoreId, AggregateId) ->
         Module, AggregateId).
 
 replayed_or_fresh({ok, State, Version}, _Module, _AggregateId) -> {State, Version};
-replayed_or_fresh({error, _}, Module, AggregateId) -> init_fresh(Module, AggregateId).
+replayed_or_fresh({error, Reason}, _Module, _AggregateId) ->
+    {error, {hydration_failed, Reason}}.
 
 replayed_from_zero({ok, State, Version}, _Module, _AggregateId) when State =/= undefined ->
     {State, Version};
+replayed_from_zero({error, Reason}, _Module, _AggregateId) ->
+    {error, {hydration_failed, Reason}};
 replayed_from_zero(_, Module, AggregateId) ->
     init_fresh(Module, AggregateId).
 

@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed: a store read error is never an empty stream (evoq#34)
+
+`load_or_init/3` discarded the error the replay had already classified: both
+of its clauses fell through to `init_fresh/2`, so a failed event-store read
+started the aggregate from `Module:init/1` at version -1. The process
+registered, stayed up and served that state to every later `get_state/1` until
+it passivated or restarted, which made every read that GATES on aggregate
+state fail open: a revoked station read as not revoked, an ended membership as
+never admitted, a lapsed provider authorization as `:none`. A read error came
+back as "nothing has happened yet".
+
+A failed replay now stops the aggregate with `{hydration_failed, Reason}`, and
+a caller that was waiting on it is answered `{error, {hydration_failed,
+Reason}}` instead of state. Nothing stays registered for the stream, so the
+next caller meets the store again rather than inheriting the wrong answer. A
+stream that does not exist is `{ok, []}` on the first page and is still a
+fresh aggregate; only `{error, _}` changed.
+
+**Behaviour change to match on.** A read of a stream whose load has already
+failed is `{error, not_running}` rather than `{error, {hydration_failed,
+Reason}}`, because `gen_server:call` to a pid that is gone cannot carry a
+reason. Both are errors; neither is a fresh aggregate. Callers that match
+`{error, _}`, which is the documented contract, are unaffected.
+
 ## [1.30.1] - 2026-10-23
 
 1.30.0 was tagged and never reached hex: its docs did not build (a
