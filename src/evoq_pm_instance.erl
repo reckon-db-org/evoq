@@ -371,6 +371,9 @@ pm_dispatch_result({error, Reason}, PMModule, ProcessId) ->
     {error, Reason}.
 
 %% @private
+%% No load first, and none needed: this runs from the compensation path of a
+%% process this module started, so the PM module's own init/1 has already loaded
+%% it. The same reasoning as record_if_compensating/3 below (and evoq#36/#39).
 handle_compensation(FailedCommand, #evoq_pm_state{
     pm_module = PMModule,
     process_id = ProcessId,

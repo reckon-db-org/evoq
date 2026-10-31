@@ -58,7 +58,7 @@
 
 %% @doc Handle an error using the handler's error strategy.
 %%
-%% ⚠ NO `code:ensure_loaded/1' HERE, UNLIKE `evoq_aggregate:try_load_snapshot/3'
+%% ⚠ NO `code:ensure_loaded/1' HERE, UNLIKE `evoq_aggregate''s snapshot load
 %% (evoq#36), and the difference is where the module has been. Every caller of
 %% this function reaches it from a handler call that already RETURNED
 %% `{error, Reason}' -- `evoq_event_handler' after

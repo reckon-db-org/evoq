@@ -50,10 +50,10 @@
 %% rate limit -- let commands through on any node that had not happened to load
 %% it.
 %%
-%% The module is therefore loaded first, as `evoq_command` already does before it
+%% The module is therefore loaded first, as `evoq_command' already does before it
 %% asks a command module for a validator, and as `evoq_event_store:new_stream_id/1'
-%% does before the same check on an adapter. Two answers follow from
-%% that, and they are different:
+%% does before the same check on an adapter. Three answers follow from that, and
+%% they are different:
 %%
 %%   - a stage the module does not export is still SKIPPED. That is a middleware
 %%     implementing one of the three optional callbacks and nothing else, which
@@ -61,7 +61,21 @@
 %%   - a module that cannot be loaded REFUSES THE DISPATCH: the pipeline halts
 %%     with `{error, {middleware_not_loadable, Module, Reason}}'. A name in the
 %%     chain that is not there is a misconfiguration, not an opt-out, and
-%%     skipping it would make a missing security check look like a passing one.
+%%     skipping it would make a missing security check look like a passing one;
+%%   - a module that LOADS but exports none of `before_dispatch/1',
+%%     `after_dispatch/1' and `after_failure/1' is not a middleware at all and
+%%     also REFUSES THE DISPATCH, halting with `{error, {not_a_middleware,
+%%     Module}}'. Configuration that names an API module instead of the
+%%     middleware module beside it, or names a module that has been renamed,
+%%     otherwise looks exactly like an authorization that said yes.
+%%
+%% ⚠ IN AN `after_dispatch' OR `after_failure' CHAIN A REFUSAL ARRIVES AFTER THE
+%% COMMAND HAS ALREADY RUN. The halt overwrites whatever response the pipeline
+%% carried -- `{ok, Version, Events}' included -- with the refusal, so a caller
+%% that retries on any error re-dispatches a command the store has already
+%% accepted. A refusal from `before_dispatch' is safe to treat as a failure; one
+%% from an after_* chain is not, and the right answer is to have the chain's
+%% configuration checked at startup rather than at dispatch.
 -spec chain(#evoq_pipeline{}, atom(), [atom()]) -> #evoq_pipeline{}.
 chain(Pipeline, _Stage, []) ->
     Pipeline;
@@ -83,13 +97,29 @@ run_stage(Module, Stage, Pipeline) ->
     end.
 
 %% @private
-%% Loaded and present: run it. Loaded and the stage not exported: the middleware
-%% does not act at this point, and skipping it is the contract, not an accident.
+%% A middleware implements at least one of the three optional callbacks and may
+%% implement only one of them. A module that implements NONE is not middleware,
+%% and skipping it is how a misconfigured name turns into a missing check.
 run_stage_loaded(Module, Stage, Pipeline) ->
+    case is_middleware(Module) of
+        true -> run_stage_exported(Module, Stage, Pipeline);
+        false -> {error, {not_a_middleware, Module}}
+    end.
+
+%% @private
+%% Loaded and the stage not exported: the middleware does not act at this point,
+%% and skipping it is the contract, not an accident.
+run_stage_exported(Module, Stage, Pipeline) ->
     case erlang:function_exported(Module, Stage, 1) of
         true -> {ok, Module:Stage(Pipeline)};
         false -> {ok, Pipeline}
     end.
+
+%% @private
+is_middleware(Module) ->
+    erlang:function_exported(Module, before_dispatch, 1)
+        orelse erlang:function_exported(Module, after_dispatch, 1)
+        orelse erlang:function_exported(Module, after_failure, 1).
 
 %% @doc Assign a value to the pipeline.
 -spec assign(atom(), term(), #evoq_pipeline{}) -> #evoq_pipeline{}.

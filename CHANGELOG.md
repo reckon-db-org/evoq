@@ -38,10 +38,23 @@ commands through on any node that had not happened to load it. It failed open.
 
 The module is loaded first now, and the two answers are kept apart. A stage the
 module does not export is still SKIPPED, which is the contract for a middleware
-implementing one of the three optional callbacks and nothing else. A module
-that **cannot be loaded** refuses the dispatch and halts with
-`{error, {middleware_not_loadable, Module, Reason}}`: a name in the chain that
-is not there is a misconfiguration, never an opt-out.
+implementing one of the three optional callbacks and nothing else. Two shapes
+are refused instead, because in both of them a missing check would look exactly
+like a passing one:
+
+- a module that **cannot be loaded** halts the dispatch with
+  `{error, {middleware_not_loadable, Module, Reason}}` — a name in the chain
+  that is not there is a misconfiguration, never an opt-out;
+- a module that **loads but exports none** of `before_dispatch/1`,
+  `after_dispatch/1` and `after_failure/1` halts it with
+  `{error, {not_a_middleware, Module}}` — what configuration looks like when it
+  names an API module instead of the middleware beside it.
+
+⚠ A refusal from an `after_dispatch` or `after_failure` chain arrives after the
+command has already run, and it replaces the response the pipeline carried —
+`{ok, Version, Events}` included — with the refusal. A caller that retries on
+any error would re-dispatch a command the store has already accepted. Only a
+refusal from `before_dispatch` is safe to treat as a plain failure.
 
 The same `function_exported/3`-on-a-cold-module mistake was audited and fixed
 at every other site where its false branch is a wrong answer rather than a
