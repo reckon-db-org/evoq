@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.30.2] - 2026-10-31
+
 ### Fixed: a store read error is never an empty stream (evoq#34)
 
 `load_or_init/3` discarded the error the replay had already classified: both
