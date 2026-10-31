@@ -741,6 +741,11 @@ save_snapshot(#evoq_aggregate_state{
     state = AggState,
     version = Version
 } = State) ->
+    %% No ensure_loaded here, on purpose (evoq#39): this runs after the
+    %% aggregate has executed or applied at least one event, so its module has
+    %% been called and is loaded. The same does not hold at LOAD time, which is
+    %% why `try_load_snapshot/3' asks the only cold-time question with an
+    %% ensure in front of it.
     case erlang:function_exported(Module, snapshot, 1) of
         true ->
             SnapshotData = Module:snapshot(AggState),

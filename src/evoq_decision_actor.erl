@@ -65,6 +65,11 @@ start_link(Module, Key, StoreId) ->
 %% @private
 init({Module, Key, StoreId}) ->
     evoq_decision_registry:register(Module, Key, self()),
+    %% Loaded first (evoq#39): this is the first thing the actor does, so nothing
+    %% has called the decision module, and `function_exported/3' answers false
+    %% for a module that is not loaded -- which decided that a decision holding
+    %% its model in context events does not, and started it unfolded.
+    _ = code:ensure_loaded(Module),
     Folded = erlang:function_exported(Module, init_decision_model, 0) andalso
              erlang:function_exported(Module, apply_context_event, 2),
     Lifespan = application:get_env(
@@ -208,7 +213,14 @@ apply_action(hibernate, State) -> {noreply, State, hibernate};
 apply_action(infinity, State)  -> {noreply, State};
 apply_action(T, State) when is_integer(T) -> {noreply, State, T}.
 
+%% @private
+%%
+%% Loaded first (evoq#39): a decision module arrives as a bare atom and nothing
+%% has necessarily called it, and `function_exported/3' answers false for a
+%% module that is not loaded -- so a module that sets its own budget silently
+%% got the default one instead.
 retry_budget(Mod) ->
+    _ = code:ensure_loaded(Mod),
     case erlang:function_exported(Mod, retry_budget, 0) of
         true  -> Mod:retry_budget();
         false -> ?DEFAULT_RETRY_BUDGET

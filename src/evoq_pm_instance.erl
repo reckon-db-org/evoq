@@ -62,7 +62,13 @@ compensate(Pid, FailedCommand) ->
 
 %% @private
 init({PMModule, ProcessId, _Config}) ->
-    %% Initialize PM state
+    %% Initialize PM state. The module is loaded first (evoq#39): this is the
+    %% first thing an instance does, so nothing has called the PM yet, and
+    %% `function_exported/3' answers false for a module that is not loaded --
+    %% which read as "this PM has no init/1" and started it on the default state
+    %% instead of the one its own init/1 returns. The same hazard
+    %% `pm_has_info_handler/1' below already guards against.
+    _ = code:ensure_loaded(PMModule),
     PMState = init_pm_state(erlang:function_exported(PMModule, init, 1),
                             PMModule, ProcessId),
 
@@ -261,6 +267,13 @@ record_dispatched(Command, #evoq_pm_state{pm_module = PMModule, state = PMState}
     State#evoq_pm_state{state = record_if_compensating(PMModule, Command, PMState)}.
 
 %% @private
+%%
+%% No ensure_loaded here (evoq#39): this runs when a command is dispatched from
+%% a PM instance, and an instance starts by calling its module's `init/1' -- or,
+%% since that was fixed, by being loaded to find out whether it has one. Either
+%% way the module is loaded before the first dispatch. `init/1' and
+%% `pm_has_info_handler/1' above are the two that run at cold time, and both
+%% load it themselves.
 record_if_compensating(PMModule, Command, PMState) ->
     record_result(erlang:function_exported(PMModule, compensate, 2),
                   Command, PMState).

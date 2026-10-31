@@ -188,7 +188,15 @@ handle_cast(_Msg, State) ->
 
 %% @private Everything else goes to the handler module. This dropped every
 %% message, so a handler's own scheduled retry never ran and nothing said.
+%%
+%% The module is loaded first (evoq#39): `function_exported/3' answers false for
+%% a module that is not loaded yet, and a handler can be sent a message before
+%% it has processed its first event -- nothing else would have loaded it -- so a
+%% cold handler with `handle_info/2' read as one without it and the message was
+%% dropped with a warning that was wrong about the cause. The same shape, and
+%% the same reason, as `evoq_pm_instance:pm_has_info_handler/1'.
 handle_info(Info, #state{handler_module = HandlerModule} = State) ->
+    _ = code:ensure_loaded(HandlerModule),
     forward_info(erlang:function_exported(HandlerModule, handle_info, 2), Info, State).
 
 forward_info(true, Info, #state{handler_module = HandlerModule,

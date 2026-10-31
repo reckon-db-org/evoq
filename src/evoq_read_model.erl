@@ -108,8 +108,14 @@ delete(Key, #read_model{module = Module, state = State} = RM) ->
     end.
 
 %% @doc List all key-value pairs matching a prefix.
+%%
+%% The module is loaded first (evoq#39): `function_exported/3' answers false for
+%% a module that is not loaded yet, and this answers `{error, not_implemented}'
+%% when it is false -- so a cold read model reported that it cannot list, which
+%% is a statement about the VM and not about the module.
 -spec list(term(), read_model()) -> {ok, [{term(), term()}]} | {error, term()}.
 list(Prefix, #read_model{module = Module, state = State}) ->
+    _ = code:ensure_loaded(Module),
     case erlang:function_exported(Module, list, 2) of
         true ->
             Module:list(Prefix, State);
@@ -118,8 +124,11 @@ list(Prefix, #read_model{module = Module, state = State}) ->
     end.
 
 %% @doc Clear all data from the read model.
+%%
+%% Loaded first, for the reason `list/2' gives.
 -spec clear(read_model()) -> {ok, read_model()} | {error, term()}.
 clear(#read_model{module = Module, state = State} = RM) ->
+    _ = code:ensure_loaded(Module),
     clear_dispatch(erlang:function_exported(Module, clear, 1), Module, State, RM).
 
 clear_dispatch(true, Module, State, RM) ->

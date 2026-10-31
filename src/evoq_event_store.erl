@@ -52,6 +52,18 @@ get_adapter() ->
         undefined -> error({not_configured, event_store_adapter})
     end.
 
+%% @private
+%% The adapter is loaded before any OPTIONAL callback is asked about (evoq#39).
+%% `function_exported/3' answers false for a module the VM has not loaded, not
+%% only for one that does not export the function, and every check that uses
+%% this turns that false into a fallback -- a different adapter path, or
+%% `introspection_unavailable' for a store that can answer. `new_stream_id/1'
+%% wrote the reason down first; the rest of the module says it once, here,
+%% rather than repeating it at each call.
+ensure_adapter_loaded(Adapter) ->
+    _ = code:ensure_loaded(Adapter),
+    Adapter.
+
 %% @doc Set the event store adapter (primarily for testing).
 -spec set_adapter(module()) -> ok.
 set_adapter(Adapter) ->
@@ -170,7 +182,7 @@ ccc_read_by_payload_hash(StoreId, Keys, Values, BatchSize) ->
 %% references an undeclared index. Returns {ok, [Key]}.
 -spec payload_indexes(atom()) -> {ok, [binary()]} | {error, term()}.
 payload_indexes(StoreId) ->
-    Adapter = get_adapter(),
+    Adapter = ensure_adapter_loaded(get_adapter()),
     case erlang:function_exported(Adapter, payload_indexes, 1) of
         true -> Adapter:payload_indexes(StoreId);
         false -> {error, introspection_unavailable}
@@ -179,7 +191,7 @@ payload_indexes(StoreId) ->
 %% @doc Payload field key-sets hash-indexed in a store ({payload_hash, Keys}).
 -spec payload_hash_indexes(atom()) -> {ok, [[binary()]]} | {error, term()}.
 payload_hash_indexes(StoreId) ->
-    Adapter = get_adapter(),
+    Adapter = ensure_adapter_loaded(get_adapter()),
     case erlang:function_exported(Adapter, payload_hash_indexes, 1) of
         true -> Adapter:payload_hash_indexes(StoreId);
         false -> {error, introspection_unavailable}
@@ -213,7 +225,7 @@ exists(StoreId, StreamId) ->
 %% @doc Check if a store contains at least one event.
 -spec has_events(atom()) -> boolean().
 has_events(StoreId) ->
-    Adapter = get_adapter(),
+    Adapter = ensure_adapter_loaded(get_adapter()),
     has_events(erlang:function_exported(Adapter, has_events, 1), Adapter, StoreId).
 
 has_events(true, Adapter, StoreId) ->
@@ -305,7 +317,7 @@ read_events_by_types(StoreId, EventTypes, BatchSize) ->
 -spec read_all_global(atom(), non_neg_integer(), pos_integer()) ->
     {ok, [evoq_event()]} | {error, term()}.
 read_all_global(StoreId, Offset, BatchSize) ->
-    Adapter = get_adapter(),
+    Adapter = ensure_adapter_loaded(get_adapter()),
     case erlang:function_exported(Adapter, read_all_global, 3) of
         true ->
             Adapter:read_all_global(StoreId, Offset, BatchSize);

@@ -51,6 +51,11 @@ stream_info(StoreId, StreamId) ->
 
 call_adapter(Fun, Args) ->
     Adapter = evoq_event_store:get_adapter(),
+    %% Loaded first (evoq#39): function_exported/3 answers false for a module
+    %% that is not loaded yet, and this answers `{not_supported, Fun}' when it
+    %% is false -- so an inspection run on a cold node told the operator the
+    %% store does not support a call it does.
+    _ = code:ensure_loaded(Adapter),
     case erlang:function_exported(Adapter, Fun, length(Args)) of
         true -> erlang:apply(Adapter, Fun, Args);
         false -> {error, {not_supported, Fun}}

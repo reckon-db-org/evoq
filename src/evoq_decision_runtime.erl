@@ -92,7 +92,15 @@ load_context(StoreId, Filter) ->
 %% Internal
 %%====================================================================
 
+%% @private
+%%
+%% Loaded first (evoq#39): `function_exported/3' answers false for a module the
+%% VM has not loaded, and this decides which key a stateful decision is
+%% dispatched on. Cold, it answered `undefined' for a module that has
+%% `boundary_key/1' -- so the decision ran against a different key than its own
+%% module asked for, silently.
 boundary_key(Mod, Command) ->
+    _ = code:ensure_loaded(Mod),
     case erlang:function_exported(Mod, boundary_key, 1) of
         true  -> Mod:boundary_key(Command);
         false -> undefined
@@ -383,7 +391,14 @@ event_version(#{version := V}) when is_integer(V) -> V;
 event_version(#{<<"version">> := V}) when is_integer(V) -> V;
 event_version(_) -> -1.
 
+%% @private
+%%
+%% Loaded first (evoq#39): a decision module arrives as a bare atom and nothing
+%% has necessarily called it, and `function_exported/3' answers false for a
+%% module that is not loaded -- so a module that sets its own budget silently
+%% got the default one instead.
 retry_budget(Mod) ->
+    _ = code:ensure_loaded(Mod),
     case erlang:function_exported(Mod, retry_budget, 0) of
         true  -> Mod:retry_budget();
         false -> ?DEFAULT_RETRY_BUDGET
