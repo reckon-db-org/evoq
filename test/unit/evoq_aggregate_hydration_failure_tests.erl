@@ -89,6 +89,66 @@ nothing_stays_registered() ->
     ?assertEqual({error, not_found}, evoq_aggregate_registry:lookup(Id)).
 
 %%====================================================================
+%% A stream WITH a snapshot: the tail read after it fails the same way
+%%====================================================================
+
+%% `evoq_aggregate_registry_test_agg' exports no `from_snapshot/1', so every
+%% other test here takes the replay-from-zero path and reaches
+%% `replayed_from_zero/3'. A stream that has a snapshot -- the long-lived ones,
+%% which are the streams most likely to hold a revocation -- resumes its replay
+%% through `replayed_or_fresh/3' instead, and that clause went untested until
+%% Neptunus reverted it alone and watched all six of these still pass.
+%%
+%% The read is asserted to start at the snapshot's own version, so the test
+%% cannot pass by quietly taking the from-zero path it is meant to sit beside.
+a_failed_tail_read_after_a_snapshot_is_the_same_error_test_() ->
+    {setup, fun start_deps/0, fun stop_deps/1,
+     fun(_Started) -> fun snapshot_then_a_failed_tail_read/0 end}.
+
+snapshot_then_a_failed_tail_read() ->
+    Self = self(),
+    with_mocks({evoq_snapshot_store, load,
+                fun(_Store, _Stream) ->
+                    {ok, #{data => #{status => revoked, from => snapshot},
+                           version => 1499}}
+                end},
+               fun() ->
+                   with_mocks({evoq_event_store, read,
+                               fun(_Store, _Stream, Start, _Count, forward) ->
+                                   Self ! {read_start, Start},
+                                   receive go -> {error, timeout} end
+                               end},
+                              fun() ->
+                                  Id = fresh_id(<<"snapshot">>),
+                                  %% `try_load_snapshot/3' asks
+                                  %% `erlang:function_exported/3', which is false
+                                  %% for a module the VM has not loaded yet --
+                                  %% and nothing has called this fixture. In a
+                                  %% service the aggregate module is loaded long
+                                  %% before any load runs.
+                                  {module, _} = code:ensure_loaded(
+                                                  evoq_aggregate_hydration_snapshot_agg),
+                                  {ok, Pid} = evoq_aggregate_registry:get_or_start(
+                                                evoq_aggregate_hydration_snapshot_agg,
+                                                Id, hydration_failure_store),
+                                  %% A snapshot was loaded and the replay began
+                                  %% one past its version: this is the snapshot
+                                  %% path, not the from-zero one.
+                                  ?assertEqual({read_start, 1500}, await_read_start()),
+                                  Caller = spawn(fun() ->
+                                                     Self ! {answer,
+                                                             evoq_aggregate:get_state(Pid)}
+                                                 end),
+                                  ok = await_queued_call(Pid),
+                                  Pid ! go,
+                                  _ = Caller,
+                                  ?assertEqual({error, {hydration_failed, timeout}},
+                                               await_answer()),
+                                  ?assertNot(is_process_alive(Pid))
+                              end)
+               end).
+
+%%====================================================================
 %% An empty stream is still a fresh aggregate -- the half that must not change
 %%====================================================================
 
@@ -156,6 +216,13 @@ await_answer() ->
         {answer, Reply} -> Reply
     after 5000 ->
         error(no_answer)
+    end.
+
+await_read_start() ->
+    receive
+        {read_start, Start} -> {read_start, Start}
+    after 5000 ->
+        error(no_read)
     end.
 
 %% The call queued behind the load: a gen_server does not read its mailbox
