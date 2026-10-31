@@ -465,7 +465,21 @@ init_fresh(Module, AggregateId) ->
     end.
 
 %% @private
+%%
+%% ⚠ THE MODULE IS LOADED FIRST, AND THAT IS NOT DECORATION (evoq#36).
+%% `erlang:function_exported/3' answers false for a module the VM has not
+%% loaded -- not only for one that does not export the function -- and
+%% `code:ensure_loaded/1' is what tells those two apart. Without it an
+%% aggregate whose module has never been called since the node started is
+%% treated as snapshot-less: its stream is replayed from version -1 although a
+%% snapshot exists. The state that comes out is still correct, so this was a
+%% cost and not a wrong answer, which is why it went unnoticed; a long stream
+%% paid a full replay and nothing said so.
+%%
+%% This is the same question `evoq_event_store:new_stream_id/1' asks of an
+%% adapter, and it answers it the same way, for the same reason.
 try_load_snapshot(Module, StoreId, AggregateId) ->
+    _ = code:ensure_loaded(Module),
     load_snapshot_if_exported(erlang:function_exported(Module, from_snapshot, 1),
                               Module, StoreId, AggregateId).
 

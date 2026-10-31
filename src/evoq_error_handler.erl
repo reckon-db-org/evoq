@@ -57,6 +57,18 @@
 %%====================================================================
 
 %% @doc Handle an error using the handler's error strategy.
+%%
+%% ⚠ NO `code:ensure_loaded/1' HERE, UNLIKE `evoq_aggregate:try_load_snapshot/3'
+%% (evoq#36), and the difference is where the module has been. Every caller of
+%% this function reaches it from a handler call that already RETURNED
+%% `{error, Reason}' -- `evoq_event_handler' after
+%% `HandlerModule:handle_event/4', `evoq_projection' after its projection
+%% module's own call. Calling a module loads it, so by here it is loaded
+%% whatever the node's code-loading state was. A module that could not be
+%% loaded at all never reaches this function: the call raises `undef' and takes
+%% the handler process down, which is a visible failure and not a silent
+%% default. The aggregate load has no such guarantee -- nothing has called the
+%% stream's module yet -- which is exactly why it needs the ensure.
 -spec handle_error(atom(), term(), map(), #evoq_failure_context{}, term()) -> error_action().
 handle_error(HandlerModule, Error, Event, FailureContext, HandlerState) ->
     %% Check if handler implements on_error/4

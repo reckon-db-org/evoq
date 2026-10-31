@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed: a cold aggregate module still loads from its snapshot (evoq#36)
+
+`try_load_snapshot/3` decided whether the aggregate module can be loaded from a
+snapshot with `erlang:function_exported/3`, which answers **false for a module
+the VM has not loaded** — not only for one that does not export
+`from_snapshot/1`. An aggregate whose module had never been called since the
+node started was therefore treated as snapshot-less, and its stream was
+replayed from version -1 although a snapshot existed.
+
+The state that came out was correct, because a full replay rebuilds the same
+aggregate, which is why this went unnoticed: the cost was a full replay of a
+long stream and nothing in the telemetry saying a snapshot had been skipped.
+
+`code:ensure_loaded/1` is now called first, exactly as
+`evoq_event_store:new_stream_id/1` already does before the same check on an
+adapter. A module that cannot be loaded at all is still treated as
+snapshot-less, which is the old behaviour and the safe one.
+
 ## [1.30.2] - 2026-10-31
 
 ### Fixed: a store read error is never an empty stream (evoq#34)
