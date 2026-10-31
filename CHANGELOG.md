@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.30.3] - 2026-11-01
+
 ### Fixed: a cold aggregate module still loads from its snapshot (evoq#36)
 
 `try_load_snapshot/3` decided whether the aggregate module can be loaded from a
@@ -49,6 +51,14 @@ like a passing one:
   `after_dispatch/1` and `after_failure/1` halts it with
   `{error, {not_a_middleware, Module}}` — what configuration looks like when it
   names an API module instead of the middleware beside it.
+
+**Both refusals are behaviour changes, and they are meant to be.** A chain that
+used to skip a name it could not resolve now refuses the command instead, so an
+upgrade can turn a command that appeared to succeed into an error. That is the
+fix: the previous outcome was a command running with its authorization, its
+validation or its rate limit silently absent. Check the configured chain —
+`application:get_env(evoq, middleware, [])` and every dispatch's `middleware`
+option — for a name that is a module only by accident before upgrading.
 
 ⚠ A refusal from an `after_dispatch` or `after_failure` chain arrives after the
 command has already run, and it replaces the response the pipeline carried —
