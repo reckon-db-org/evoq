@@ -108,9 +108,7 @@ dispatch_internal(Command, Opts) ->
     %% Check if pipeline was halted
     case evoq_middleware:halted(Pipeline2) of
         true ->
-            Response = evoq_middleware:get_response(Pipeline2),
-            emit_stop_telemetry(StartTime, Command, Response),
-            Response;
+            halted_response(Pipeline2, StartTime, Command);
         false ->
             %% Execute the command
             execute_and_finalize(Pipeline2, Middleware, StartTime)
@@ -143,12 +141,31 @@ dispatch_internal_with_state(Command, Opts) ->
 
     case evoq_middleware:halted(Pipeline2) of
         true ->
-            Response = evoq_middleware:get_response(Pipeline2),
-            emit_stop_telemetry(StartTime, Command, Response),
-            Response;
+            halted_response(Pipeline2, StartTime, Command);
         false ->
             execute_and_finalize_with_state(Pipeline2, Middleware, StartTime)
     end.
+
+%% @private
+%% The answer to a halted pipeline (evoq#41).
+%%
+%% `halt/1' and `respond/2' are separate calls, and a middleware that only wants
+%% to stop the command -- a maintenance window, a kill switch, a feature flag --
+%% has no reason to call `respond/2'. The pipeline is built with
+%% `response = undefined', so without this the router handed `undefined' back to
+%% the caller, and a caller that denies only on `{error, _}' read a refusal as
+%% "not an error" and accepted a command that never ran.
+%%
+%% A halt that said nothing is therefore a refusal with a name, never
+%% `undefined'. A halt that DID respond is returned exactly as the middleware
+%% gave it: that is the middleware's decision to make, not the router's.
+halted_response(Pipeline, StartTime, Command) ->
+    Response = case evoq_middleware:get_response(Pipeline) of
+        undefined -> {error, halted_without_response};
+        Given -> Given
+    end,
+    emit_stop_telemetry(StartTime, Command, Response),
+    Response.
 
 %% @private
 execute_and_finalize_with_state(Pipeline, Middleware, StartTime) ->

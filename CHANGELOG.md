@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security: a halt without a response is never reported as `undefined` (evoq#41)
+
+`evoq_command_router:dispatch/2` built the pipeline with `response = undefined`.
+A `before_dispatch` middleware that called `evoq_middleware:halt/1` without also
+calling `respond/2` stopped the command correctly — and the router handed the
+caller that same `undefined`. `halt/1` and `respond/2` are separate calls and
+nothing required them together, so a middleware that only wanted to stop the
+command (a maintenance window, a kill switch, a feature flag) produced it.
+
+The caller's ordinary shape is `case dispatch(Cmd, Opts) of {error, R} ->
+deny(R); _ -> accept end`, which reads `undefined` as "not an error" and accepts
+a command that never ran. The router refused and then said nothing.
+
+A halt that responded is still returned exactly as the middleware gave it. A halt
+that did not now returns `{error, halted_without_response}`, from `dispatch/2`
+and from `dispatch_with_state/2`.
+
 ## [1.30.3] - 2026-11-01
 
 ### Fixed: a cold aggregate module still loads from its snapshot (evoq#36)
