@@ -375,6 +375,15 @@ authorization that looks like a passing one. In an `after_dispatch` or
 its `{ok, Version, Events}` response, so only a `before_dispatch` refusal is safe
 to treat as a plain failure.
 
+Two rules follow from all of that. **A middleware calls `respond/2` only when it
+also halts**: a response left on the pipeline by a middleware that did not halt
+is not a decision about the outcome, and the router will hand it back to the
+caller in place of the answer it should have given. And **an `after_dispatch` or
+`after_failure` middleware that responds should replace the result with one of
+the same shape** — an `{error, _}` there says a command that the store has
+already accepted failed, and an `{ok, ...}` of another shape does not describe
+the events that were appended.
+
 ## Configuration
 
 ```erlang

@@ -76,6 +76,15 @@
 %% accepted. A refusal from `before_dispatch' is safe to treat as a failure; one
 %% from an after_* chain is not, and the right answer is to have the chain's
 %% configuration checked at startup rather than at dispatch.
+%%
+%% ⚠ RESPOND ONLY WHEN YOU HALT, and from an after_* stage only with a result of
+%% the shape it is replacing. A response left on the pipeline by a middleware
+%% that did NOT halt is not a decision about the outcome, and the router will
+%% hand it back to the caller in place of the answer it should have given -- an
+%% earlier `{ok, ...}', or an earlier error, standing in for a later refusal. In
+%% an after_* stage the command is already committed: an `{error, _}' there says
+%% a command the store accepted failed, and an `{ok, ...}' of another shape does
+%% not describe the events that were appended.
 -spec chain(#evoq_pipeline{}, atom(), [atom()]) -> #evoq_pipeline{}.
 chain(Pipeline, _Stage, []) ->
     Pipeline;

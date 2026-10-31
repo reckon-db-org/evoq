@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.30.4] - 2026-11-01
+
 ### Security: an after-stage halt cannot erase a result the command produced (evoq#45)
 
 `after_dispatch` and `after_failure` run when the store has already accepted the
