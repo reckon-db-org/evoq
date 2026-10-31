@@ -364,6 +364,17 @@ Intercept command dispatch.
 -callback after_failure(Pipeline :: #evoq_pipeline{}) -> #evoq_pipeline{}.
 ```
 
+A middleware is loaded before it is asked for a stage, and the chain is strict
+about what it can run (#39). A stage the module does not export is skipped, so
+implementing one of the three callbacks is enough. A name that cannot be loaded
+halts the dispatch with `{error, {middleware_not_loadable, Module, Reason}}`,
+and a module that exports none of the three halts it with
+`{error, {not_a_middleware, Module}}` — skipping either would be a missing
+authorization that looks like a passing one. In an `after_dispatch` or
+`after_failure` chain a refusal arrives after the command has run and replaces
+its `{ok, Version, Events}` response, so only a `before_dispatch` refusal is safe
+to treat as a plain failure.
+
 ## Configuration
 
 ```erlang
