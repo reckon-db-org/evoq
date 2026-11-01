@@ -30,6 +30,7 @@ scope_test_() ->
     {setup, fun start/0, fun stop/1, [
         fun a_key_for_one_aggregate_id_does_not_answer_another/0,
         fun a_key_for_one_aggregate_type_does_not_answer_another/0,
+        fun a_key_for_one_command_type_does_not_answer_another/0,
         fun a_key_for_one_store_does_not_answer_another/0,
         fun a_key_still_deduplicates_its_own_retry/0,
         fun a_key_deduplicates_across_command_ids/0,
@@ -74,6 +75,18 @@ a_key_for_one_aggregate_type_does_not_answer_another() ->
     ?assertMatch({ok, _}, evoq_idempotency:lookup(scoped(?PROBE, <<"stream-c">>, Key))),
     ?assertEqual(not_found, evoq_idempotency:lookup(scoped(?OTHER, <<"stream-c">>, Key))),
     ?assertEqual(1, appends()).
+
+%% Two different COMMANDS on one aggregate, one key -- a withdraw and a
+%% deposit. The second must run as its own dispatch: answering it with the
+%% first's answer is the defect this issue is about, not a narrower case of it.
+a_key_for_one_command_type_does_not_answer_another() ->
+    meck:reset(evoq_event_store),
+    Key = <<"scope-command-type">>,
+    Deposit = probe(Key, <<"stream-h">>),
+    Withdraw = Deposit#evoq_command{command_type = withdraw},
+    ?assertMatch({ok, _, _}, dispatch(Deposit, opts(?STORE))),
+    ?assertMatch({ok, _, _}, dispatch(Withdraw, opts(?STORE))),
+    ?assertEqual(2, appends()).
 
 %% Two stores, one key. The store is the tenancy boundary: an entry made in
 %% one must never answer a dispatch that names another.
@@ -138,7 +151,7 @@ opts(StoreId) ->
 %% router, so a change to its shape fails these tests instead of quietly
 %% turning them into assertions about an entry nothing writes.
 scoped(AggregateType, AggregateId, Key) ->
-    {?STORE, AggregateType, AggregateId, Key}.
+    {?STORE, AggregateType, AggregateId, probe, Key}.
 
 %% The SAME command every time: same command_id and same idempotency_key,
 %% which is what a retry after an ambiguous answer looks like.

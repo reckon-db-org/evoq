@@ -103,7 +103,7 @@ a_refusal_does_not_change_an_existing_cache_entry() ->
 %% router, so a change to its shape fails these tests instead of quietly
 %% turning them into assertions about an entry nothing writes.
 cache_key(Key) ->
-    {test_store, evoq_strong_probe_aggregate, <<"replay-gate-stream">>, Key}.
+    {test_store, evoq_strong_probe_aggregate, <<"replay-gate-stream">>, replay_probe, Key}.
 
 %%====================================================================
 %% Helpers

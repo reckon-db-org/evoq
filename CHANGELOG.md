@@ -16,10 +16,13 @@ that merely shared a key shared an entry: a caller who passed the
 another aggregate had already used was handed that entry's version and events,
 and a client that generated short or reused keys silently lost its own writes.
 
-The key is now the dispatch: store, aggregate type, aggregate id and the key.
-A collision needs the same work as well as the same binary, which means an
-`idempotency_key` only has to be unique for one aggregate — the promise the
-field makes.
+The key is now the dispatch: store, aggregate type, aggregate id, command type
+and the key. A collision needs the same work as well as the same binary, which
+means an `idempotency_key` has to be unique for one aggregate and one intended
+command — the promise the field makes. The command type is in it because a
+`withdraw` and a `deposit` sharing a key on one aggregate is a real pair, and
+answering the second with the first's answer is the defect, not a narrower case
+of it.
 
 ⚠ Two things a caller can see. `evoq_idempotency` matches whatever term it is
 given, so `lookup/1`, `store/3` and `delete/1` take a key of any shape and the

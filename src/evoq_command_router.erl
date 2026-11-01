@@ -35,11 +35,14 @@
 %% Otherwise, command_id is used (each dispatch is unique).
 %%
 %% ⚠ THE KEY IS SCOPED TO THE DISPATCH (evoq#51). An entry is matched on the
-%% store, the aggregate type, the aggregate id AND the key, so an
-%% `idempotency_key' only has to be unique for one aggregate. It never was
-%% before: the key alone was matched against one flat set, so a key another
-%% aggregate had already used answered this command with that command's
-%% version and events.
+%% store, the aggregate type, the aggregate id, the command type AND the key,
+%% so an `idempotency_key' has to be unique for one aggregate and one intended
+%% command -- the promise the field makes. It never was before: the key alone
+%% was matched against one flat set, so a key another dispatch had already
+%% used answered this command with that dispatch's version and events. Two
+%% retries of the same work still share an entry: the command type is part of
+%% the key, not the payload, so a retry that carries a fresh `command_id' is
+%% unaffected.
 %%
 %% ⚠ THE `before_dispatch' CHAIN RUNS BEFORE THE IDEMPOTENCY CACHE IS CONSULTED
 %% (evoq#46). It used to be the other way round, so a command replayed with a
@@ -71,25 +74,30 @@ dispatch_with_state(Command0, Opts) ->
 %% none was given -- matched against one flat set. Nothing about the work was
 %% part of it, so two commands that merely shared a key shared an entry: a
 %% caller that passed the gate with a key another store, another aggregate or
-%% another command type had already used was handed that entry's version and
+%% another command had already used was handed that entry's version and
 %% events, and a client generating short or reused keys silently lost its own
 %% writes.
 %%
 %% Scoping it structurally means a collision now needs the same work as well
-%% as the same binary -- the store, the aggregate type and the aggregate id
-%% are all part of what is matched. An `idempotency_key' therefore only has
-%% to be unique for one aggregate, which is the promise the field makes.
+%% as the same binary -- the store, the aggregate type, the aggregate id and
+%% the command type are all part of what is matched. An `idempotency_key'
+%% therefore has to be unique for one aggregate AND for one intended command,
+%% which is the promise the field makes. The command type is in the key
+%% because two different commands sharing a key on one aggregate is a real
+%% pair -- a `withdraw' and a `deposit' -- and answering the second with the
+%% first's answer is the defect this issue is about, not a narrower case of it.
 cache_key(Command, StoreId) ->
     #evoq_command{
         aggregate_type = AggregateType,
         aggregate_id = AggregateId,
+        command_type = CommandType,
         idempotency_key = IdempotencyKey
     } = Command,
     Key = case IdempotencyKey of
         undefined -> Command#evoq_command.command_id;
         Given -> Given
     end,
-    {StoreId, AggregateType, AggregateId, Key}.
+    {StoreId, AggregateType, AggregateId, CommandType, Key}.
 
 %% @private
 idempotency_ttl() ->
