@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.30.7] - 2026-11-01
+
 ### Security: the configured middleware chain is resolved at boot (evoq#42)
 
 Since evoq#39 a name in the chain that cannot be loaded, or that is not a
