@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.30.5] - 2026-11-01
+
 ### Security: the `before_dispatch` chain runs before the idempotency cache (evoq#46)
 
 `dispatch/2` consulted the idempotency cache before it built the pipeline, and a
