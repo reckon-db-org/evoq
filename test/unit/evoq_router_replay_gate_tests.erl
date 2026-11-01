@@ -24,7 +24,9 @@ replay_gate_test_() ->
     {setup, fun start/0, fun stop/1, [
         fun a_first_dispatch_is_refused_by_the_gate/0,
         fun a_replay_is_refused_by_the_gate/0,
-        fun a_replay_is_refused_by_the_gate_with_state/0
+        fun a_cross_path_replay_is_refused_by_the_gate/0,
+        fun a_refusal_does_not_write_a_cache_entry/0,
+        fun a_refusal_does_not_change_an_existing_cache_entry/0
     ]}.
 
 start() ->
@@ -59,10 +61,32 @@ a_replay_is_refused_by_the_gate() ->
     %% The kill switch must still be asked.
     ?assertEqual({error, denied}, dispatch(Key, [?DENY_ALL])).
 
-a_replay_is_refused_by_the_gate_with_state() ->
-    Key = <<"replay-gate-state">>,
-    ?assertMatch({ok, ?STREAM_VERSION, [_], _}, dispatch_with_state(Key, [])),
+%% A `dispatch_with_state/2' replay cannot hit a cache entry of its own: nothing
+%% about that path is cached at all (evoq#49), so a with_state -> with_state
+%% replay re-executes under either router and this would pin nothing. The bypass
+%% on that path is CROSS-PATH, and it is the one a caller reaches by retrying a
+%% `dispatch/2' through `dispatch_with_state/2': the 3-tuple `dispatch/2' cached
+%% answers the with_state call before the gate is asked.
+a_cross_path_replay_is_refused_by_the_gate() ->
+    Key = <<"replay-gate-cross">>,
+    ?assertMatch({ok, ?STREAM_VERSION, [_]}, dispatch(Key, [])),
     ?assertEqual({error, denied}, dispatch_with_state(Key, [?DENY_ALL])).
+
+%%====================================================================
+%% A refusal reads and writes nothing: it cannot poison the cache either
+%%====================================================================
+
+a_refusal_does_not_write_a_cache_entry() ->
+    Key = <<"replay-gate-refusal">>,
+    ?assertEqual({error, denied}, dispatch(Key, [?DENY_ALL])),
+    ?assertEqual(not_found, evoq_idempotency:lookup(Key)).
+
+a_refusal_does_not_change_an_existing_cache_entry() ->
+    Key = <<"replay-gate-unchanged">>,
+    ?assertMatch({ok, ?STREAM_VERSION, [_]}, dispatch(Key, [])),
+    Stored = evoq_idempotency:lookup(Key),
+    ?assertEqual({error, denied}, dispatch(Key, [?DENY_ALL])),
+    ?assertEqual(Stored, evoq_idempotency:lookup(Key)).
 
 %%====================================================================
 %% Helpers
