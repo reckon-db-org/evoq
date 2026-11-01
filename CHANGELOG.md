@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security: the configured middleware chain is resolved at boot (evoq#42)
+
+Since evoq#39 a name in the chain that cannot be loaded, or that is not a
+middleware, refuses the dispatch instead of being skipped. That is the right
+answer and the wrong time. The application started and reported healthy with a
+chain that could not run a single command; the first command was the probe; and
+from an `after_dispatch` or `after_failure` stage the refusal arrived AFTER the
+store had already accepted the work, so the same misconfiguration was not merely
+late but destructive to the caller's retry logic.
+
+`evoq_app:start/2` now resolves `application:get_env(evoq, middleware, [])`
+before anything starts, and refuses the start with
+`{invalid_middleware, {middleware_not_loadable, Module, Reason}}` or
+`{invalid_middleware, {not_a_middleware, Module}}`. The operator finds out from
+the boot that refused, not from the caller whose command was refused.
+
+⚠ A node whose configured chain names a module that is not there will now fail
+to start. That is the point of the check, and it is the shape a deployment sees:
+check the `middleware` setting before rolling.
+
+A chain carried in a dispatch's own `middleware` option cannot be known at boot
+and keeps the dispatch-time refusal. The boot check and `evoq_middleware:chain/3`
+share one definition of what a middleware is, so the two cannot drift apart.
+
 ### Fixed: the `dispatch_with_state/2` spec admits the answer a middleware can give (evoq#47)
 
 A `before_dispatch` middleware may halt the pipeline and respond

@@ -28,6 +28,7 @@
 
 %% API
 -export([chain/3]).
+-export([resolve_chain/1]).
 -export([assign/3, get_assign/2, get_assign/3]).
 -export([halt/1, halted/1]).
 -export([respond/2, get_response/1]).
@@ -100,8 +101,43 @@ chain(Pipeline, Stage, [Module | Rest]) ->
 
 %% @private
 run_stage(Module, Stage, Pipeline) ->
+    case resolve(Module) of
+        ok -> run_stage_exported(Module, Stage, Pipeline);
+        {error, _} = Error -> Error
+    end.
+
+%% @doc Check a chain before it is ever dispatched through (evoq#42).
+%%
+%% Every name in a configured chain is resolved once: loaded, and exporting at
+%% least one of the three optional callbacks. The answers are the ones
+%% `chain/3' gives per dispatch -- `{middleware_not_loadable, Module, Reason}'
+%% and `{not_a_middleware, Module}' -- because a misconfigured name is the same
+%% mistake whenever it is found, and only WHEN it is found changes:
+%%
+%%   - a node whose configured chain cannot run a command must not report
+%%     healthy and wait for the first command to find out, which may be the
+%%     command it destroys (a refusal from an `after_*' stage arrives after the
+%%     store has already accepted the work);
+%%   - the operator learns at boot, from the start that failed, rather than from
+%%     a caller's report.
+%%
+%% A chain a dispatch carries in its own `middleware' option cannot be known at
+%% boot and keeps the dispatch-time refusal. Loaded modules stay loaded, so this
+%% also spares the first dispatch the load `chain/3' would otherwise do.
+-spec resolve_chain([module()]) -> ok | {error, term()}.
+resolve_chain([]) ->
+    ok;
+resolve_chain([Module | Rest]) ->
+    case resolve(Module) of
+        ok -> resolve_chain(Rest);
+        {error, _} = Error -> Error
+    end.
+
+%% @private The two answers that are misconfiguration, used by both the boot
+%% check and the dispatch-time chain so they cannot drift apart.
+resolve(Module) ->
     case code:ensure_loaded(Module) of
-        {module, Module} -> run_stage_loaded(Module, Stage, Pipeline);
+        {module, Module} -> resolve_loaded(Module);
         {error, Reason} -> {error, {middleware_not_loadable, Module, Reason}}
     end.
 
@@ -109,9 +145,9 @@ run_stage(Module, Stage, Pipeline) ->
 %% A middleware implements at least one of the three optional callbacks and may
 %% implement only one of them. A module that implements NONE is not middleware,
 %% and skipping it is how a misconfigured name turns into a missing check.
-run_stage_loaded(Module, Stage, Pipeline) ->
+resolve_loaded(Module) ->
     case is_middleware(Module) of
-        true -> run_stage_exported(Module, Stage, Pipeline);
+        true -> ok;
         false -> {error, {not_a_middleware, Module}}
     end.
 
