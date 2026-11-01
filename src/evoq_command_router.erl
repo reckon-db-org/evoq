@@ -32,21 +32,19 @@
 %% If command_id is undefined, auto-generates one.
 %% If idempotency_key is set, uses it for deduplication cache.
 %% Otherwise, command_id is used (each dispatch is unique).
+%%
+%% ⚠ THE `before_dispatch' CHAIN RUNS BEFORE THE IDEMPOTENCY CACHE IS CONSULTED
+%% (evoq#46). It used to be the other way round, so a command replayed with a
+%% known `idempotency_key' was answered from the cache without a single
+%% middleware being asked: an authorization revoked since the first dispatch, a
+%% maintenance window, a kill switch -- none of them saw the replay, and the
+%% caller kept being handed the stored success. A replay still does not re-run
+%% the command; what changed is that the chain decides about the CALLER first.
 -spec dispatch(#evoq_command{}, map()) -> {ok, integer(), [map()]} | {error, term()}.
 dispatch(Command0, Opts) ->
     %% Auto-generate command_id if not provided
     Command = evoq_command:ensure_id(Command0),
-    TTL = application:get_env(evoq, idempotency_ttl, ?DEFAULT_IDEMPOTENCY_TTL),
-
-    %% Use idempotency_key for cache if provided, otherwise command_id
-    CacheKey = case Command#evoq_command.idempotency_key of
-        undefined -> Command#evoq_command.command_id;
-        Key -> Key
-    end,
-
-    evoq_idempotency:check_and_store(CacheKey, fun() ->
-        dispatch_internal(Command, Opts)
-    end, TTL).
+    dispatch_internal(Command, Opts, cache_key(Command), idempotency_ttl()).
 
 %% @doc Dispatch a command and return the post-event aggregate state.
 %%
@@ -57,23 +55,24 @@ dispatch(Command0, Opts) ->
     {ok, integer(), [map()], term()} | {error, term()}.
 dispatch_with_state(Command0, Opts) ->
     Command = evoq_command:ensure_id(Command0),
-    TTL = application:get_env(evoq, idempotency_ttl, ?DEFAULT_IDEMPOTENCY_TTL),
+    dispatch_internal_with_state(Command, Opts, cache_key(Command), idempotency_ttl()).
 
-    CacheKey = case Command#evoq_command.idempotency_key of
-        undefined -> Command#evoq_command.command_id;
-        Key -> Key
-    end,
+%% @private Use idempotency_key for the cache if provided, otherwise command_id.
+cache_key(#evoq_command{idempotency_key = undefined} = Command) ->
+    Command#evoq_command.command_id;
+cache_key(#evoq_command{idempotency_key = Key}) ->
+    Key.
 
-    evoq_idempotency:check_and_store(CacheKey, fun() ->
-        dispatch_internal_with_state(Command, Opts)
-    end, TTL).
+%% @private
+idempotency_ttl() ->
+    application:get_env(evoq, idempotency_ttl, ?DEFAULT_IDEMPOTENCY_TTL).
 
 %%====================================================================
 %% Internal functions
 %%====================================================================
 
 %% @private
-dispatch_internal(Command, Opts) ->
+dispatch_internal(Command, Opts, CacheKey, TTL) ->
     StartTime = evoq_telemetry:monotonic_start(),
 
     %% Create execution context
@@ -110,12 +109,12 @@ dispatch_internal(Command, Opts) ->
         true ->
             halted_response(Pipeline2, StartTime, Command);
         false ->
-            %% Execute the command
-            execute_and_finalize(Pipeline2, Middleware, StartTime)
+            %% Execute the command, unless this exact dispatch was already answered
+            execute_unless_cached(Pipeline2, Middleware, StartTime, Command, CacheKey, TTL)
     end.
 
 %% @private
-dispatch_internal_with_state(Command, Opts) ->
+dispatch_internal_with_state(Command, Opts, CacheKey, TTL) ->
     StartTime = evoq_telemetry:monotonic_start(),
     Context = evoq_execution_context:new(Command, Opts),
     Pipeline = #evoq_pipeline{
@@ -143,7 +142,35 @@ dispatch_internal_with_state(Command, Opts) ->
         true ->
             halted_response(Pipeline2, StartTime, Command);
         false ->
-            execute_and_finalize_with_state(Pipeline2, Middleware, StartTime)
+            execute_unless_cached(Pipeline2, Middleware, StartTime, Command, CacheKey, TTL,
+                                  fun execute_and_finalize_with_state/3)
+    end.
+
+%% @private
+%% The gate has already allowed this command; now the cache gets its say
+%% (evoq#46).
+%%
+%% A command replayed with a known `idempotency_key' does NOT run again -- that
+%% is what the cache is for -- but the cache is consulted only after
+%% `before_dispatch' has run, so a replay is still subject to whatever the chain
+%% decides about the caller: a revoked authorization, a maintenance window, a
+%% kill switch. Before this the cache answered first and no middleware was ever
+%% asked.
+execute_unless_cached(Pipeline, Middleware, StartTime, Command, CacheKey, TTL) ->
+    execute_unless_cached(Pipeline, Middleware, StartTime, Command, CacheKey, TTL,
+                          fun execute_and_finalize/3).
+
+%% @private
+execute_unless_cached(Pipeline, Middleware, StartTime, Command, CacheKey, TTL, Execute) ->
+    Run = fun() -> Execute(Pipeline, Middleware, StartTime) end,
+    case evoq_idempotency:lookup(CacheKey) of
+        {ok, Cached} ->
+            %% Answered from the cache: the dispatch still started, so it also
+            %% stops, with the response the caller is given.
+            emit_stop_telemetry(StartTime, Command, Cached),
+            Cached;
+        not_found ->
+            evoq_idempotency:check_and_store(CacheKey, Run, TTL)
     end.
 
 %% @private

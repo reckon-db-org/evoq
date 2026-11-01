@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security: the `before_dispatch` chain runs before the idempotency cache (evoq#46)
+
+`dispatch/2` consulted the idempotency cache before it built the pipeline, and a
+cache hit returned the stored result without the fun that dispatches ever
+running. A command replayed with a known `idempotency_key` therefore reached no
+middleware at all: an authorization revoked since the first dispatch, a
+maintenance window, a kill switch — none of them saw the replay, and the caller
+kept being handed the stored success.
+
+The command still does not run again; that is what the cache is for. What
+changed is the order: `before_dispatch` now runs first, so the chain decides
+about the caller, and only then is the cache consulted. A refusal refuses the
+replay too, and a replay that passes is answered from the cache as before (with
+the dispatch's stop telemetry recorded for it, which a cache hit used to skip).
+
 ## [1.30.4] - 2026-11-01
 
 ### Security: an after-stage halt cannot erase a result the command produced (evoq#45)
