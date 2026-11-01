@@ -97,6 +97,12 @@ check_and_store(Key, ExecuteFun, TTL) ->
     end.
 
 %% @private Cache only successful results.
+%%
+%% The 4-tuple is a successful dispatch too: `dispatch_with_state/2' answers
+%% `{ok, Version, Events, State}'. It was missing here, so those results fell
+%% to the catch-all and nothing was stored -- a retry of that dispatch found no
+%% entry and appended the events again (evoq#49).
+maybe_cache({ok, _, _, _} = Result, Key, TTL) -> store(Key, Result, TTL);
 maybe_cache({ok, _, _} = Result, Key, TTL) -> store(Key, Result, TTL);
 maybe_cache({ok, _} = Result, Key, TTL) -> store(Key, Result, TTL);
 maybe_cache(ok = Result, Key, TTL) -> store(Key, Result, TTL);

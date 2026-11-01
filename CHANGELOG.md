@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed: a `dispatch_with_state/2` result is cached, so its own retries do not append twice (evoq#49)
+
+`evoq_idempotency` stored only the shapes it recognised, and the state-carrying
+answer `{ok, Version, Events, State}` was not one of them: it fell to the
+catch-all and nothing was stored. A retry of the same command with the same
+`idempotency_key` found no entry and ran the command again, appending the same
+events a second time — through the one entry point whose reason for carrying a
+key is that a caller may retry after an ambiguous answer.
+
+One successful result is now stored per dispatch, whichever entry point made
+it: the aggregate state is part of what is cached, and each function projects
+it on the way out. `dispatch/2` answers `{ok, Version, Events}` on a hit and on
+a miss alike, `dispatch_with_state/2` answers with the state, and a caller that
+switches between the two is still retrying one command.
+
+Two things follow. A `dispatch_with_state/2` retry after a version conflict
+used to be answered by the plain path as a 3-tuple; it now keeps its shape.
+And every entry holds an aggregate state for its TTL, which is the price of
+deduplicating both entry points against each other.
+
 ### Security: an idempotency entry belongs to a dispatch, not to a bare key (evoq#51)
 
 The cache was keyed by the caller's `idempotency_key` — or the `command_id` when

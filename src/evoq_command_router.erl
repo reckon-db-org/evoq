@@ -44,6 +44,11 @@
 %% the key, not the payload, so a retry that carries a fresh `command_id' is
 %% unaffected.
 %%
+%% ⚠ WHAT IS CACHED. One successful result per dispatch, under that key, on
+%% both entry points (evoq#49). The aggregate state is part of what is stored
+%% but not part of what this function returns: it answers `{ok, Version,
+%% Events}' on a miss and on a hit alike.
+%%
 %% ⚠ THE `before_dispatch' CHAIN RUNS BEFORE THE IDEMPOTENCY CACHE IS CONSULTED
 %% (evoq#46). It used to be the other way round, so a command replayed with a
 %% known `idempotency_key' was answered from the cache without a single
@@ -62,6 +67,12 @@ dispatch(Command0, Opts) ->
 %% Like dispatch/2 but includes the aggregate state after applying all
 %% new events. Enables session-level consistency where the caller
 %% receives immediate truth about the resulting state.
+%%
+%% ⚠ CACHED LIKE `dispatch/2', UNDER THE SAME KEY (evoq#49). A retry with the
+%% same `idempotency_key' does not run the command again and is answered with
+%% the state it asked for, whichever of the two functions made the entry. The
+%% state is stored with every successful dispatch, so a caller that switches
+%% between the two entry points is still retrying one command.
 -spec dispatch_with_state(#evoq_command{}, map()) ->
     {ok, integer(), [map()], term()} | {error, term()}.
 dispatch_with_state(Command0, Opts) ->
@@ -147,7 +158,8 @@ dispatch_internal(Command, Opts, TTL) ->
             halted_response(Pipeline2, StartTime, Command);
         false ->
             %% Execute the command, unless this exact dispatch was already answered
-            execute_unless_cached(Pipeline2, Middleware, StartTime, Command, CacheKey, TTL)
+            execute_unless_cached(Pipeline2, Middleware, StartTime, Command, CacheKey, TTL,
+                                  fun project_plain/1)
     end.
 
 %% @private
@@ -181,7 +193,7 @@ dispatch_internal_with_state(Command, Opts, TTL) ->
             halted_response(Pipeline2, StartTime, Command);
         false ->
             execute_unless_cached(Pipeline2, Middleware, StartTime, Command, CacheKey, TTL,
-                                  fun execute_and_finalize_with_state/3)
+                                  fun project_with_state/1)
     end.
 
 %% @private
@@ -194,14 +206,17 @@ dispatch_internal_with_state(Command, Opts, TTL) ->
 %% decides about the caller: a revoked authorization, a maintenance window, a
 %% kill switch. Before this the cache answered first and no middleware was ever
 %% asked.
-execute_unless_cached(Pipeline, Middleware, StartTime, Command, CacheKey, TTL) ->
-    execute_unless_cached(Pipeline, Middleware, StartTime, Command, CacheKey, TTL,
-                          fun execute_and_finalize/3).
-
-%% @private
-execute_unless_cached(Pipeline, Middleware, StartTime, Command, CacheKey, TTL, Execute) ->
-    Run = fun() -> Execute(Pipeline, Middleware, StartTime) end,
-    case evoq_idempotency:lookup(CacheKey) of
+%%
+%% ONE RESULT IS STORED PER DISPATCH, WHATEVER ENTRY POINT MADE IT (evoq#49).
+%% The state-carrying answer is what is cached, and `Project' turns it into the
+%% shape the caller asked for -- `dispatch/2' strips the state, a
+%% `dispatch_with_state/2' caller keeps it. Storing the state answer on both
+%% paths is what makes a retry deduplicate whichever of the two functions the
+%% caller retries through; only storing it on the path that asked for it left
+%% the other one matching nothing, and a retry appended the events again.
+execute_unless_cached(Pipeline, Middleware, StartTime, Command, CacheKey, TTL, Project) ->
+    Run = fun() -> execute_and_finalize_with_state(Pipeline, Middleware, StartTime) end,
+    Result = case evoq_idempotency:lookup(CacheKey) of
         {ok, Cached} ->
             %% Answered from the cache: the dispatch still started, so it also
             %% stops, with the response the caller is given.
@@ -209,7 +224,18 @@ execute_unless_cached(Pipeline, Middleware, StartTime, Command, CacheKey, TTL, E
             Cached;
         not_found ->
             evoq_idempotency:check_and_store(CacheKey, Run, TTL)
-    end.
+    end,
+    Project(Result).
+
+%% @private The answer a `dispatch/2' caller asked for: the state is dropped,
+%% on a miss and on a hit alike, so that function answers one shape.
+project_plain({ok, Version, Events, _State}) -> {ok, Version, Events};
+project_plain(Other) -> Other.
+
+%% @private The answer a `dispatch_with_state/2' caller asked for. Everything
+%% that reaches here already carries the state -- the aggregate path always
+%% asks for it -- so this is the identity.
+project_with_state(Result) -> Result.
 
 %% @private
 %% The answer to a halted pipeline (evoq#41).
@@ -284,52 +310,6 @@ run_before_dispatch(Pipeline, Middleware) ->
     evoq_middleware:chain(Pipeline, before_dispatch, Middleware).
 
 %% @private
-execute_and_finalize(Pipeline, Middleware, StartTime) ->
-    Command = Pipeline#evoq_pipeline.command,
-    Context = Pipeline#evoq_pipeline.context,
-
-    %% Get or start the aggregate with the store_id from context
-    AggregateType = Command#evoq_command.aggregate_type,
-    AggregateId = Command#evoq_command.aggregate_id,
-    StoreId = Context#evoq_execution_context.store_id,
-
-    case evoq_aggregate_registry:get_or_start(AggregateType, AggregateId, StoreId) of
-        {ok, Pid} ->
-            execute_on_aggregate(Pipeline, Pid, Middleware, StartTime, Context);
-        {error, Reason} ->
-            handle_failure(Pipeline, {error, Reason}, Middleware, StartTime)
-    end.
-
-%% @private
-execute_on_aggregate(Pipeline, Pid, Middleware, StartTime, Context) ->
-    Command = Pipeline#evoq_pipeline.command,
-    Waiter = open_waiter(Context),
-
-    try evoq_aggregate:execute_command(Pid, Command) of
-        {ok, Version, Events} = Result ->
-            %% Success - run after_dispatch middleware
-            Pipeline2 = evoq_middleware:assign(events, Events, Pipeline),
-            Pipeline3 = evoq_middleware:assign(version, Version, Pipeline2),
-            Pipeline4 = evoq_middleware:respond(Result, Pipeline3),
-            Pipeline5 = evoq_middleware:chain(Pipeline4, after_dispatch, Middleware),
-
-            %% Handle consistency
-            FinalResult = handle_consistency(keep_response_if_erased(Pipeline5, Result),
-                                             Context, Waiter, Version),
-            emit_stop_telemetry(StartTime, Command, FinalResult),
-            FinalResult;
-
-        {error, wrong_expected_version} = Error ->
-            %% Retry on version conflict
-            maybe_retry(Pipeline, Error, Middleware, StartTime, Context);
-
-        {error, _Reason} = Error ->
-            handle_failure(Pipeline, Error, Middleware, StartTime)
-    after
-        close_waiter(Waiter)
-    end.
-
-%% @private
 maybe_retry(Pipeline, Error, Middleware, StartTime, Context) ->
     case evoq_execution_context:retry(Context) of
         {ok, NewContext} ->
@@ -349,8 +329,12 @@ maybe_retry(Pipeline, Error, Middleware, StartTime, Context) ->
     end.
 
 %% @private
+%% A retry answers in the same shape as the attempt it replaces: the
+%% aggregate is always asked for the state, so a caller that asked for it still
+%% gets it after a version conflict (evoq#49). It used to fall back to the plain
+%% call, which answered a 3-tuple from `dispatch_with_state/2'.
 retry_on_aggregate({ok, Pid}, NewPipeline, _Pipeline, Middleware, StartTime, NewContext) ->
-    execute_on_aggregate(NewPipeline, Pid, Middleware, StartTime, NewContext);
+    execute_on_aggregate_with_state(NewPipeline, Pid, Middleware, StartTime, NewContext);
 retry_on_aggregate({error, Reason}, _NewPipeline, Pipeline, Middleware, StartTime, _NewContext) ->
     handle_failure(Pipeline, {error, Reason}, Middleware, StartTime).
 
@@ -476,7 +460,8 @@ consistency_outcome({error, {dropped, Handler}}, _Response) ->
 emit_stop_telemetry(StartTime, Command, Response) ->
     Duration = evoq_telemetry:duration_since(StartTime),
     EventCount = case Response of
-        {ok, _, Events} -> length(Events);
+        {ok, _, Events} when is_list(Events) -> length(Events);
+        {ok, _, Events, _State} when is_list(Events) -> length(Events);
         _ -> 0
     end,
     telemetry:execute(?TELEMETRY_DISPATCH_STOP, #{
