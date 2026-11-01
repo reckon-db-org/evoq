@@ -34,6 +34,13 @@
 %% If idempotency_key is set, uses it for deduplication cache.
 %% Otherwise, command_id is used (each dispatch is unique).
 %%
+%% ⚠ THE KEY IS SCOPED TO THE DISPATCH (evoq#51). An entry is matched on the
+%% store, the aggregate type, the aggregate id AND the key, so an
+%% `idempotency_key' only has to be unique for one aggregate. It never was
+%% before: the key alone was matched against one flat set, so a key another
+%% aggregate had already used answered this command with that command's
+%% version and events.
+%%
 %% ⚠ THE `before_dispatch' CHAIN RUNS BEFORE THE IDEMPOTENCY CACHE IS CONSULTED
 %% (evoq#46). It used to be the other way round, so a command replayed with a
 %% known `idempotency_key' was answered from the cache without a single
@@ -45,7 +52,7 @@
 dispatch(Command0, Opts) ->
     %% Auto-generate command_id if not provided
     Command = evoq_command:ensure_id(Command0),
-    dispatch_internal(Command, Opts, cache_key(Command), idempotency_ttl()).
+    dispatch_internal(Command, Opts, idempotency_ttl()).
 
 %% @doc Dispatch a command and return the post-event aggregate state.
 %%
@@ -56,13 +63,33 @@ dispatch(Command0, Opts) ->
     {ok, integer(), [map()], term()} | {error, term()}.
 dispatch_with_state(Command0, Opts) ->
     Command = evoq_command:ensure_id(Command0),
-    dispatch_internal_with_state(Command, Opts, cache_key(Command), idempotency_ttl()).
+    dispatch_internal_with_state(Command, Opts, idempotency_ttl()).
 
-%% @private Use idempotency_key for the cache if provided, otherwise command_id.
-cache_key(#evoq_command{idempotency_key = undefined} = Command) ->
-    Command#evoq_command.command_id;
-cache_key(#evoq_command{idempotency_key = Key}) ->
-    Key.
+%% @private The cache key IS the dispatch, not the caller's key (evoq#51).
+%%
+%% It used to be the `idempotency_key' verbatim -- or the `command_id' when
+%% none was given -- matched against one flat set. Nothing about the work was
+%% part of it, so two commands that merely shared a key shared an entry: a
+%% caller that passed the gate with a key another store, another aggregate or
+%% another command type had already used was handed that entry's version and
+%% events, and a client generating short or reused keys silently lost its own
+%% writes.
+%%
+%% Scoping it structurally means a collision now needs the same work as well
+%% as the same binary -- the store, the aggregate type and the aggregate id
+%% are all part of what is matched. An `idempotency_key' therefore only has
+%% to be unique for one aggregate, which is the promise the field makes.
+cache_key(Command, StoreId) ->
+    #evoq_command{
+        aggregate_type = AggregateType,
+        aggregate_id = AggregateId,
+        idempotency_key = IdempotencyKey
+    } = Command,
+    Key = case IdempotencyKey of
+        undefined -> Command#evoq_command.command_id;
+        Given -> Given
+    end,
+    {StoreId, AggregateType, AggregateId, Key}.
 
 %% @private
 idempotency_ttl() ->
@@ -73,11 +100,12 @@ idempotency_ttl() ->
 %%====================================================================
 
 %% @private
-dispatch_internal(Command, Opts, CacheKey, TTL) ->
+dispatch_internal(Command, Opts, TTL) ->
     StartTime = evoq_telemetry:monotonic_start(),
 
     %% Create execution context
     Context = evoq_execution_context:new(Command, Opts),
+    CacheKey = cache_key(Command, Context#evoq_execution_context.store_id),
 
     %% Create pipeline
     Pipeline = #evoq_pipeline{
@@ -115,9 +143,10 @@ dispatch_internal(Command, Opts, CacheKey, TTL) ->
     end.
 
 %% @private
-dispatch_internal_with_state(Command, Opts, CacheKey, TTL) ->
+dispatch_internal_with_state(Command, Opts, TTL) ->
     StartTime = evoq_telemetry:monotonic_start(),
     Context = evoq_execution_context:new(Command, Opts),
+    CacheKey = cache_key(Command, Context#evoq_execution_context.store_id),
     Pipeline = #evoq_pipeline{
         command = Command,
         context = Context,

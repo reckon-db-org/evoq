@@ -79,14 +79,31 @@ a_cross_path_replay_is_refused_by_the_gate() ->
 a_refusal_does_not_write_a_cache_entry() ->
     Key = <<"replay-gate-refusal">>,
     ?assertEqual({error, denied}, dispatch(Key, [?DENY_ALL])),
-    ?assertEqual(not_found, evoq_idempotency:lookup(Key)).
+    ?assertEqual(not_found, evoq_idempotency:lookup(cache_key(Key))),
+    %% The control: the same lookup DOES find an entry once a dispatch
+    %% succeeds, so the assertion above is not passing on a key the router
+    %% never writes under (evoq#51 scoped it).
+    ?assertMatch({ok, ?STREAM_VERSION, [_]}, dispatch(Key, [])),
+    ?assertMatch({ok, _}, evoq_idempotency:lookup(cache_key(Key))).
 
 a_refusal_does_not_change_an_existing_cache_entry() ->
     Key = <<"replay-gate-unchanged">>,
     ?assertMatch({ok, ?STREAM_VERSION, [_]}, dispatch(Key, [])),
-    Stored = evoq_idempotency:lookup(Key),
+    ?assertMatch({ok, _}, evoq_idempotency:lookup(cache_key(Key))),
+    Stored = evoq_idempotency:lookup(cache_key(Key)),
     ?assertEqual({error, denied}, dispatch(Key, [?DENY_ALL])),
-    ?assertEqual(Stored, evoq_idempotency:lookup(Key)).
+    ?assertEqual(Stored, evoq_idempotency:lookup(cache_key(Key))).
+
+%%====================================================================
+%% Helpers
+%%====================================================================
+
+%% The key the router caches under (evoq#51): the whole dispatch, not the
+%% bare idempotency key. Written out here rather than exported from the
+%% router, so a change to its shape fails these tests instead of quietly
+%% turning them into assertions about an entry nothing writes.
+cache_key(Key) ->
+    {test_store, evoq_strong_probe_aggregate, <<"replay-gate-stream">>, Key}.
 
 %%====================================================================
 %% Helpers

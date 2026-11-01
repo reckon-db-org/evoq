@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security: an idempotency entry belongs to a dispatch, not to a bare key (evoq#51)
+
+The cache was keyed by the caller's `idempotency_key` — or the `command_id` when
+none was given — and by nothing else. One flat set, one binary. So two commands
+that merely shared a key shared an entry: a caller who passed the
+`before_dispatch` gate with a key another store, another aggregate type or
+another aggregate had already used was handed that entry's version and events,
+and a client that generated short or reused keys silently lost its own writes.
+
+The key is now the dispatch: store, aggregate type, aggregate id and the key.
+A collision needs the same work as well as the same binary, which means an
+`idempotency_key` only has to be unique for one aggregate — the promise the
+field makes.
+
+⚠ Two things a caller can see. `evoq_idempotency` matches whatever term it is
+given, so `lookup/1`, `store/3` and `delete/1` take a key of any shape and the
+binary they used to take still works on its own; but a caller that talks to
+that store directly, rather than through the router, is now matching entries
+the router writes under a tuple. And the `idempotency_hit` / `idempotency_miss`
+telemetry metadata field `command_id` is renamed `cache_key`, because the value
+is the scoped key and no longer a command id.
+
 ## [1.30.5] - 2026-11-01
 
 ### Security: the `before_dispatch` chain runs before the idempotency cache (evoq#46)
