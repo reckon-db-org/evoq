@@ -192,11 +192,16 @@ post-event state to carry, and the response is returned exactly as the
 middleware gave it:
 
 ```erlang
-case evoq_command_router:dispatch_with_state(Command, Opts) of
-    {ok, Version, Events, State} -> {Version, Events, State};
-    {ok, Version, Events}        -> {Version, Events, no_state_ran};
-    {error, _} = Error           -> Error
-end
+%% A middleware that answered, and a command that ran, are both ordinary answers.
+answer(Result) ->
+    case Result of
+        {ok, Version, Events, State} ->
+            {Version, Events, State};
+        {ok, Version, Events} ->
+            {Version, Events, no_state_ran};
+        {error, Reason} = Error ->
+            {failed, Reason, Error}
+    end.
 ```
 
 That third clause is not an evoq failure mode to work around: it is the
@@ -204,6 +209,12 @@ middleware's answer, and it is in the spec so a dialyzed caller has to say what
 it does with it. Padding the state with `undefined` was the alternative and is
 worse — a caller cannot tell it from an aggregate whose state really is
 `undefined`.
+
+A response that is NOT one of those shapes is refused rather than passed through:
+`evoq_middleware:respond/2` takes any term, and a middleware answering `ok` or
+`{rejected, Why}` would otherwise reach you from a function whose spec says it
+cannot. You get `{error, {invalid_middleware_response, Response}}` — a named
+refusal, the same fail-closed line as a halt that says nothing.
 
 The name is **session consistency**: within one session - one request, one
 user, one process manager step - the caller sees its own write immediately,

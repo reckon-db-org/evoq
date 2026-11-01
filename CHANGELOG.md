@@ -21,6 +21,19 @@ caller cannot tell a padded `undefined` from an aggregate whose state really is
 make. The guides say what a caller does with the third clause, and the spec is
 what a dialyzed caller is held to.
 
+A spec is only worth widening if it is then true, so the router also refuses a
+response that is outside the shapes it describes. `evoq_middleware:respond/2`
+takes any term, and a middleware answering `ok`, `{ok, Version}` or
+`{rejected, Why}` — from a halt, or from an `after_dispatch` or `after_failure`
+that responds without halting — used to reach the caller untouched from a
+function whose spec said it could not. It now answers
+`{error, {invalid_middleware_response, Response}}`.
+
+⚠ That is the same fail-closed line as the halt that said nothing (evoq#41): the
+router refuses and names what it refused. A caller that matches `{error, _}`
+sees it; a caller that matches only `{ok, _, _}` still crashes, but on an error
+its spec does describe rather than on an answer it does not.
+
 ## [1.30.6] - 2026-11-01
 
 ### Fixed: a `dispatch_with_state/2` result is cached, so its own retries do not append twice (evoq#49)

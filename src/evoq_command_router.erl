@@ -49,6 +49,12 @@
 %% but not part of what this function returns: it answers `{ok, Version,
 %% Events}' on a miss and on a hit alike.
 %%
+%% ⚠ A MIDDLEWARE-SUPPLIED RESPONSE OUTSIDE THOSE SHAPES IS REFUSED (evoq#47).
+%% `evoq_middleware:respond/2' takes any term, so a halt, or an after-stage,
+%% could answer `ok' or `{rejected, Why}' and hand this function a value its own
+%% spec said it could not return. It answers `{error, {invalid_middleware_response,
+%% Response}}' instead -- refused with a name, never passed through.
+%%
 %% ⚠ THE `before_dispatch' CHAIN RUNS BEFORE THE IDEMPOTENCY CACHE IS CONSULTED
 %% (evoq#46). It used to be the other way round, so a command replayed with a
 %% known `idempotency_key' was answered from the cache without a single
@@ -81,6 +87,10 @@ dispatch(Command0, Opts) ->
 %% is returned exactly as the middleware gave it, and it is in the spec for that
 %% reason. It is not padded with an `undefined' state, which a caller could
 %% mistake for the aggregate's own.
+%%
+%% A middleware response outside these shapes — `ok', `{ok, Version}',
+%% `{rejected, Why}' — is refused with `{error, {invalid_middleware_response,
+%% Response}}', the same rule `dispatch/2' applies.
 -spec dispatch_with_state(#evoq_command{}, map()) ->
     {ok, integer(), [map()], term()} | {ok, integer(), [map()]} | {error, term()}.
 dispatch_with_state(Command0, Opts) ->
@@ -163,7 +173,7 @@ dispatch_internal(Command, Opts, TTL) ->
     %% Check if pipeline was halted
     case evoq_middleware:halted(Pipeline2) of
         true ->
-            halted_response(Pipeline2, StartTime, Command);
+            halted_response(Pipeline2, StartTime, Command, fun project_plain/1);
         false ->
             %% Execute the command, unless this exact dispatch was already answered
             execute_unless_cached(Pipeline2, Middleware, StartTime, Command, CacheKey, TTL,
@@ -198,7 +208,7 @@ dispatch_internal_with_state(Command, Opts, TTL) ->
 
     case evoq_middleware:halted(Pipeline2) of
         true ->
-            halted_response(Pipeline2, StartTime, Command);
+            halted_response(Pipeline2, StartTime, Command, fun project_with_state/1);
         false ->
             execute_unless_cached(Pipeline2, Middleware, StartTime, Command, CacheKey, TTL,
                                   fun project_with_state/1)
@@ -224,26 +234,60 @@ dispatch_internal_with_state(Command, Opts, TTL) ->
 %% the other one matching nothing, and a retry appended the events again.
 execute_unless_cached(Pipeline, Middleware, StartTime, Command, CacheKey, TTL, Project) ->
     Run = fun() -> execute_and_finalize_with_state(Pipeline, Middleware, StartTime) end,
-    Result = case evoq_idempotency:lookup(CacheKey) of
+    case evoq_idempotency:lookup(CacheKey) of
         {ok, Cached} ->
             %% Answered from the cache: the dispatch still started, so it also
-            %% stops, with the response the caller is given.
-            emit_stop_telemetry(StartTime, Command, Cached),
-            Cached;
+            %% stops, with the response the caller is given -- the projected
+            %% one, not the stored one.
+            Answered = Project(Cached),
+            emit_stop_telemetry(StartTime, Command, Answered),
+            Answered;
         not_found ->
-            evoq_idempotency:check_and_store(CacheKey, Run, TTL)
-    end,
-    Project(Result).
+            Project(evoq_idempotency:check_and_store(CacheKey, Run, TTL))
+    end.
 
 %% @private The answer a `dispatch/2' caller asked for: the state is dropped,
 %% on a miss and on a hit alike, so that function answers one shape.
-project_plain({ok, Version, Events, _State}) -> {ok, Version, Events};
-project_plain(Other) -> Other.
+project_plain(Result) ->
+    project_response(Result, fun strip_state/1).
 
 %% @private The answer a `dispatch_with_state/2' caller asked for. Everything
 %% that reaches here already carries the state -- the aggregate path always
-%% asks for it -- so this is the identity.
-project_with_state(Result) -> Result.
+%% asks for it -- so the shape is kept as it is.
+project_with_state(Result) ->
+    project_response(Result, fun(Answered) -> Answered end).
+
+%% @private
+%% ⚠ A RESPONSE A MIDDLEWARE SUPPLIED MUST BE ONE THE SPEC DESCRIBES (evoq#47).
+%% `evoq_middleware:respond/2' takes any term, so a `before_dispatch' that halts
+%% and answers, and an `after_dispatch' or `after_failure' that answers without
+%% halting, put that term where the caller reads its result. A middleware
+%% answering `ok', `{ok, Version}' or `{rejected, Why}' therefore reached a
+%% caller from a function whose spec said it could not.
+%%
+%% The rule is the one #41 set for a halt that says nothing: refused with a name,
+%% never passed through. Both entry points admit the same shapes after this --
+%% a plain caller is handed a state-carrying success with the state stripped --
+%% so one check covers the two.
+project_response(Result, Shape) ->
+    case is_router_response(Result) of
+        true -> Shape(Result);
+        false -> {error, {invalid_middleware_response, Result}}
+    end.
+
+%% @private
+is_router_response({ok, Version, Events}) ->
+    is_integer(Version) andalso is_list(Events);
+is_router_response({ok, Version, Events, _State}) ->
+    is_integer(Version) andalso is_list(Events);
+is_router_response({error, _}) ->
+    true;
+is_router_response(_Other) ->
+    false.
+
+%% @private
+strip_state({ok, Version, Events, _State}) -> {ok, Version, Events};
+strip_state(Other) -> Other.
 
 %% @private
 %% The answer to a halted pipeline (evoq#41).
@@ -256,15 +300,18 @@ project_with_state(Result) -> Result.
 %% "not an error" and accepted a command that never ran.
 %%
 %% A halt that said nothing is therefore a refusal with a name, never
-%% `undefined'. A halt that DID respond is returned exactly as the middleware
-%% gave it: that is the middleware's decision to make, not the router's.
-halted_response(Pipeline, StartTime, Command) ->
+%% `undefined'. A halt that DID respond keeps its decision about WHETHER to
+%% answer and about the answer's shape (evoq#47): a response inside the shapes
+%% is returned as given, and one outside them is refused with a name rather than
+%% handed to a caller whose spec cannot match it.
+halted_response(Pipeline, StartTime, Command, Project) ->
     Response = case evoq_middleware:get_response(Pipeline) of
         undefined -> {error, halted_without_response};
         Given -> Given
     end,
-    emit_stop_telemetry(StartTime, Command, Response),
-    Response.
+    Answered = Project(Response),
+    emit_stop_telemetry(StartTime, Command, Answered),
+    Answered.
 
 %% @private
 execute_and_finalize_with_state(Pipeline, Middleware, StartTime) ->
