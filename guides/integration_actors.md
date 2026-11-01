@@ -184,6 +184,27 @@ evoq's `dispatch/2` returns the events the command produced and
     evoq_command_router:dispatch_with_state(Command, Opts).
 ```
 
+⚠ **A 3-tuple from `dispatch_with_state/2` means a middleware answered and
+nothing ran.** A `before_dispatch` middleware may halt the pipeline and respond
+`{ok, Version, Events}` — a cache hit of its own, a replay, a policy that says
+"yes, already done". The command never reaches an aggregate, so there is no
+post-event state to carry, and the response is returned exactly as the
+middleware gave it:
+
+```erlang
+case evoq_command_router:dispatch_with_state(Command, Opts) of
+    {ok, Version, Events, State} -> {Version, Events, State};
+    {ok, Version, Events}        -> {Version, Events, no_state_ran};
+    {error, _} = Error           -> Error
+end
+```
+
+That third clause is not an evoq failure mode to work around: it is the
+middleware's answer, and it is in the spec so a dialyzed caller has to say what
+it does with it. Padding the state with `undefined` was the alternative and is
+worse — a caller cannot tell it from an aggregate whose state really is
+`undefined`.
+
 The name is **session consistency**: within one session - one request, one
 user, one process manager step - the caller sees its own write immediately,
 without waiting for a projection to catch up. It is not strong consistency

@@ -22,13 +22,15 @@
 
 -define(HALT_ONLY, evoq_middleware_halt_only).
 -define(DENY_ALL, evoq_middleware_deny_all).
+-define(HALT_SUCCESS, evoq_middleware_halt_success).
 
 halt_without_response_test_() ->
     {setup, fun start/0, fun stop/1, [
         fun a_halt_without_a_response_is_an_error/0,
         fun a_halt_without_a_response_is_an_error_with_state/0,
         fun a_halt_that_responded_keeps_its_response/0,
-        fun a_halt_that_responded_keeps_its_response_with_state/0
+        fun a_halt_that_responded_keeps_its_response_with_state/0,
+        fun a_success_from_a_halt_is_answered_as_given_with_state/0
     ]}.
 
 %% The idempotency store is application-wide and another test module may already
@@ -72,6 +74,15 @@ a_halt_that_responded_keeps_its_response() ->
 a_halt_that_responded_keeps_its_response_with_state() ->
     Result = evoq_command_router:dispatch_with_state(command(), #{middleware => [?DENY_ALL]}),
     ?assertEqual({error, denied}, Result).
+
+%% A halt that answers SUCCESS is answered as the middleware gave it, even from
+%% a function whose ordinary answer carries the aggregate state (evoq#47). No
+%% aggregate ran, so there is no state to carry; inventing an `undefined' one
+%% would hand the caller a value it could mistake for the aggregate's.
+a_success_from_a_halt_is_answered_as_given_with_state() ->
+    Result = evoq_command_router:dispatch_with_state(command(),
+                                                    #{middleware => [?HALT_SUCCESS]}),
+    ?assertEqual({ok, 0, []}, Result).
 
 %%====================================================================
 

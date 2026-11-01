@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed: the `dispatch_with_state/2` spec admits the answer a middleware can give (evoq#47)
+
+A `before_dispatch` middleware may halt the pipeline and respond
+`{ok, Version, Events}` — a cache of its own, a replay, a policy that says "yes,
+already done". The command then never reaches an aggregate, so there is no
+post-event state, and the router returns the middleware's 3-tuple as given. The
+spec said it could not happen.
+
+The type is widened rather than the answer padded with an `undefined` state: a
+caller cannot tell a padded `undefined` from an aggregate whose state really is
+`undefined`, and since evoq#41 a stated response is the middleware's decision to
+make. The guides say what a caller does with the third clause, and the spec is
+what a dialyzed caller is held to.
+
 ## [1.30.6] - 2026-11-01
 
 ### Fixed: a `dispatch_with_state/2` result is cached, so its own retries do not append twice (evoq#49)

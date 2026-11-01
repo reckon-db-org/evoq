@@ -73,8 +73,16 @@ dispatch(Command0, Opts) ->
 %% the state it asked for, whichever of the two functions made the entry. The
 %% state is stored with every successful dispatch, so a caller that switches
 %% between the two entry points is still retrying one command.
+%%
+%% ⚠ A 3-TUPLE MEANS A MIDDLEWARE ANSWERED AND NOTHING RAN (evoq#47). A
+%% `before_dispatch' halt that responds `{ok, Version, Events}' -- a cache, a
+%% replay, a policy that says "yes, already done" -- stops the command before it
+%% reaches an aggregate, so there is no post-event state to return. That response
+%% is returned exactly as the middleware gave it, and it is in the spec for that
+%% reason. It is not padded with an `undefined' state, which a caller could
+%% mistake for the aggregate's own.
 -spec dispatch_with_state(#evoq_command{}, map()) ->
-    {ok, integer(), [map()], term()} | {error, term()}.
+    {ok, integer(), [map()], term()} | {ok, integer(), [map()]} | {error, term()}.
 dispatch_with_state(Command0, Opts) ->
     Command = evoq_command:ensure_id(Command0),
     dispatch_internal_with_state(Command, Opts, idempotency_ttl()).
