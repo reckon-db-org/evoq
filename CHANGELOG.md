@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.30.6] - 2026-11-01
+
 ### Fixed: a `dispatch_with_state/2` result is cached, so its own retries do not append twice (evoq#49)
 
 `evoq_idempotency` stored only the shapes it recognised, and the state-carrying
