@@ -22,6 +22,10 @@ about the caller, and only then is the cache consulted. A refusal refuses the
 replay too, and a replay that passes is answered from the cache as before (with
 the dispatch's stop telemetry recorded for it, which a cache hit used to skip).
 
+⚠ A refused replay no longer reaches the cache, so `idempotency_hit` telemetry is
+not emitted for it: a dashboard counting idempotency hits will show fewer of them
+after this release, and that drop is dispatches the chain now refuses.
+
 ## [1.30.4] - 2026-11-01
 
 ### Security: an after-stage halt cannot erase a result the command produced (evoq#45)

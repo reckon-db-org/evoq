@@ -5,9 +5,10 @@
 %%
 %% == Dispatch Flow ==
 %%
-%% 1. Check idempotency cache
-%% 2. Create execution context
-%% 3. Run before_dispatch middleware
+%% 1. Create execution context
+%% 2. Run before_dispatch middleware (a halt answers here and touches no cache)
+%% 3. Check the idempotency cache -- AFTER the gate, so a replay is still
+%%    subject to it (evoq#46); a hit answers from the cache and executes nothing
 %% 4. Get or start aggregate
 %% 5. Execute command on aggregate
 %% 6. Run after_dispatch or after_failure middleware
