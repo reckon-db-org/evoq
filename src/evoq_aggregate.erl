@@ -134,6 +134,14 @@ down(Reason) -> Reason.
 %% out. Neither was reachable while the load ran inside init/1, before the pid
 %% existed. `called/2' bounds neither wait but turns both into the value this
 %% call always claimed to return.
+%%
+%% ⚠ A PASSIVATED AGGREGATE IS THE CALLER'S TO LOOK UP AGAIN (evoq#57). This
+%% function takes a pid, so it cannot: a pid whose process has gone answers
+%% `{error, not_running}', and evoq owns no read that pairs a lookup with this
+%% call to retry inside. A caller that took the pid from
+%% `evoq_aggregate_registry:get_or_start/3' gets a new one by calling it again,
+%% which starts a fresh aggregate for the stream. The command path does not
+%% need this: the router retries a passivated aggregate itself.
 -spec get_state(pid()) -> {ok, term()} | {error, term()}.
 get_state(Pid) ->
     called(Pid, get_state).
