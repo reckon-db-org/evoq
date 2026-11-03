@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.30.8] - 2026-11-03
+
 ### Fixed: a passivated aggregate is retried, not reported to the caller (evoq#57)
 
 `execute_on_aggregate_with_state/5` takes a pid from
