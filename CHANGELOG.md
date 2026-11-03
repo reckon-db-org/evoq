@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed: a passivated aggregate is retried, not reported to the caller (evoq#57)
+
+`execute_on_aggregate_with_state/5` takes a pid from
+`evoq_aggregate_registry:get_or_start/3` and then calls it. The lookup only says
+the process was alive a moment earlier: an aggregate whose lifespan fires in
+that window stops with reason `normal`, `evoq_aggregate:called/2` turns the exit
+into `{error, not_running}`, and the router reported it as a failure. The
+command never reached `handle_call`, so nothing was appended and nothing in the
+domain said no — a timing race, answered as though the domain had refused.
+
+`{error, not_running}` now takes the `maybe_retry/5` path
+`{error, wrong_expected_version}` already takes: the registry is asked again,
+it starts a fresh aggregate for the stream, and the command is executed there.
+The retry is bounded by `retry_attempts`, keeps the same `command_id`, and only
+a successful result is cached, so it cannot append the events twice.
+
+⚠ A consumer no longer needs a retry of its own around `dispatch/2` or
+`dispatch_with_state/2` for this race, and can remove one once it pins this
+release.
+
+`shutdown` and `{hydration_failed, _}` are NOT the race and stay failures. A
+read through `evoq_aggregate:get_state/1` is unchanged: it takes a pid, so a
+caller that gets `{error, not_running}` looks the aggregate up again itself —
+evoq owns no read that pairs the lookup with the call.
+
 ## [1.30.7] - 2026-11-01
 
 ### Security: the configured middleware chain is resolved at boot (evoq#42)

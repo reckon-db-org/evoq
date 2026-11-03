@@ -10,7 +10,8 @@
 %% 3. Check the idempotency cache -- AFTER the gate, so a replay is still
 %%    subject to it (evoq#46); a hit answers from the cache and executes nothing
 %% 4. Get or start aggregate
-%% 5. Execute command on aggregate
+%% 5. Execute command on aggregate -- a version conflict and an aggregate that
+%%    passivated under the dispatch are both retried, a failure is reported
 %% 6. Run after_dispatch or after_failure middleware
 %% 7. Handle consistency (wait for handlers if strong)
 %% 8. Cache result for idempotency
@@ -329,6 +330,30 @@ execute_and_finalize_with_state(Pipeline, Middleware, StartTime) ->
     end.
 
 %% @private
+%% ⚠ A PASSIVATED AGGREGATE IS A RACE, NOT AN ANSWER FROM THE DOMAIN (evoq#57).
+%%
+%% `get_or_start/3' answers a pid that was alive when it was looked up. An
+%% aggregate whose lifespan fires between that lookup and the call stops with
+%% reason `normal', and `evoq_aggregate:called/2' turns the exit into
+%% `{error, not_running}'. The command never reached `handle_call', so nothing
+%% was appended -- the same class of accident as a version conflict, and it
+%% takes the same retry. The retry re-asks the registry, which starts a fresh
+%% aggregate for the stream, and the command is executed there. It is bounded
+%% by `retry_attempts', keeps the same `command_id', and only a successful
+%% result is cached, so a retry cannot append the events twice.
+%%
+%% `shutdown' and `{hydration_failed, _}' are NOT this and stay failures: the
+%% first is an aggregate taken down deliberately, the second a stream that
+%% cannot be read at all. Retrying either would start fresh aggregates against
+%% a cause that has not changed, and end by answering `not_running' instead of
+%% the reason the caller needs. A caller that arrives after a failed load is
+%% answered `not_running' by `gen_server:call' to a dead pid -- one retry
+%% meets the store again and reports the failure it finds.
+%%
+%% A domain that answers `{error, not_running}' from `execute/2' cannot be told
+%% from the race here, exactly as one answering `wrong_expected_version' could
+%% not: both atoms belong to evoq, and a command that keeps failing this way is
+%% answered the error once the attempts run out, having appended nothing.
 execute_on_aggregate_with_state(Pipeline, Pid, Middleware, StartTime, Context) ->
     Command = Pipeline#evoq_pipeline.command,
     Waiter = open_waiter(Context),
@@ -348,6 +373,10 @@ execute_on_aggregate_with_state(Pipeline, Pid, Middleware, StartTime, Context) -
             FinalResult;
 
         {error, wrong_expected_version} = Error ->
+            maybe_retry(Pipeline, Error, Middleware, StartTime, Context);
+
+        %% A PASSIVATED AGGREGATE IS A RACE, NOT AN ANSWER (evoq#57).
+        {error, not_running} = Error ->
             maybe_retry(Pipeline, Error, Middleware, StartTime, Context);
 
         {error, _Reason} = Error ->
